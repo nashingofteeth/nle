@@ -496,7 +496,7 @@ fn cmd_trim(
 ) -> Result<()> {
     let start = parse_time(in_point).with_context(|| format!("invalid --in time: {in_point:?}"))?;
     let end = parse_time(out_point).with_context(|| format!("invalid --out time: {out_point:?}"))?;
-    let duration = end.clone() - start.clone();
+    let duration = end - start;
     if duration <= Seconds::from_integer(0) {
         bail!("--out ({out_point}) must be later than --in ({in_point})");
     }

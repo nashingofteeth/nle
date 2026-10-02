@@ -134,7 +134,7 @@ pub fn build_args(spec: &TrimSpec) -> Result<Vec<String>, TrimError> {
             end: format_seconds(&spec.end),
         });
     }
-    let duration = spec.end.clone() - spec.start.clone();
+    let duration = spec.end - spec.start;
 
     let mut a: Vec<String> = Vec::new();
     a.push("-y".to_string()); // overwrite output without asking

@@ -80,6 +80,12 @@ pub struct Project {
     pub timeline: Timeline,
 }
 
+impl Default for Project {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Project {
     pub fn new() -> Self {
         Self {

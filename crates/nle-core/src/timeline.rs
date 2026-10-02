@@ -45,12 +45,12 @@ pub struct Clip {
 impl Clip {
     /// Clip length in exact seconds.
     pub fn duration(&self) -> Seconds {
-        self.asset_out.clone() - self.asset_in.clone()
+        self.asset_out - self.asset_in
     }
 
     /// Where the clip ends on the timeline.
     pub fn end(&self) -> Seconds {
-        self.start.clone() + self.duration()
+        self.start + self.duration()
     }
 }
 

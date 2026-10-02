@@ -94,17 +94,17 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
         .video_track()
         .ok_or(CompileError::NoVideoTrack)?;
     let mut clips: Vec<&Clip> = track.clips.iter().collect();
-    clips.sort_by(|a, b| a.start.cmp(&b.start));
+    clips.sort_by_key(|a| a.start);
     if clips.is_empty() {
         return Err(CompileError::Empty);
     }
-    let fps = project.fps.clone().ok_or(CompileError::NoFps)?;
+    let fps = project.fps.ok_or(CompileError::NoFps)?;
     let settings = project.video.as_ref().ok_or(CompileError::NoSize)?;
     let (w, h) = (settings.width, settings.height);
 
     // Timeline position → frame index on the output grid.
     // round() returns a Ratio; to_integer() is the i64 extraction.
-    let frame = |t: &Seconds| -> i64 { (t.clone() * fps.clone()).round().to_integer() };
+    let frame = |t: &Seconds| -> i64 { (*t * fps).round().to_integer() };
 
     let mut segments: Vec<Segment> = Vec::new();
     let mut input_of: HashMap<u32, usize> = HashMap::new();
@@ -121,10 +121,9 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
             return Err(CompileError::Overlap(format_seconds(&clip.start)));
         }
         if start_f > cursor {
-            // gap → black + silence
-            let gap = Seconds::new(start_f - cursor, 1) / fps.clone();
+            // gap → black + silence (cursor jumps ahead below, past the gap)
+            let gap = Seconds::new(start_f - cursor, 1) / fps;
             segments.push(Segment::Gap { dur: format_seconds(&gap) });
-            cursor = start_f;
         }
 
         let in_f = frame(&clip.asset_in);
@@ -140,8 +139,8 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
             inputs.len() - 1
         });
 
-        let src_start = Seconds::new(in_f, 1) / fps.clone();
-        let dur = Seconds::new(out_f - in_f, 1) / fps.clone();
+        let src_start = Seconds::new(in_f, 1) / fps;
+        let dur = Seconds::new(out_f - in_f, 1) / fps;
         segments.push(Segment::Clip {
             input,
             src_start: format_seconds(&src_start),
@@ -203,7 +202,7 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
         height: h,
         fps,
         frames: cursor,
-        duration: Seconds::new(cursor, 1) / fps.clone(),
+        duration: Seconds::new(cursor, 1) / fps,
     })
 }
 
