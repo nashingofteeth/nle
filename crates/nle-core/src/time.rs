@@ -101,6 +101,46 @@ pub fn parse_rate(s: &str) -> Option<Seconds> {
     Some(Seconds::new(n, d))
 }
 
+/// Serde glue: Seconds ↔ "numerator/denominator" strings ("25/2").
+/// The project file stays human-readable AND exact — no floats anywhere.
+pub mod rational_ser {
+    use serde::{de, Deserialize, Deserializer, Serializer};
+
+    use super::{parse_rate, Seconds};
+
+    pub fn serialize<S: Serializer>(v: &Seconds, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(&format_args!("{}/{}", v.numer(), v.denom()))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Seconds, D::Error> {
+        let s = String::deserialize(d)?;
+        parse_rate(&s).ok_or_else(|| de::Error::custom(format!("invalid rational time {s:?}")))
+    }
+
+    /// Option<Seconds> variant for fields that may be absent.
+    pub mod opt {
+        use serde::{de, Deserialize, Deserializer, Serializer};
+
+        use super::{parse_rate, Seconds};
+
+        pub fn serialize<S: Serializer>(v: &Option<Seconds>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(t) => super::serialize(t, s),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Seconds>, D::Error> {
+            match Option::<String>::deserialize(d)? {
+                None => Ok(None),
+                Some(t) => parse_rate(&t)
+                    .map(Some)
+                    .ok_or_else(|| de::Error::custom(format!("invalid rational time {t:?}"))),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

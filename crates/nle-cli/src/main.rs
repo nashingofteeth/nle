@@ -1,24 +1,82 @@
 //! nle — terminal-native video editor.
 //!
-//! M0 status: `probe` and `trim` — the ffmpeg plumbing. The editor itself
-//! (EDL model, TUI, mpv monitor) arrives in M1/M2.
+//! M1 status: project file (EDL), media pool, timeline, single-track
+//! export via the filter-graph compiler. TUI + mpv monitor arrive in M2.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use nle_core::{parse_rate, parse_time, Seconds};
-use nle_ffmpeg::{probe, Encoder, RawProbe, RawStream, TrimSpec};
+use nle_core::{format_seconds, parse_rate, parse_time, Asset, Project, Seconds};
+use nle_ffmpeg::{probe, Encoder, ExportSpec, RawProbe, RawStream, TrimSpec};
 
 #[derive(Parser)]
 #[command(name = "nle", version, about = "Terminal-native video editor")]
 struct Cli {
+    /// Project file
+    #[arg(short, long, global = true, default_value = "nle.json", value_name = "FILE")]
+    project: PathBuf,
+
     #[command(subcommand)]
     command: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Create an empty project
+    Init {
+        /// Overwrite an existing project file
+        #[arg(long)]
+        force: bool,
+    },
+    /// Probe files and add them to the media pool
+    Import {
+        /// Media files to import
+        files: Vec<PathBuf>,
+    },
+    /// Place a clip on the video track
+    Add {
+        /// Media file (auto-imported if new)
+        file: PathBuf,
+        /// Timeline position (default: end of track)
+        #[arg(long, value_name = "TIME")]
+        at: Option<String>,
+        /// Source in-point (default: 0)
+        #[arg(long = "in", value_name = "TIME")]
+        in_point: Option<String>,
+        /// Source out-point (default: end of file)
+        #[arg(long = "out", value_name = "TIME")]
+        out_point: Option<String>,
+    },
+    /// Remove a clip by id (see `nle show`)
+    Remove {
+        /// Clip id
+        id: u32,
+    },
+    /// Show the timeline
+    Show {
+        /// Print the raw project JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Render the timeline to a file
+    Export {
+        /// Output file
+        #[arg(short, long, value_name = "FILE")]
+        output: PathBuf,
+        /// Encode engine: cpu, vaapi, qsv
+        #[arg(long, value_enum, default_value = "cpu")]
+        encoder: EncoderArg,
+        /// x264 quality, 0-51, lower = better [cpu only]
+        #[arg(long, default_value_t = 18)]
+        crf: u8,
+        /// x264 preset: ultrafast..veryslow [cpu only]
+        #[arg(long, default_value = "fast")]
+        preset: String,
+        /// Target bitrate for hardware encoders [vaapi/qsv]
+        #[arg(long, default_value = "8M")]
+        bitrate: String,
+    },
     /// Show what's inside a media file (streams, codecs, rates)
     Probe {
         /// Media file to inspect
@@ -81,6 +139,16 @@ impl From<EncoderArg> for Encoder {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Cmd::Init { force } => cmd_init(&cli.project, force),
+        Cmd::Import { files } => cmd_import(&cli.project, &files),
+        Cmd::Add { file, at, in_point, out_point } => {
+            cmd_add(&cli.project, &file, at.as_deref(), in_point.as_deref(), out_point.as_deref())
+        }
+        Cmd::Remove { id } => cmd_remove(&cli.project, id),
+        Cmd::Show { json } => cmd_show(&cli.project, json),
+        Cmd::Export { output, encoder, crf, preset, bitrate } => {
+            cmd_export(&cli.project, &output, encoder.into(), crf, &preset, &bitrate)
+        }
         Cmd::Probe { file, json } => cmd_probe(&file, json),
         Cmd::Trim {
             input,
@@ -106,7 +174,210 @@ fn main() -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------- probe
+// ------------------------------------------------------------ project cmds
+
+fn cmd_init(path: &Path, force: bool) -> Result<()> {
+    if path.exists() && !force {
+        bail!("{} already exists (use --force to overwrite)", path.display());
+    }
+    Project::new().save(path)?;
+    println!("✓ created {}", path.display());
+    Ok(())
+}
+
+fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    for file in files {
+        let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
+        let canonical = file
+            .canonicalize()
+            .with_context(|| format!("resolving {}", file.display()))?;
+        if let Some(a) = project.asset_by_path(&canonical) {
+            println!("· {} already imported (asset #{})", file.display(), a.id);
+            continue;
+        }
+        let (id, _) = project.add_asset(canonical, report);
+        let asset = project.asset(id).context("asset vanished")?;
+        println!("✓ asset #{id}  {}  {}", file.display(), asset_summary(asset));
+    }
+    project.save(project_path)?;
+    println!(
+        "· {} — {} assets, {} clip(s)",
+        project_path.display(),
+        project.media.len(),
+        project.timeline.video_track().map(|t| t.clips.len()).unwrap_or(0)
+    );
+    Ok(())
+}
+
+fn cmd_add(
+    project_path: &Path,
+    file: &Path,
+    at: Option<&str>,
+    in_point: Option<&str>,
+    out_point: Option<&str>,
+) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    let canonical = file
+        .canonicalize()
+        .with_context(|| format!("{} not found", file.display()))?;
+
+    let asset_id = match project.asset_by_path(&canonical) {
+        Some(a) => a.id,
+        None => {
+            let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
+            let (id, _) = project.add_asset(canonical, report);
+            println!("· auto-imported as asset #{id}");
+            id
+        }
+    };
+
+    let in_t = match in_point {
+        Some(s) => parse_time(s).with_context(|| format!("invalid --in time: {s:?}"))?,
+        None => Seconds::from_integer(0),
+    };
+    let out_t = match out_point {
+        Some(s) => parse_time(s).with_context(|| format!("invalid --out time: {s:?}"))?,
+        None => project
+            .asset(asset_id)
+            .and_then(|a| a.duration())
+            .ok_or_else(|| anyhow::anyhow!("asset has unknown duration — pass --out"))?,
+    };
+    let at_t = match at {
+        Some(s) => Some(parse_time(s).with_context(|| format!("invalid --at time: {s:?}"))?),
+        None => None,
+    };
+
+    let clip_id = project.add_clip(asset_id, at_t, in_t, out_t)?;
+    project.save(project_path)?;
+
+    let track = project.timeline.video_track().context("no video track")?;
+    let clip = track
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .context("clip vanished after insert")?;
+    println!(
+        "✓ clip #{clip_id}  {}  {} → {}  (src {}–{})",
+        file.display(),
+        format_seconds(&clip.start),
+        format_seconds(&clip.end()),
+        format_seconds(&clip.asset_in),
+        format_seconds(&clip.asset_out)
+    );
+    Ok(())
+}
+
+fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    project.remove_clip(id)?;
+    project.save(project_path)?;
+    println!("✓ removed clip #{id}");
+    Ok(())
+}
+
+fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
+    let project = Project::load(project_path)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&project)?);
+        return Ok(());
+    }
+    let track = project.timeline.video_track().context("no video track")?;
+
+    let mut head = format!(
+        "{} — {} clip(s) · {} s",
+        project_path.display(),
+        track.clips.len(),
+        format_seconds(&track.end())
+    );
+    if let Some(fps) = &project.fps {
+        head += &format!(" · {}/{} fps", fps.numer(), fps.denom());
+    }
+    if let Some(v) = &project.video {
+        head += &format!(" · {}×{}", v.width, v.height);
+    }
+    println!("{head}");
+    println!("  v1");
+
+    let mut cursor = Seconds::from_integer(0);
+    for clip in &track.clips {
+        if clip.start > cursor {
+            println!(
+                "      ┄ gap {}–{}",
+                format_seconds(&cursor),
+                format_seconds(&clip.start)
+            );
+        }
+        let asset = project
+            .asset(clip.asset)
+            .map(|a| a.path.display().to_string())
+            .unwrap_or_else(|| "?".into());
+        println!(
+            "    #{:<4}{:>9} – {:<9} {}  (src {}–{})",
+            clip.id,
+            format_seconds(&clip.start),
+            format_seconds(&clip.end()),
+            asset,
+            format_seconds(&clip.asset_in),
+            format_seconds(&clip.asset_out)
+        );
+        cursor = clip.end();
+    }
+    Ok(())
+}
+
+fn cmd_export(
+    project_path: &Path,
+    output: &Path,
+    encoder: Encoder,
+    crf: u8,
+    preset: &str,
+    bitrate: &str,
+) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let spec = ExportSpec {
+        output: output.to_path_buf(),
+        encoder,
+        crf,
+        preset: preset.to_string(),
+        bitrate: bitrate.to_string(),
+    };
+    let plan = nle_ffmpeg::export(&project, &spec)?;
+    let actual = nle_ffmpeg::probe(output)?;
+    let shown = actual
+        .format
+        .duration
+        .as_deref()
+        .and_then(parse_f64)
+        .map(|d| format!("{d:.2}"))
+        .unwrap_or_else(|| "?".into());
+    println!(
+        "✓ {}  ({} s · {} frames @ {}/{})",
+        output.display(),
+        shown,
+        plan.frames,
+        plan.fps.numer(),
+        plan.fps.denom()
+    );
+    Ok(())
+}
+
+fn asset_summary(a: &Asset) -> String {
+    let mut s = match a.duration() {
+        Some(d) => format!("{} s", format_seconds(&d)),
+        None => "? s".to_string(),
+    };
+    if let Some((w, h)) = a.video_size() {
+        s += &format!(" · {w}×{h}");
+    }
+    if let Some(fps) = a.fps() {
+        s += &format!(" @ {}/{}", fps.numer(), fps.denom());
+    }
+    s += if a.probe.has_audio() { " · audio ✓" } else { " · no audio" };
+    s
+}
+
+// ------------------------------------------------------------ media cmds (M0)
 
 fn cmd_probe(file: &Path, json: bool) -> Result<()> {
     let report = probe(file)?;
@@ -209,7 +480,7 @@ fn human_bytes(b: u64) -> String {
     }
 }
 
-// ---------------------------------------------------------------- trim
+// ------------------------------------------------------------ trim (M0)
 
 #[allow(clippy::too_many_arguments)]
 fn cmd_trim(
