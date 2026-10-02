@@ -1,0 +1,26 @@
+# Workspace: one project, several crates — like npm workspaces / composer monorepo.
+# Each crate is a separate package, but they build together and share config.
+[workspace]
+resolver = "2"
+members = ["crates/nle-core", "crates/nle-ffmpeg", "crates/nle-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Dependencies declared ONCE here, referenced by crates as `name.workspace = true`.
+# Same idea as a root package.json with shared deps.
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+num-rational = "0.4"
+
+# Optimization profile for release builds (what you actually run).
+# "fat" LTO + codegen-units=1 = slower to compile, faster to run.
+[profile.release]
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,10 @@
+[package]
+name = "nle-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure timeline/edit logic — no I/O, no ffmpeg"
+
+[dependencies]
+thiserror.workspace = true
+num-rational.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "nle-ffmpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ffmpeg/ffprobe wrappers: probing, cutting, (later) graph compilation"
+
+[dependencies]
+nle-core = { path = "../nle-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+num-rational.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "nle-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The nle binary"
+
+# Cargo would name the binary "nle-cli"; call it what it is.
+[[bin]]
+name = "nle"
+path = "src/main.rs"
+
+[dependencies]
+nle-core = { path = "../nle-core" }
+nle-ffmpeg = { path = "../nle-ffmpeg" }
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true

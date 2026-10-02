@@ -1,0 +1,6 @@
+# Compile every crate for THIS machine's exact CPU (enables AVX2, etc.).
+# This is a rustc flag (-C target-cpu=native), not a Cargo profile flag —
+# config.toml is where those live.
+# Local-only app, so targeting one CPU is pure free performance.
+[build]
+rustflags = ["-C", "target-cpu=native"]
