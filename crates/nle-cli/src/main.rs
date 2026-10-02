@@ -1,7 +1,12 @@
 //! nle — terminal-native video editor.
 //!
-//! M1 status: project file (EDL), media pool, timeline, single-track
-//! export via the filter-graph compiler. TUI + mpv monitor arrive in M2.
+//! M2 status: interactive editor — TUI dashboard, mpv monitor, vim keys,
+//! instant EDL preview. Project file, media pool, timeline, and export
+//! landed in M0/M1.
+
+mod mpv;
+mod preview;
+mod tui;
 
 use std::path::{Path, PathBuf};
 
@@ -77,6 +82,12 @@ enum Cmd {
         #[arg(long, default_value = "8M")]
         bitrate: String,
     },
+    /// Interactive editor: TUI dashboard + mpv monitor, vim keys
+    Edit {},
+
+    /// Print the mpv preview URL for the timeline (debugging)
+    Edl {},
+
     /// Show what's inside a media file (streams, codecs, rates)
     Probe {
         /// Media file to inspect
@@ -139,6 +150,8 @@ impl From<EncoderArg> for Encoder {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Cmd::Edit {} => cmd_edit(&cli.project),
+        Cmd::Edl {} => cmd_edl(&cli.project),
         Cmd::Init { force } => cmd_init(&cli.project, force),
         Cmd::Import { files } => cmd_import(&cli.project, &files),
         Cmd::Add { file, at, in_point, out_point } => {
@@ -175,6 +188,31 @@ fn main() -> Result<()> {
 }
 
 // ------------------------------------------------------------ project cmds
+
+fn cmd_edit(project_path: &Path) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let empty = project
+        .timeline
+        .video_track()
+        .map(|t| t.clips.is_empty())
+        .unwrap_or(true);
+    if empty {
+        bail!("timeline is empty — add clips first (the monitor needs content)");
+    }
+    let player =
+        mpv::MpvPlayer::spawn(&format!("nle monitor — {}", project_path.display()))?;
+    player.observe()?;
+    let edl = preview::build_edl(&project)?;
+    player.load(&edl);
+    tui::run(project, project_path.to_path_buf(), player)?;
+    Ok(())
+}
+
+fn cmd_edl(project_path: &Path) -> Result<()> {
+    let project = Project::load(project_path)?;
+    println!("{}", preview::build_edl(&project)?);
+    Ok(())
+}
 
 fn cmd_init(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
