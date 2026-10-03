@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use nle_core::{format_seconds, parse_rate, parse_time, Asset, Project, Seconds};
+use nle_core::edit;
+use nle_core::timeline::{Clip, Segment};
+use nle_core::{format_seconds, parse_rate, parse_time, Asset, Project, Seconds, VideoSettings};
 use nle_ffmpeg::{probe, Encoder, ExportSpec, RawProbe, RawStream, TrimSpec};
 
 #[derive(Parser)]
@@ -194,7 +196,7 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
     let empty = project
         .timeline
         .video_track()
-        .map(|t| t.clips.is_empty())
+        .map(|t| t.segments.iter().all(|s| matches!(s, Segment::Gap(_))))
         .unwrap_or(true);
     if empty {
         bail!("timeline is empty — add clips first (the monitor needs content)");
@@ -248,11 +250,17 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
         println!("✓ asset #{id}  {}  {}", file.display(), asset_summary(asset));
     }
     project.save(project_path)?;
+    let clip_count = |p: &Project| {
+        p.timeline
+            .video_track()
+            .map(|t| t.segments.iter().filter(|s| matches!(s, Segment::Clip(_))).count())
+            .unwrap_or(0)
+    };
     println!(
         "· {} — {} assets, {} clip(s)",
         project_path.display(),
         project.media.len(),
-        project.timeline.video_track().map(|t| t.clips.len()).unwrap_or(0)
+        clip_count(&project)
     );
     Ok(())
 }
@@ -290,34 +298,61 @@ fn cmd_add(
             .and_then(|a| a.duration())
             .ok_or_else(|| anyhow::anyhow!("asset has unknown duration — pass --out"))?,
     };
-    let at_t = match at {
+    let at_t: Option<Seconds> = match at {
         Some(s) => Some(parse_time(s).with_context(|| format!("invalid --at time: {s:?}"))?),
         None => None,
     };
 
-    let clip_id = project.add_clip(asset_id, at_t, in_t, out_t)?;
-    project.save(project_path)?;
+    // Validate the source range against the asset.
+    
+    
+    let asset = project
+        .asset(asset_id)
+        .context("asset vanished after import")?;
+    if in_t >= out_t {
+        bail!("--in must be before --out");
+    }
+    if let Some(d) = asset.duration()
+        && out_t > d {
+            bail!("--out {out_point:?} is beyond the asset's duration {d}");
+        }
+    // The first clip defines the sequence settings (like a real NLE).
+    let asset_fps = asset.fps();
+    let asset_size = asset.video_size();
+    if project.fps.is_none() {
+        project.fps = asset_fps;
+    }
+    if project.video.is_none() {
+        project.video = asset_size.map(|(w, h)| VideoSettings { width: w, height: h });
+    }
 
-    let track = project.timeline.video_track().context("no video track")?;
-    let clip = track
-        .clips
-        .iter()
-        .find(|c| c.id == clip_id)
-        .context("clip vanished after insert")?;
-    println!(
-        "✓ clip #{clip_id}  {}  {} → {}  (src {}–{})",
-        file.display(),
-        format_seconds(&clip.start),
-        format_seconds(&clip.end()),
-        format_seconds(&clip.asset_in),
-        format_seconds(&clip.asset_out)
-    );
+    // Ripple paste: inserts at --at (splits clips/gaps) or appends.
+    let append_at = match at_t {
+        Some(t) => t,
+        None => project.timeline.end(),
+    };
+    let scratch = Clip {
+        id: 0,
+        asset: asset_id,
+        asset_in: in_t,
+        asset_out: out_t,
+    };
+    let mut history = edit::History::default();
+    let batch = edit::paste_ripple(&project, &scratch, secs_f64(&append_at))?;
+    history.apply(&mut project, batch)?;
+    project.save(project_path)?;
     Ok(())
+}
+
+fn secs_f64(t: &Seconds) -> f64 {
+    *t.numer() as f64 / *t.denom() as f64
 }
 
 fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
     let mut project = Project::load(project_path)?;
-    project.remove_clip(id)?;
+    let batch = edit::delete_clip_by_id(&project, id)?;
+    let mut history = edit::History::default();
+    history.apply(&mut project, batch)?;
     project.save(project_path)?;
     println!("✓ removed clip #{id}");
     Ok(())
@@ -330,11 +365,16 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         return Ok(());
     }
     let track = project.timeline.video_track().context("no video track")?;
+    let clip_count = track
+        .segments
+        .iter()
+        .filter(|s| matches!(s, Segment::Clip(_)))
+        .count();
 
     let mut head = format!(
         "{} — {} clip(s) · {} s",
         project_path.display(),
-        track.clips.len(),
+        clip_count,
         format_seconds(&project.timeline.end())
     );
     if let Some(fps) = &project.fps {
@@ -347,28 +387,36 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
     println!("  v1");
 
     let mut cursor = Seconds::from_integer(0);
-    for clip in &track.clips {
-        if clip.start > cursor {
-            println!(
-                "      ┄ gap {}–{}",
-                format_seconds(&cursor),
-                format_seconds(&clip.start)
-            );
+    for seg in &track.segments {
+        match seg {
+            Segment::Gap(g) => {
+                let end = cursor + g.duration;
+                println!(
+                    "      ┄ gap {}–{}",
+                    format_seconds(&cursor),
+                    format_seconds(&end)
+                );
+                cursor = end;
+            }
+            Segment::Clip(clip) => {
+                let asset = project
+                    .asset(clip.asset)
+                    .map(|a| a.path.display().to_string())
+                    .unwrap_or_else(|| "?".into());
+                let start = cursor;
+                let end = start + clip.duration();
+                println!(
+                    "    #{:<4}{:>9} – {:<9} {}  (src {}–{})",
+                    clip.id,
+                    format_seconds(&start),
+                    format_seconds(&end),
+                    asset,
+                    format_seconds(&clip.asset_in),
+                    format_seconds(&clip.asset_out)
+                );
+                cursor = end;
+            }
         }
-        let asset = project
-            .asset(clip.asset)
-            .map(|a| a.path.display().to_string())
-            .unwrap_or_else(|| "?".into());
-        println!(
-            "    #{:<4}{:>9} – {:<9} {}  (src {}–{})",
-            clip.id,
-            format_seconds(&clip.start),
-            format_seconds(&clip.end()),
-            asset,
-            format_seconds(&clip.asset_in),
-            format_seconds(&clip.asset_out)
-        );
-        cursor = clip.end();
     }
     Ok(())
 }

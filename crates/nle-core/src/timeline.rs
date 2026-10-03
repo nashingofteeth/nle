@@ -1,4 +1,10 @@
-//! The timeline: tracks of positioned clips. Pure data + pure operations.
+//! The timeline: tracks of sequential segments — clips and gaps.
+//!
+//! A track is a *sequence*: segments play back-to-back, and a clip's
+//! start is DERIVED (the sum of the durations before it). Overlaps are
+//! unrepresentable; gaps — leading, interior, trailing — are ordinary
+//! segments, not special state. Removing a segment IS a ripple; replacing
+//! a clip with a gap IS "leave a gap".
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -11,10 +17,8 @@ pub enum TimelineError {
     NoVideoTrack,
     #[error("clip #{0} not found")]
     ClipNotFound(u32),
-    #[error("asset #{0} is not in the media pool")]
-    UnknownAsset(u32),
-    #[error("clip would overlap clip #{existing} at {at}")]
-    Overlap { existing: u32, at: String },
+    #[error("no segment at index {0}")]
+    SegmentNotFound(usize),
     #[error("timeline corrupt: {0}")]
     Corrupt(String),
 }
@@ -25,17 +29,12 @@ pub enum TrackKind {
     Audio,
 }
 
-/// One piece of media placed on a track.
-///
-/// A clip plays the asset from `asset_in` to `asset_out` (source time),
-/// starting at `start` on the timeline. Its length is asset_out − asset_in.
+/// One piece of media on a track. Its timeline position is derived from
+/// the segments before it — a clip only owns its source range.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     pub id: u32,
-    /// Asset id in the project's media pool.
     pub asset: u32,
-    #[serde(with = "rational_ser")]
-    pub start: Seconds,
     #[serde(with = "rational_ser")]
     pub asset_in: Seconds,
     #[serde(with = "rational_ser")]
@@ -43,89 +42,89 @@ pub struct Clip {
 }
 
 impl Clip {
-    /// Clip length in exact seconds.
     pub fn duration(&self) -> Seconds {
         self.asset_out - self.asset_in
     }
+}
 
-    /// Where the clip ends on the timeline.
-    pub fn end(&self) -> Seconds {
-        self.start + self.duration()
+/// A stretch of nothing: black + silence. Leading, interior, and
+/// trailing space are all just Gap segments.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Gap {
+    #[serde(with = "rational_ser")]
+    pub duration: Seconds,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Segment {
+    Clip(Clip),
+    Gap(Gap),
+}
+
+impl Segment {
+    pub fn duration(&self) -> Seconds {
+        match self {
+            Segment::Clip(c) => c.duration(),
+            Segment::Gap(g) => g.duration,
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub kind: TrackKind,
-    /// Always kept sorted by `start`.
-    pub clips: Vec<Clip>,
+    pub segments: Vec<Segment>,
 }
 
 impl Track {
-    /// Insert keeping sort order; reject overlaps.
-    pub fn try_insert(&mut self, clip: Clip) -> Result<(), TimelineError> {
-        for existing in &self.clips {
-            if existing.start < clip.end() && clip.start < existing.end() {
-                return Err(TimelineError::Overlap {
-                    existing: existing.id,
-                    at: format_seconds(&clip.start),
-                });
-            }
-        }
-        let pos = self.clips.partition_point(|c| c.start <= clip.start);
-        self.clips.insert(pos, clip);
-        Ok(())
-    }
-
-    /// Replace a clip by id (used by trim/split edits), keeping sort order.
-    /// The replacement may move, so the vec is re-sorted and overlap-checked.
-    pub fn try_replace(&mut self, after: Clip) -> Result<(), TimelineError> {
-        let i = self
-            .find(after.id)
-            .ok_or(TimelineError::ClipNotFound(after.id))?;
-        for (j, existing) in self.clips.iter().enumerate() {
-            if j != i && existing.start < after.end() && after.start < existing.end() {
-                return Err(TimelineError::Overlap {
-                    existing: existing.id,
-                    at: format_seconds(&after.start),
-                });
-            }
-        }
-        self.clips[i] = after;
-        self.clips.sort_by_key(|c| c.start);
-        Ok(())
-    }
-
-    /// Remove a clip by id.
-    pub fn try_remove(&mut self, id: u32) -> Result<(), TimelineError> {
-        let i = self.find(id).ok_or(TimelineError::ClipNotFound(id))?;
-        self.clips.remove(i);
-        Ok(())
-    }
-
-    /// Last end across all clips (0 for an empty track).
+    /// Total duration: the sum of segment durations.
     pub fn end(&self) -> Seconds {
-        self.clips
+        self.segments
             .iter()
-            .map(|c| c.end())
-            .max()
-            .unwrap_or_else(|| Seconds::from_integer(0))
+            .fold(Seconds::from_integer(0), |acc, s| acc + s.duration())
     }
 
-    pub fn find(&self, id: u32) -> Option<usize> {
-        self.clips.iter().position(|c| c.id == id)
+    /// Start time of the segment at `index` (prefix sum of durations).
+    pub fn start_of(&self, index: usize) -> Seconds {
+        self.segments
+            .iter()
+            .take(index)
+            .fold(Seconds::from_integer(0), |acc, s| acc + s.duration())
+    }
+
+    /// Index of the segment containing `t` (start ≤ t < end).
+    pub fn index_at(&self, t: Seconds) -> Option<usize> {
+        let mut acc = Seconds::from_integer(0);
+        for (i, s) in self.segments.iter().enumerate() {
+            let end = acc + s.duration();
+            if acc <= t && t < end {
+                return Some(i);
+            }
+            acc = end;
+        }
+        None
+    }
+
+    /// The clip segment containing `t`, if any.
+    pub fn clip_at(&self, t: Seconds) -> Option<&Clip> {
+        let i = self.index_at(t)?;
+        match &self.segments[i] {
+            Segment::Clip(c) => Some(c),
+            Segment::Gap(_) => None,
+        }
+    }
+
+    /// Index of the clip segment with the given id.
+    pub fn clip_index(&self, id: u32) -> Option<usize> {
+        self.segments
+            .iter()
+            .position(|s| matches!(s, Segment::Clip(c) if c.id == id))
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Timeline {
     pub tracks: Vec<Track>,
-    /// Sequence tail: keeps the timeline's displayed end at least this
-    /// long, even when the last clip is deleted or trimmed (dd and o
-    /// leave a trailing gap; ripple ops collapse it). None = end at the
-    /// last clip.
-    #[serde(default, with = "rational_ser::opt")]
-    pub length: Option<Seconds>,
 }
 
 impl Default for Timeline {
@@ -140,9 +139,8 @@ impl Timeline {
         Self {
             tracks: vec![Track {
                 kind: TrackKind::Video,
-                clips: Vec::new(),
+                segments: Vec::new(),
             }],
-            length: None,
         }
     }
 
@@ -151,116 +149,112 @@ impl Timeline {
     }
 
     pub fn video_track_mut(&mut self) -> Option<&mut Track> {
-        self.tracks
-            .iter_mut()
-            .find(|t| t.kind == TrackKind::Video)
+        self.tracks.iter_mut().find(|t| t.kind == TrackKind::Video)
     }
 
-    /// End of the timeline: the last clip's end, or the sequence tail
-    /// length — whichever is later.
+    /// End of the timeline (across all tracks).
     pub fn end(&self) -> Seconds {
-        let clip_end = self
-            .tracks
+        self.tracks
             .iter()
             .map(|t| t.end())
             .max()
-            .unwrap_or_else(|| Seconds::from_integer(0));
-        match self.length {
-            Some(len) if len > clip_end => len,
-            _ => clip_end,
-        }
+            .unwrap_or_else(|| Seconds::from_integer(0))
     }
 
     /// Remove a clip by id, searching all tracks.
     pub fn remove_clip(&mut self, id: u32) -> Result<(), TimelineError> {
         for track in &mut self.tracks {
-            if let Some(i) = track.find(id) {
-                track.clips.remove(i);
+            if let Some(i) = track.clip_index(id) {
+                track.segments.remove(i);
                 return Ok(());
             }
         }
         Err(TimelineError::ClipNotFound(id))
     }
 
-    /// Structural sanity: positive spans, sorted non-overlapping clips,
-    /// non-negative sequence tail.
+    /// Structural sanity: positive spans and gaps, valid asset refs are
+    /// the PROJECT's job (it owns the pool). Overlaps are unrepresentable.
     pub fn validate(&self) -> Result<(), TimelineError> {
-        if let Some(len) = self.length
-            && len < Seconds::from_integer(0) {
-                return Err(TimelineError::Corrupt(format!(
-                    "negative sequence tail {}",
-                    format_seconds(&len)
-                )));
-            }
         for (ti, track) in self.tracks.iter().enumerate() {
-            let mut prev_end = Seconds::from_integer(0);
-            for (ci, clip) in track.clips.iter().enumerate() {
-                if clip.asset_out <= clip.asset_in {
-                    return Err(TimelineError::Corrupt(format!(
-                        "track {ti} clip {ci} (#{}) has a non-positive span",
-                        clip.id
-                    )));
+            for (si, seg) in track.segments.iter().enumerate() {
+                let bad = |what: &str| {
+                    TimelineError::Corrupt(format!(
+                        "track {ti} segment {si}: {what}"
+                    ))
+                };
+                match seg {
+                    Segment::Clip(c) => {
+                        if c.asset_out <= c.asset_in {
+                            return Err(bad("clip has a non-positive source span"));
+                        }
+                    }
+                    Segment::Gap(g) => {
+                        if g.duration <= Seconds::from_integer(0) {
+                            return Err(bad("gap has a non-positive duration"));
+                        }
+                    }
                 }
-                if clip.start < prev_end {
-                    return Err(TimelineError::Corrupt(format!(
-                        "track {ti}: clip #{} starts at {} before the previous clip ends at {}",
-                        clip.id,
-                        format_seconds(&clip.start),
-                        format_seconds(&prev_end)
-                    )));
-                }
-                prev_end = clip.end();
             }
         }
         Ok(())
     }
 }
 
+/// Format helper re-exported for op descriptions.
+#[allow(unused_imports)]
+use format_seconds as _fmt_unused;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn clip(id: u32, start: i64, dur: i64) -> Clip {
-        Clip {
+    fn clip(id: u32, dur: i64) -> Segment {
+        Segment::Clip(Clip {
             id,
             asset: 1,
-            start: Seconds::from_integer(start),
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(dur),
-        }
+        })
+    }
+
+    fn gap(dur: i64) -> Segment {
+        Segment::Gap(Gap { duration: Seconds::from_integer(dur) })
     }
 
     #[test]
-    fn insert_keeps_order_and_rejects_overlap() {
-        let mut track = Track { kind: TrackKind::Video, clips: vec![] };
-        track.try_insert(clip(1, 0, 5)).unwrap();
-        track.try_insert(clip(2, 5, 5)).unwrap();
-        assert_eq!(track.clips.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 2]);
-        // overlapping clip #1
-        assert!(matches!(
-            track.try_insert(clip(3, 4, 5)),
-            Err(TimelineError::Overlap { existing: 1, .. })
-        ));
-        // gap insert sorts into place
-        track.try_insert(clip(4, 12, 5)).unwrap();
-        track.try_insert(clip(5, 10, 2)).unwrap();
-        assert_eq!(track.clips.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 2, 5, 4]);
-        assert_eq!(track.end(), Seconds::from_integer(17));
+    fn end_is_the_sum_of_segments() {
+        let t = Track { kind: TrackKind::Video, segments: vec![clip(1, 2), gap(1), clip(2, 3)] };
+        assert_eq!(t.end(), Seconds::from_integer(6));
+        assert_eq!(t.start_of(0), Seconds::from_integer(0));
+        assert_eq!(t.start_of(1), Seconds::from_integer(2));
+        assert_eq!(t.start_of(2), Seconds::from_integer(3));
+        assert_eq!(t.start_of(3), Seconds::from_integer(6));
     }
 
     #[test]
-    fn remove_and_validate() {
-        let mut track = Track { kind: TrackKind::Video, clips: vec![] };
-        track.try_insert(clip(1, 0, 5)).unwrap();
-        track.try_insert(clip(2, 5, 5)).unwrap();
-        let mut timeline = Timeline { tracks: vec![track], length: None };
-        timeline.remove_clip(2).unwrap();
-        assert!(timeline.remove_clip(99).is_err());
-        timeline.validate().unwrap();
+    fn index_at_and_clip_at() {
+        let t = Track { kind: TrackKind::Video, segments: vec![clip(1, 2), gap(1), clip(2, 3)] };
+        assert_eq!(t.index_at(Seconds::from_integer(0)), Some(0));
+        assert_eq!(t.index_at(Seconds::from_integer(2)), Some(1), "gap start");
+        assert_eq!(t.index_at(Seconds::from_integer(3)), Some(2), "the clip after the gap");
+        assert_eq!(t.index_at(Seconds::from_integer(6)), None, "the end belongs to no segment");
+        assert!(t.clip_at(Seconds::from_integer(4)).is_some());
+        assert!(t.clip_at(Seconds::from_integer(2)).is_none(), "inside a gap");
+        assert_eq!(t.clip_index(2), Some(2));
+        assert_eq!(t.clip_index(9), None);
+    }
 
-        // corrupt: overlapping clips
-        let mut bad = Timeline::new();
-        bad.tracks[0].clips = vec![clip(1, 0, 5), clip(2, 3, 5)];
-        assert!(bad.validate().is_err());
+    #[test]
+    fn validate_rejects_bad_spans() {
+        let mut p_timeline = Timeline::new();
+        p_timeline.tracks[0].segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: 1,
+            asset_in: Seconds::from_integer(2),
+            asset_out: Seconds::from_integer(2),
+        })];
+        assert!(p_timeline.validate().is_err());
+        p_timeline.tracks[0].segments = vec![gap(0)];
+        assert!(p_timeline.validate().is_err());
     }
 }

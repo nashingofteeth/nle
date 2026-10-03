@@ -12,10 +12,10 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::media::RawProbe;
-use crate::time::{format_seconds, rational_ser, Seconds};
-use crate::timeline::{Clip, Timeline, TimelineError};
+use crate::time::{rational_ser, Seconds};
+use crate::timeline::{Segment, Timeline, TimelineError};
 
-pub const PROJECT_VERSION: u32 = 1;
+pub const PROJECT_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -67,7 +67,11 @@ impl Asset {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
-    pub version: u32,
+    /// Project file format — v2 is the segment model. (v1 files are not
+    /// readable; the only v1 project was the regenerable demo.)
+    /// Project file format — v2 is the segment model. (v1 files are not
+    /// readable; the only v1 project was the regenerable demo.)
+    version: u32,
     /// Output frame rate — None until the first clip sets it.
     #[serde(default, with = "rational_ser::opt")]
     pub fps: Option<Seconds>,
@@ -132,10 +136,11 @@ impl Project {
     pub fn validate(&self) -> Result<(), ProjectError> {
         self.timeline.validate()?;
         for track in &self.timeline.tracks {
-            for clip in &track.clips {
-                if !self.media.iter().any(|a| a.id == clip.asset) {
-                    return Err(ProjectError::Timeline(TimelineError::UnknownAsset(clip.asset)));
-                }
+            for seg in &track.segments {
+                if let Segment::Clip(clip) = seg
+                    && !self.media.iter().any(|a| a.id == clip.asset) {
+                        return Err(ProjectError::Asset(clip.asset, "not in the media pool".into()));
+                    }
             }
         }
         Ok(())
@@ -167,105 +172,26 @@ impl Project {
         self.timeline
             .tracks
             .iter()
-            .flat_map(|t| t.clips.iter().map(|c| c.id))
+            .flat_map(|t| {
+                t.segments.iter().filter_map(|s| match s {
+                    Segment::Clip(c) => Some(c.id),
+                    Segment::Gap(_) => None,
+                })
+            })
             .max()
             .unwrap_or(0)
             + 1
-    }
-
-    /// Place a clip on the video track.
-    ///
-    /// `at = None` appends after the last clip. Validates the source range
-    /// against the asset and rejects overlaps. The first clip added also
-    /// fixes the project's fps and output size (sequence settings).
-    pub fn add_clip(
-        &mut self,
-        asset_id: u32,
-        at: Option<Seconds>,
-        asset_in: Seconds,
-        asset_out: Seconds,
-    ) -> Result<u32, ProjectError> {
-        let asset_fps;
-        let asset_size;
-        {
-            let asset = self
-                .asset(asset_id)
-                .ok_or_else(|| ProjectError::Asset(asset_id, "not in media pool — run `nle import`".into()))?;
-            if !asset.probe.has_video() {
-                return Err(ProjectError::Asset(asset_id, "has no video stream".into()));
-            }
-            let duration = asset
-                .duration()
-                .ok_or_else(|| ProjectError::Asset(asset_id, "has unknown duration".into()))?;
-            if asset_in >= asset_out {
-                return Err(ProjectError::Asset(
-                    asset_id,
-                    format!(
-                        "in-point {} must be before out-point {}",
-                        format_seconds(&asset_in),
-                        format_seconds(&asset_out)
-                    ),
-                ));
-            }
-            if asset_out > duration {
-                return Err(ProjectError::Asset(
-                    asset_id,
-                    format!(
-                        "out-point {} is beyond the file's duration {}",
-                        format_seconds(&asset_out),
-                        format_seconds(&duration)
-                    ),
-                ));
-            }
-            asset_fps = asset.fps();
-            asset_size = asset.video_size();
-        }
-
-        // The first clip defines the sequence settings (like a real NLE).
-        if self.fps.is_none() {
-            self.fps = asset_fps;
-        }
-        if self.video.is_none() {
-            self.video = asset_size.map(|(w, h)| VideoSettings { width: w, height: h });
-        }
-
-        let at = match at {
-            Some(t) => t,
-            None => {
-                let track = self
-                    .timeline
-                    .video_track()
-                    .ok_or(ProjectError::Timeline(TimelineError::NoVideoTrack))?;
-                track.end()
-            }
-        };
-
-        let clip = Clip {
-            id: self.next_clip_id(),
-            asset: asset_id,
-            start: at,
-            asset_in,
-            asset_out,
-        };
-        let track = self
-            .timeline
-            .video_track_mut()
-            .ok_or(ProjectError::Timeline(TimelineError::NoVideoTrack))?;
-        track.try_insert(clip.clone())?;
-        self.validate()?;
-        Ok(clip.id)
-    }
-
-    pub fn remove_clip(&mut self, id: u32) -> Result<(), ProjectError> {
-        self.timeline.remove_clip(id)?;
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edit::{self, History};
     use crate::media::{RawFormat, RawStream};
+    use crate::time::Seconds;
+    use crate::timeline::Segment;
+    use crate::Clip;
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -303,10 +229,22 @@ mod tests {
         let mut p = Project::new();
         let (a0, _) = p.add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
         let (a1, _) = p.add_asset("b.mp4".into(), probe_report("8", 1280, 720, "30000/1001", false));
-        p.add_clip(a0, None, Seconds::from_integer(0), Seconds::from_integer(10))
-            .unwrap();
-        p.add_clip(a1, Some(Seconds::from_integer(12)), Seconds::new(2, 1), Seconds::new(5, 1))
-            .unwrap();
+        // [0..2) a.mp4 src 0..2 · [2..5) b.mp4 src 2..5
+        let mut h = History::default();
+        let batch = edit::paste_ripple(
+            &p,
+            &Clip { id: 0, asset: a0, asset_in: Seconds::from_integer(0), asset_out: Seconds::from_integer(2) },
+            0.0,
+        )
+        .unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let batch = edit::paste_ripple(
+            &p,
+            &Clip { id: 0, asset: a1, asset_in: Seconds::from_integer(2), asset_out: Seconds::from_integer(5) },
+            2.0,
+        )
+        .unwrap();
+        h.apply(&mut p, batch).unwrap();
         p
     }
 
@@ -321,60 +259,22 @@ mod tests {
     }
 
     #[test]
-    fn clips_append_defaults_and_first_clip_sets_settings() {
-        let mut p = Project::new();
-        let (a, _) = p.add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30000/1001", true));
-        let c1 = p.add_clip(a, None, Seconds::from_integer(0), Seconds::from_integer(8)).unwrap();
-        assert_eq!(c1, 1);
-        // first clip defines the sequence settings
-        assert_eq!(p.fps, Some(Seconds::new(30000, 1001)));
-        assert_eq!(p.video, Some(VideoSettings { width: 1920, height: 1080 }));
-        // second clip appends after the first (src 2–4s, within the 10s asset)
-        let _c2 = p.add_clip(a, None, Seconds::from_integer(2), Seconds::from_integer(4)).unwrap();
-        let track = p.timeline.video_track().unwrap();
-        assert_eq!(track.clips[1].start, Seconds::from_integer(8));
-        assert_eq!(track.end(), Seconds::from_integer(10)); // 8 + 2s
-    }
-
-    #[test]
-    fn rejects_overlap_and_bad_ranges() {
-        let mut p = sample_project();
-        // overlap with clip #1 (0–10)
-        assert!(matches!(
-            p.add_clip(1, Some(Seconds::from_integer(5)), Seconds::from_integer(0), Seconds::from_integer(2)),
-            Err(ProjectError::Timeline(TimelineError::Overlap { .. }))
-        ));
-        // out beyond asset duration
-        assert!(matches!(
-            p.add_clip(1, None, Seconds::from_integer(0), Seconds::from_integer(99)),
-            Err(ProjectError::Asset(..))
-        ));
-        // inverted range
-        assert!(p.add_clip(1, None, Seconds::from_integer(5), Seconds::from_integer(5)).is_err());
-        // unknown asset
-        assert!(p.add_clip(42, None, Seconds::from_integer(0), Seconds::from_integer(1)).is_err());
-    }
-
-    #[test]
-    fn remove_then_readd_uses_fresh_ids() {
-        let mut p = sample_project();
-        p.remove_clip(1).unwrap();
-        assert!(p.remove_clip(1).is_err());
-        let id = p.add_clip(2, None, Seconds::from_integer(0), Seconds::from_integer(1)).unwrap();
-        assert_eq!(id, 3); // max+1, no id reuse
+    fn clip_ids_are_fresh_across_inserts() {
+        let p = sample_project();
+        let ids: Vec<u32> = p.timeline.video_track().unwrap().segments.iter().filter_map(|s| match s {
+            Segment::Clip(c) => Some(c.id),
+            Segment::Gap(_) => None,
+        }).collect();
+        assert_eq!(ids, vec![1, 2]);
     }
 
     #[test]
     fn validate_rejects_missing_asset_refs() {
-        let mut p = Project::new();
-        p.timeline.video_track_mut().unwrap().clips.push(Clip {
-            id: 1,
-            asset: 99,
-            start: Seconds::from_integer(0),
-            asset_in: Seconds::from_integer(0),
-            asset_out: Seconds::from_integer(1),
-        });
-        assert!(matches!(p.validate(), Err(ProjectError::Timeline(TimelineError::UnknownAsset(99)))));
+        let mut p = sample_project();
+        if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            c.asset = 99;
+        }
+        assert!(matches!(p.validate(), Err(ProjectError::Asset(99, _))));
     }
 
     #[test]
@@ -385,7 +285,6 @@ mod tests {
         assert_eq!(p, back);
         // human-readable exact times in the file itself
         assert!(json.contains("\"30000/1001\""), "{json}");
-        assert!(json.contains("\"12/1\""), "{json}");
     }
 
     #[test]
@@ -396,5 +295,13 @@ mod tests {
         p.save(&path).unwrap();
         let loaded = Project::load(&path).unwrap();
         assert_eq!(p, loaded);
+    }
+
+    #[test]
+    fn rejects_other_versions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.json");
+        std::fs::write(&path, "{\"version\": 1}").unwrap();
+        assert!(matches!(Project::load(&path), Err(ProjectError::Version(1))));
     }
 }

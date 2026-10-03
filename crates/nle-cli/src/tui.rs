@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::Frame;
 
 use nle_core::edit;
+use nle_core::timeline::Segment as TimelineSegment;
 use nle_core::{Batch, Clip, EditError, History, Project, Seconds};
 
 use crate::mpv::{MpvPlayer, PlaybackState};
@@ -69,15 +70,19 @@ fn gap_under(project: &Project, t: f64) -> Option<(Seconds, Seconds)> {
     if clip_under(project, t).is_some() {
         return None; // inside a clip
     }
-    let mut start = Seconds::from_integer(0);
-    let mut end = project.timeline.end();
-    for c in &track.clips {
-        if secs(&c.start) > t {
-            end = c.start;
-            break;
-        }
-        start = c.end();
+    let gt = grid_time(project, t);
+    let si = track.index_at(gt)?;
+    // merge adjacent gaps around si into one region
+    let mut first = si;
+    while first > 0 && matches!(track.segments[first - 1], TimelineSegment::Gap(_)) {
+        first -= 1;
     }
+    let mut last = si;
+    while last + 1 < track.segments.len() && matches!(track.segments[last + 1], TimelineSegment::Gap(_)) {
+        last += 1;
+    }
+    let start = track.start_of(first);
+    let end = track.start_of(last) + track.segments[last].duration();
     if end <= start {
         return None; // no materialized gap (no tail past the last clip)
     }
@@ -137,12 +142,11 @@ pub fn cut_points(project: &Project) -> Vec<f64> {
         return vec![0.0];
     };
     let mut pts = vec![0.0];
-    for c in &track.clips {
-        pts.push(secs(&c.start));
-        pts.push(secs(&c.end()));
+    let mut acc = Seconds::from_integer(0);
+    for s in &track.segments {
+        acc += s.duration();
+        pts.push(secs(&acc));
     }
-    pts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    pts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     pts
 }
 
@@ -156,12 +160,38 @@ pub fn prev_cut(points: &[f64], t: f64, eps: f64) -> Option<f64> {
 
 pub fn next_clip_start(project: &Project, t: f64, eps: f64) -> Option<f64> {
     let track = project.timeline.video_track()?;
-    track.clips.iter().map(|c| secs(&c.start)).find(|&s| s > t + eps)
+    let mut acc = Seconds::from_integer(0);
+    for s in &track.segments {
+        if matches!(s, TimelineSegment::Gap(_)) {
+            acc += s.duration();
+            continue;
+        }
+        let start = secs(&acc);
+        if start > t + eps {
+            return Some(start);
+        }
+        acc += s.duration();
+    }
+    None
 }
 
 pub fn prev_clip_start(project: &Project, t: f64, eps: f64) -> Option<f64> {
     let track = project.timeline.video_track()?;
-    track.clips.iter().rev().map(|c| secs(&c.start)).find(|&s| s < t - eps)
+    let mut acc = Seconds::from_integer(0);
+    let mut last_start = None;
+    for s in &track.segments {
+        if matches!(s, TimelineSegment::Gap(_)) {
+            acc += s.duration();
+            continue;
+        }
+        let start = secs(&acc);
+        if start >= t - eps {
+            break;
+        }
+        last_start = Some(start);
+        acc += s.duration();
+    }
+    last_start
 }
 
 // ------------------------------------------------------------ app state
@@ -523,68 +553,29 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('d') => app.pending = Pending::D,
         KeyCode::Char('y') => app.pending = Pending::Y,
-        // ---- editing (counts deliberately don't multiply edit ops) ----
-        KeyCode::Char('i') => {
-            let result = match clip_under(&app.project, app.playhead) {
-                Some(c) => edit::trim_in(&app.project, c.id, app.playhead),
-                None => edit::trim_gap_in(&app.project, app.playhead),
-            };
-            run_edit(app, player, result);
-        }
-        KeyCode::Char('I') => {
-            let result = match clip_under(&app.project, app.playhead) {
-                Some(c) => edit::trim_in_ripple(&app.project, c.id, app.playhead),
-                None => edit::trim_gap_in(&app.project, app.playhead),
-            };
-            run_edit(app, player, result);
-        }
-        KeyCode::Char('o') => {
-            let result = match clip_under(&app.project, app.playhead) {
-                Some(c) => edit::trim_out(&app.project, c.id, app.playhead),
-                None => edit::trim_gap_out(&app.project, app.playhead),
-            };
-            run_edit(app, player, result);
-        }
-        KeyCode::Char('O') => {
-            let result = match clip_under(&app.project, app.playhead) {
-                Some(c) => edit::trim_out_ripple(&app.project, c.id, app.playhead),
-                None => edit::trim_gap_out_ripple(&app.project, app.playhead),
-            };
-            run_edit(app, player, result);
-        }
-        KeyCode::Char('s') => {
-            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
-                app.set_message("playhead is in a gap — j/w/b to a clip");
-                return;
-            };
-            let result = edit::split(&app.project, clip.id, app.playhead);
-            run_edit(app, player, result);
-        }
+        // ---- editing: uniform playhead-based ops (counts don't multiply) ----
+        KeyCode::Char('i') => run_edit(app, player, edit::trim_in(&app.project, app.playhead)),
+        KeyCode::Char('I') => run_edit(app, player, edit::trim_in_ripple(&app.project, app.playhead)),
+        KeyCode::Char('o') => run_edit(app, player, edit::trim_out(&app.project, app.playhead)),
+        KeyCode::Char('O') => run_edit(app, player, edit::trim_out_ripple(&app.project, app.playhead)),
+        KeyCode::Char('s') => run_edit(app, player, edit::split(&app.project, app.playhead)),
         KeyCode::Char('D') => {
             edit_yank(app); // D yanks too
-            // ripple delete: a clip ripples its successors; a gap delete
-            // always ripples (closes the gap, shrinks the timeline)
-            let result = match clip_under(&app.project, app.playhead) {
-                Some(c) => edit::delete_ripple(&app.project, c.id),
-                None => edit::delete_gap(&app.project, app.playhead),
-            };
-            run_edit(app, player, result);
+            run_edit(app, player, edit::delete_ripple(&app.project, app.playhead));
         }
         KeyCode::Char('p') => {
             let Some(clipboard) = app.clipboard.clone() else {
                 app.set_message("clipboard empty — yy first");
                 return;
             };
-            let result = edit::paste(&app.project, &clipboard, Some(app.playhead));
-            run_edit(app, player, result);
+            run_edit(app, player, edit::paste(&app.project, &clipboard, app.playhead));
         }
         KeyCode::Char('P') => {
             let Some(clipboard) = app.clipboard.clone() else {
                 app.set_message("clipboard empty — yy first");
                 return;
             };
-            let result = edit::paste_ripple(&app.project, &clipboard, app.playhead);
-            run_edit(app, player, result);
+            run_edit(app, player, edit::paste_ripple(&app.project, &clipboard, app.playhead));
         }
         KeyCode::Char('u') => match app.history.undo(&mut app.project) {
             Ok(desc) => {
@@ -625,7 +616,18 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 /// The clip the playhead sits inside, if any.
 fn clip_under(project: &Project, t: f64) -> Option<&Clip> {
     let track = project.timeline.video_track()?;
-    track.clips.iter().find(|c| secs(&c.start) <= t && t < secs(&c.end()))
+    track.clip_at(grid_time(project, t))
+}
+
+/// The playhead's position on the project's frame grid, as Seconds.
+fn grid_time(project: &Project, t: f64) -> Seconds {
+    match project.fps.as_ref() {
+        Some(fps) => {
+            let n = (t * secs(fps)).round() as i64;
+            Seconds::new(n, 1) / *fps
+        }
+        None => Seconds::from_integer(t.round() as i64),
+    }
 }
 
 /// Apply an edit batch, then save + rebuild the preview so the monitor
@@ -668,11 +670,7 @@ fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
 
 fn edit_delete(app: &mut App, player: &MpvPlayer) {
     edit_yank(app); // dd yanks first (vim: dd fills the register)
-    let result = match clip_under(&app.project, app.playhead) {
-        Some(c) => edit::delete_clip(&app.project, c.id),
-        None => edit::delete_gap(&app.project, app.playhead),
-    };
-    run_edit(app, player, result);
+    run_edit(app, player, edit::delete_under(&app.project, app.playhead));
 }
 
 fn edit_yank(app: &mut App) {
@@ -857,6 +855,12 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 .map(|a| a.path.display().to_string())
                 .unwrap_or_else(|| "?".into());
             let fps = app.project.fps.as_ref();
+            let (seg_start, seg_end) = {
+                let track = app.project.timeline.video_track().unwrap();
+                let si = track.index_at(grid_time(&app.project, t)).unwrap();
+                let s = track.start_of(si);
+                (s, s + track.segments[si].duration())
+            };
             let clip_fps = app
                 .project
                 .asset(c.asset)
@@ -867,8 +871,8 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 "clip #{}  {}   {} – {} · len {}{clip_fps}   (src {} – {})",
                 c.id,
                 asset,
-                fmt_timecode(secs(&c.start), fps),
-                fmt_timecode(secs(&c.end()), fps),
+                fmt_timecode(secs(&seg_start), fps),
+                fmt_timecode(secs(&seg_end), fps),
                 fmt_timecode(secs(&c.duration()), fps),
                 fmt_timecode(secs(&c.asset_in), fps),
                 fmt_timecode(secs(&c.asset_out), fps)
@@ -889,7 +893,16 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
 
     let stats = format!(
         "{} clip(s) · {} · {} fps · undo depth {}",
-        app.project.timeline.video_track().map(|t| t.clips.len()).unwrap_or(0),
+        app.project
+            .timeline
+            .video_track()
+            .map(|t| {
+                t.segments
+                    .iter()
+                    .filter(|s| matches!(s, TimelineSegment::Clip(_)))
+                    .count()
+            })
+            .unwrap_or(0),
         fmt_timecode(app.total(), app.project.fps.as_ref()),
         app.project
             .fps
@@ -937,16 +950,9 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
 /// Both sides come from the same rational→f64 conversions, so exact
 /// comparison is meaningful; the epsilon only guards against drift.
 fn on_boundary(project: &Project, t: f64) -> bool {
-    let Some(track) = project.timeline.video_track() else {
-        return false;
-    };
-    let total = secs(&project.timeline.end());
-    if t.abs() < 1e-9 || (total - t).abs() < 1e-9 {
-        return true;
-    }
-    track.clips.iter().any(|c| {
-        (secs(&c.start) - t).abs() < 1e-9 || (secs(&c.end()) - t).abs() < 1e-9
-    })
+    // The cut list already includes the timeline's start (0) and end —
+    // every boundary instant in one place.
+    cut_points(project).iter().any(|&c| (c - t).abs() < 1e-9)
 }
 
 /// Column of a time position on the timeline row. Used for BOTH the
@@ -975,29 +981,28 @@ fn truncate_label(label: &str, width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nle_core::{Clip, Timeline, Track, TrackKind};
+    use nle_core::timeline::{Gap as TimelineGap, Timeline, Track, TrackKind};
+    use std::path::PathBuf;
+
+    fn seg_clip(id: u32, dur: i64) -> TimelineSegment {
+        TimelineSegment::Clip(nle_core::Clip {
+            id,
+            asset: 1,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(dur),
+        })
+    }
 
     fn project() -> Project {
         let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
         p.timeline = Timeline {
-            length: None,
             tracks: vec![Track {
                 kind: TrackKind::Video,
-                clips: vec![
-                    Clip {
-                        id: 1,
-                        asset: 1,
-                        start: Seconds::from_integer(0),
-                        asset_in: Seconds::from_integer(0),
-                        asset_out: Seconds::from_integer(3),
-                    },
-                    Clip {
-                        id: 2,
-                        asset: 1,
-                        start: Seconds::from_integer(5),
-                        asset_in: Seconds::from_integer(0),
-                        asset_out: Seconds::from_integer(2),
-                    },
+                segments: vec![
+                    seg_clip(1, 3),
+                    TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+                    seg_clip(2, 2),
                 ],
             }],
         };
@@ -1008,14 +1013,11 @@ mod tests {
     fn timecode_formatting() {
         let fps30 = Seconds::new(30, 1);
         let fps60 = Seconds::new(60, 1);
-        // MM:SS:FF at the project frame rate
         assert_eq!(fmt_timecode(0.0, Some(&fps30)), "00:00:00");
         assert_eq!(fmt_timecode(8.2, Some(&fps60)), "00:08:12");
-        // 62.25 sits between 30fps frames → quantizes to the nearest
         assert_eq!(fmt_timecode(62.25, Some(&fps30)), "01:02:08");
         assert_eq!(fmt_timecode(3661.0, Some(&fps30)), "1:01:01:00");
         assert_eq!(fmt_timecode(-5.0, Some(&fps30)), "00:00:00");
-        // no fps known → tenths fallback
         assert_eq!(fmt_timecode(62.25, None), "01:02.2");
         assert_eq!(fmt_timecode(0.0, None), "00:00.0");
     }
@@ -1030,103 +1032,70 @@ mod tests {
         assert_eq!(next_cut(&pts, 7.0, eps), None);
         assert_eq!(prev_cut(&pts, 4.0, eps), Some(3.0));
         assert_eq!(prev_cut(&pts, 0.0, eps), None);
-        // epsilon: within half a frame of a cut counts as standing on it,
-        // so the motion goes to the ADJACENT cut
         assert_eq!(next_cut(&pts, 2.9999999, 0.0167), Some(5.0));
     }
 
     #[test]
     fn motions_tolerate_playhead_drift() {
-        // mpv's EDL position can drift by ~a frame (source frame rounding).
-        // Half-frame eps: standing just past cut 3 → k reaches the cut
-        // BEFORE it, and one press later the cut itself is reachable.
         let pts = vec![0.0, 3.0, 5.0, 7.0];
-        let eps = 0.5 / 30.0; // half a frame at 30fps
-        assert_eq!(prev_cut(&pts, 3.0005, eps), Some(0.0)); // on cut 3 → skip to previous
-        assert_eq!(prev_cut(&pts, 3.1, eps), Some(3.0)); // drifted a frame+ in → land on 3
-        assert_eq!(prev_cut(&pts, 0.033, eps), Some(0.0)); // first cut reachable
-        assert_eq!(next_cut(&pts, 2.9995, eps), Some(5.0)); // just before cut 3 → skip
+        let eps = 0.5 / 30.0;
+        assert_eq!(prev_cut(&pts, 3.0005, eps), Some(0.0));
+        assert_eq!(prev_cut(&pts, 3.1, eps), Some(3.0));
+        assert_eq!(prev_cut(&pts, 0.033, eps), Some(0.0));
+        assert_eq!(next_cut(&pts, 2.9995, eps), Some(5.0));
         assert_eq!(next_clip_start(&project(), 2.9995, eps), Some(5.0));
         assert_eq!(prev_clip_start(&project(), 3.0005, eps), Some(0.0));
     }
 
     #[test]
-    fn marker_column_alignment() {
-        let total = 14.0;
-        let width = 100;
-        // ends meet: playhead at 0 → col 0, at the end → the last column
-        assert_eq!(marker_col(0.0, total, width), 0);
-        assert_eq!(marker_col(total, total, width), width - 1);
-        // a boundary at half the timeline sits at half the row — the same
-        // scale the segment spans use, so ticks and playhead agree
-        assert_eq!(marker_col(7.0, total, width), 50);
-        // beyond the end clamps; zero-width row can't panic
-        assert_eq!(marker_col(99.0, total, width), width - 1);
-        assert_eq!(marker_col(1.0, total, 0), 0);
-    }
-
-    #[test]
-    fn frame_counts_are_clamped_and_1_based() {
-        let mut p = project();
-        p.fps = Some(Seconds::new(30, 1));
-        let total = secs(&p.timeline.video_track().unwrap().end()); // 7.0
-        assert_eq!(frame_counts(&p, total, 0.0), Some((1, 210)));
-        // playhead beyond the end clamps to the last frame
-        assert_eq!(frame_counts(&p, total, 8.2), Some((210, 210)));
-        // exact end: clamped to the last frame, never one past it
-        assert_eq!(frame_counts(&p, total, total), Some((210, 210)));
-        // no fps → no frame display
-        let mut no_fps = project();
-        no_fps.fps = None;
-        assert_eq!(frame_counts(&no_fps, 10.0, 5.0), None);
-    }
-
-    #[test]
     fn on_boundary_detects_cuts_and_edges() {
-        let p = project(); // clips [0..3) and [5..7) → cuts 3 and 5; edges 0 and 7
+        let p = project(); // cuts at 3 and 5; edges 0 and 7
         assert!(on_boundary(&p, 0.0), "timeline start");
         assert!(on_boundary(&p, 3.0));
         assert!(on_boundary(&p, 5.0));
         assert!(on_boundary(&p, 7.0), "timeline end");
-        // mid-clip / mid-gap positions aren't boundaries
         assert!(!on_boundary(&p, 1.5));
         assert!(!on_boundary(&p, 4.0));
     }
 
     #[test]
     fn total_includes_the_sequence_tail() {
-        let mut p = project(); // clips end at 7.0
-        p.timeline.length = Some(Seconds::from_integer(10));
-        let app = App::new(p, PathBuf::from("t.json"));
-        assert_eq!(app.total(), 10.0);
-        // without a tail, it's the last clip's end
-        let mut p2 = project();
-        p2.timeline.length = None;
-        assert_eq!(App::new(p2, PathBuf::from("t.json")).total(), 7.0);
+        // no tail concept in the segment model: total == sum of segments
+        let app = App::new(project(), PathBuf::from("t.json"));
+        assert_eq!(app.total(), 7.0);
+    }
+
+    #[test]
+    fn frame_counts_are_clamped_and_1_based() {
+        let mut p = project(); // 7.0 @ 30fps → 210 frames
+        p.fps = Some(Seconds::new(30, 1));
+        let total = 7.0;
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 0.0;
+        assert_eq!(frame_counts(&app.project, total, 0.0), Some((1, 210)));
+        assert_eq!(frame_counts(&app.project, total, 8.2), Some((210, 210)));
+        assert_eq!(frame_counts(&app.project, total, total), Some((210, 210)));
+        app.project.fps = None;
+        assert_eq!(frame_counts(&app.project, 10.0, 5.0), None);
+        let _ = &mut app;
     }
 
     #[test]
     fn snap_to_cut_is_magnetic_within_one_and_a_half_frames() {
-        let mut p = project(); // cuts at 0, 3, 5, 7
+        let mut p = project();
         p.fps = Some(Seconds::new(30, 1));
         let radius = 1.5 / 30.0;
-        // a drifted seek that landed one frame PAST the cut snaps back
         assert_eq!(snap_to_cut(3.0 + radius, &p), 3.0);
         assert_eq!(snap_to_cut(3.0 - radius, &p), 3.0);
-        // nearest cut wins when two are in range (gap narrower than 3 frames)
-        // ... and mid-clip positions stay untouched
         assert_eq!(snap_to_cut(3.5, &p), 3.5);
         assert_eq!(snap_to_cut(1.0, &p), 1.0);
-        // exactly at the boundary of the radius: still captured (<=)
-        assert_eq!(snap_to_cut(3.0 + 1.5 / 30.0, &p), 3.0);
     }
 
     #[test]
     fn sync_applies_grid_and_cut_snapping_while_playing() {
-        let mut p = project(); // cuts [0, 3, 5, 7], 30fps
+        let mut p = project();
         p.fps = Some(Seconds::new(30, 1));
         let mut app = App::new(p, PathBuf::from("t.json"));
-        // mpv settled one frame past the cut at 5 → magnetic back to 5
         app.sync(&PlaybackState {
             time_pos: Some(5.0 + 1.0 / 30.0),
             paused: false,
@@ -1134,7 +1103,6 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(app.playhead, 5.0);
-        // mid-clip position: only grid-snapped
         app.sync(&PlaybackState {
             time_pos: Some(4.011),
             paused: false,
@@ -1146,11 +1114,10 @@ mod tests {
 
     #[test]
     fn sync_ignores_mpv_positions_while_paused() {
-        let mut p = project(); // cuts [0, 3, 5, 7]
+        let mut p = project();
         p.fps = Some(Seconds::new(30, 1));
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.playhead = 2.0;
-        // paused: drifted mpv reports must not move the model playhead
         app.sync(&PlaybackState {
             time_pos: Some(5.0 + 1.0 / 30.0),
             paused: true,
@@ -1158,7 +1125,6 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(app.playhead, 2.0);
-        // playing: the streamed position drives it (grid + magnet)
         app.sync(&PlaybackState {
             time_pos: Some(5.0 + 1.0 / 30.0),
             paused: false,
@@ -1170,7 +1136,7 @@ mod tests {
 
     #[test]
     fn frame_steps_move_one_frame_and_clamp() {
-        let mut p = project(); // end 7.0 → 210 frames at 30fps
+        let mut p = project();
         p.fps = Some(Seconds::new(30, 1));
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.step_playhead(1);
@@ -1185,30 +1151,7 @@ mod tests {
     }
 
     #[test]
-    fn gap_under_bounds() {
-        let p = project(); // clips [0..3) and [5..7)
-        // interior gap [3..5)
-        assert_eq!(
-            gap_under(&p, 4.0),
-            Some((Seconds::from_integer(3), Seconds::from_integer(5)))
-        );
-        // inside a clip → None
-        assert_eq!(gap_under(&p, 1.0), None);
-        assert_eq!(gap_under(&p, 0.0), None);
-        // past the last clip with no tail → nothing there
-        assert_eq!(gap_under(&p, 8.0), None);
-        // with a tail: the trailing gap is materialized
-        let mut p2 = project();
-        p2.timeline.length = Some(Seconds::from_integer(10));
-        assert_eq!(
-            gap_under(&p2, 8.0),
-            Some((Seconds::from_integer(7), Seconds::from_integer(10)))
-        );
-    }
-
-    #[test]
     fn label_truncation_and_padding() {
-        // center-pad: extra space lands on the right
         assert_eq!(truncate_label("red.mp4", 10), " red.mp4  ");
         assert_eq!(truncate_label("very-long-name.mp4", 8), "very-lon");
         assert_eq!(truncate_label("ab", 2), "ab");

@@ -1,0 +1,534 @@
+//! Editing as data: reversible segment operations + undo/redo history.
+//!
+//! Every edit is a small batch of segment ops (Insert / Remove / Replace
+//! at a track index). Because a track is a SEQUENCE:
+//!
+//! - removing a segment is inherently a ripple (followers slide left);
+//! - replacing a clip with a gap preserves the timeline end;
+//! - inserting a segment splits whatever is there and grows the end.
+//!
+//! No length bookkeeping, no overlap validation — those states are not
+//! expressible. One user action = one batch = one undo step; batches are
+//! rolled back wholesale on failure.
+
+use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
+use thiserror::Error;
+
+use crate::project::{Project, ProjectError};
+use crate::time::{format_seconds, Seconds};
+use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
+
+/// Deepest undo stack we keep (batches).
+pub const MAX_HISTORY: usize = 100;
+/// Sidecar file format version (bump when EditOp changes shape).
+pub const HISTORY_VERSION: u32 = 2;
+
+#[derive(Debug, Error)]
+pub enum EditError {
+    #[error("clip #{0} not found")]
+    ClipNotFound(u32),
+    #[error("no track #{0}")]
+    TrackNotFound(usize),
+    #[error("no segment under the playhead (empty timeline?)")]
+    NoSegment,
+    #[error("playhead {0} is on a segment edge — nothing to trim there")]
+    NothingToTrim(String),
+    #[error("result would be shorter than one frame")]
+    TooShort,
+    #[error("cannot extend clip #{id} — no source after {out} (asset ends at {duration})")]
+    BeyondAsset { id: u32, out: String, duration: String },
+    #[error("cannot extend clip #{id} — needs {needed} of source before its in-point ({ain})")]
+    BeforeAsset { id: u32, needed: String, ain: String },
+    #[error("paste needs a gap with room — the playhead is inside a clip")]
+    NoRoom,
+    #[error("nothing to undo")]
+    NothingToUndo,
+    #[error("nothing to redo")]
+    NothingToRedo,
+    #[error("no frame rate set — add a clip first")]
+    NoFps,
+    #[error("playhead is not in a gap")]
+    NoGap,
+    #[error(transparent)]
+    Timeline(#[from] TimelineError),
+    #[error(transparent)]
+    Project(#[from] ProjectError),
+}
+
+/// Serde wrapper: Option<Seconds> as "n/d" strings — enum variant fields
+/// can't carry #[serde(with)] directly, so the newtype does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SerLen(#[serde(with = "crate::time::rational_ser::opt")] Option<Seconds>);
+
+/// One reversible change: a segment inserted / removed / replaced at an
+/// index of the video track's segment list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EditOp {
+    Insert { track: usize, index: usize, segment: Segment },
+    /// The embedded segment is the removed snapshot (its inverse re-adds it).
+    Remove { track: usize, index: usize, segment: Segment },
+    /// `before` is the safety snapshot: applying verifies it's still there.
+    Replace { track: usize, index: usize, before: Segment, after: Segment },
+}
+
+impl EditOp {
+    /// Apply to the project.
+    pub fn apply(&self, project: &mut Project) -> Result<(), EditError> {
+        let segments = match self {
+            EditOp::Insert { track, .. } | EditOp::Remove { track, .. } | EditOp::Replace { track, .. } => {
+                project
+                    .timeline
+                    .tracks
+                    .get_mut(*track)
+                    .ok_or(EditError::TrackNotFound(*track))?
+                    .segments
+                    .as_mut_slice()
+            }
+        };
+        match self {
+            EditOp::Insert { index, segment, .. } => {
+                if *index > segments.len() {
+                    return Err(EditError::SegmentNotFound(*index));
+                }
+                segments.insert(*index, segment.clone());
+            }
+            EditOp::Remove { index, segment, .. } => {
+                let current = segments
+                    .get_mut(*index)
+                    .ok_or(EditError::SegmentNotFound(*index))?;
+                if current != segment {
+                    return Err(EditError::Timeline(TimelineError::Corrupt(format!(
+                        "segment {} changed under the undo stack",
+                        index
+                    ))));
+                }
+                segments.remove(*index);
+            }
+            EditOp::Replace { index, before, after, .. } => {
+                let current = segments
+                    .get_mut(*index)
+                    .ok_or(EditError::SegmentNotFound(*index))?;
+                if current != before {
+                    return Err(EditError::Timeline(TimelineError::Corrupt(format!(
+                        "segment {} changed under the undo stack",
+                        index
+                    ))));
+                }
+                *current = after.clone();
+            }
+        }
+        Ok(())
+    }
+
+    /// The op that undoes this one.
+    pub fn invert(&self) -> EditOp {
+        match self {
+            EditOp::Insert { track, index, segment } => EditOp::Remove {
+                track: *track,
+                index: *index,
+                segment: segment.clone(),
+            },
+            EditOp::Remove { track, index, segment } => EditOp::Insert {
+                track: *track,
+                index: *index,
+                segment: segment.clone(),
+            },
+            EditOp::Replace { track, index, before, after } => EditOp::Replace {
+                track: *track,
+                index: *index,
+                before: after.clone(),
+                after: before.clone(),
+            },
+        }
+    }
+}
+
+/// A user action: ops applied together, undone together.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Batch {
+    pub ops: Vec<EditOp>,
+    /// Human description, shown in the TUI message line.
+    pub desc: String,
+}
+
+/// Undo/redo stack of batches. `apply` is the only way in — it validates,
+/// rolls back on failure, clears the redo stack, and caps the depth.
+#[derive(Debug, Default, Clone)]
+pub struct History {
+    done: Vec<Batch>,
+    undone: Vec<Batch>,
+}
+
+impl History {
+    pub fn apply(&mut self, project: &mut Project, batch: Batch) -> Result<(), EditError> {
+        apply_batch(project, &batch.ops)?;
+        project.validate()?;
+        self.done.push(batch);
+        self.undone.clear();
+        if self.done.len() > MAX_HISTORY {
+            let excess = self.done.len() - MAX_HISTORY;
+            self.done.drain(0..excess);
+        }
+        Ok(())
+    }
+
+    pub fn undo(&mut self, project: &mut Project) -> Result<String, EditError> {
+        let batch = self.done.pop().ok_or(EditError::NothingToUndo)?;
+        let inverses: Vec<EditOp> = batch.ops.iter().rev().map(|op| op.invert()).collect();
+        apply_batch(project, &inverses)?;
+        project.validate()?;
+        self.undone.push(batch.clone());
+        Ok(batch.desc)
+    }
+
+    pub fn redo(&mut self, project: &mut Project) -> Result<String, EditError> {
+        let batch = self.undone.pop().ok_or(EditError::NothingToRedo)?;
+        apply_batch(project, &batch.ops)?;
+        project.validate()?;
+        self.done.push(batch.clone());
+        Ok(batch.desc)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.done.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
+    }
+
+    pub fn depth(&self) -> usize {
+        self.done.len()
+    }
+
+    /// Serializable snapshot of both stacks (persisted in a sidecar file).
+    pub fn state(&self) -> HistoryState {
+        HistoryState {
+            version: HISTORY_VERSION,
+            done: self.done.clone(),
+            undone: self.undone.clone(),
+        }
+    }
+
+    /// Rebuild a History from a snapshot, honoring the depth cap.
+    pub fn restore(state: HistoryState) -> Self {
+        if state.version != HISTORY_VERSION {
+            return Self::default();
+        }
+        let mut done = state.done;
+        if done.len() > MAX_HISTORY {
+            let excess = done.len() - MAX_HISTORY;
+            done.drain(0..excess);
+        }
+        Self {
+            done,
+            undone: state.undone,
+        }
+    }
+
+    /// Atomic save to the sidecar file (crash can't corrupt it).
+    pub fn save(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
+        let mut json = serde_json::to_string_pretty(&self.state())?;
+        json.push('\n');
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let tmp = NamedTempFile::new_in(dir)?;
+        tmp.as_file().write_all(json.as_bytes())?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    /// Load a sidecar. Missing or unreadable file → error; use
+    /// `History::default()` at the call site to start fresh.
+    pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
+        let text = std::fs::read_to_string(path)?;
+        let state: HistoryState = serde_json::from_str(&text)
+            .map_err(|e| std::io::Error::other(format!("corrupt history file: {e}")))?;
+        if state.version != HISTORY_VERSION {
+            return Err(std::io::Error::other(format!(
+                "history version {} unsupported (this build reads v{HISTORY_VERSION})",
+                state.version
+            )));
+        }
+        Ok(Self::restore(state))
+    }
+}
+
+/// Serializable snapshot of the undo/redo stacks (the sidecar file).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryState {
+    pub version: u32,
+    pub done: Vec<Batch>,
+    pub undone: Vec<Batch>,
+}
+
+/// Apply ops in order; on any failure, roll back the applied prefix in
+/// reverse so the project is exactly as it was before.
+fn apply_batch(project: &mut Project, ops: &[EditOp]) -> Result<(), EditError> {
+    for (applied, op) in ops.iter().enumerate() {
+        if let Err(e) = op.apply(project) {
+            for prev in ops[..applied].iter().rev() {
+                // Inverses of applied ops must succeed; if they don't,
+                // that's a bug we want to see loudly, not silently corrupt.
+                prev.invert().apply(project).expect("history rollback");
+            }
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------ helpers
+
+fn video_track_index(project: &Project) -> Result<usize, EditError> {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .position(|t| t.kind == TrackKind::Video)
+        .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))
+}
+
+/// Snap a float playhead to the nearest frame of the project's fps.
+fn snap(project: &Project, t: f64) -> Result<Seconds, EditError> {
+    let fps = project.fps.clone().ok_or(EditError::NoFps)?;
+    let n = (t * secs_f64(&fps)).round() as i64;
+    Ok(Seconds::new(n, 1) / fps)
+}
+
+fn secs_f64(t: &Seconds) -> f64 {
+    *t.numer() as f64 / *t.denom() as f64
+}
+
+/// Result of a trim must leave at least one frame.
+fn at_least_a_frame(project: &Project, dur: &Seconds) -> Result<(), EditError> {
+    let fps = project.fps.clone().ok_or(EditError::NoFps)?;
+    if (dur.clone() * fps).round().to_integer() >= 1 {
+        Ok(())
+    } else {
+        Err(EditError::TooShort)
+    }
+}
+
+/// The clip segment containing the (snapped) playhead.
+fn clip_at(project: &Project, t: &Seconds) -> Result<(usize, usize, Clip), EditError> {
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let si = track
+        .index_at(t.clone())
+        .ok_or(EditError::NoSegment)?;
+    match &track.segments[si] {
+        Segment::Clip(c) => Ok((ti, si, c.clone())),
+        Segment::Gap(_) => Err(EditError::NoGap),
+    }
+}
+
+/// The gap segment containing the (snapped) playhead, merging adjacent
+/// gaps so edits see one region.
+fn gap_region_at(project: &Project, t: &Seconds) -> Result<(usize, usize, usize, Seconds, Seconds), EditError> {
+    // (track, first gap index, last gap index, region start, region end)
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let si = track
+        .index_at(t.clone())
+        .ok_or(EditError::NoSegment)?;
+    if !matches!(track.segments[si], Segment::Gap(_)) {
+        return Err(EditError::NoGap); // inside a clip
+    }
+    let mut first = si;
+    while first > 0 && matches!(track.segments[first - 1], Segment::Gap(_)) {
+        first -= 1;
+    }
+    let mut last = si;
+    while last + 1 < track.segments.len() && matches!(track.segments[last + 1], Segment::Gap(_)) {
+        last += 1;
+    }
+    let start = track.start_of(first);
+    let end = track.start_of(last) + track.segments[last].duration();
+    Ok((ti, first, last, start, end))
+}
+
+/// The neighbor clips around a gap region: (prev clip segment index+clip,
+/// next clip segment index+clip).
+fn gap_neighbors(
+    project: &Project,
+    ti: usize,
+    first: usize,
+    last: usize,
+) -> (Option<(usize, Clip)>, Option<(usize, Clip)>) {
+    let track = &project.timeline.tracks[ti];
+    let prev = if first > 0 {
+        match &track.segments[first - 1] {
+            Segment::Clip(c) => Some((first - 1, c.clone())),
+            Segment::Gap(_) => None,
+        }
+    } else {
+        None
+    };
+    let next = if last + 1 < track.segments.len() {
+        match &track.segments[last + 1] {
+            Segment::Clip(c) => Some((last + 1, c.clone())),
+            Segment::Gap(_) => None,
+        }
+    } else {
+        None
+    };
+    (prev, next)
+}
+
+/// Build a Replace+Inserts batch that swaps the segment at `index` for a
+/// list of pieces (used by splits and inserts). Pieces must be non-empty.
+fn replace_with_many(track_idx: usize, index: usize, before: &Segment, pieces: Vec<Segment>) -> Vec<EditOp> {
+    let mut ops = Vec::new();
+    ops.push(EditOp::Replace {
+        track: track_idx,
+        index,
+        before: before.clone(),
+        after: pieces[0].clone(),
+    });
+    for (k, piece) in pieces[1..].iter().enumerate() {
+        ops.push(EditOp::Insert {
+            track: track_idx,
+            index: index + 1 + k,
+            segment: piece.clone(),
+        });
+    }
+    ops
+}
+
+// ------------------------------------------------------------ operations
+
+/// `i` — trim the in-edge of whatever is under the playhead:
+/// - clip: its head is cut at the playhead and a gap of the trimmed
+///   material takes its place (everything else stays put);
+/// - gap: the previous clip's tail extends into it (material permitting);
+///   a leading gap shortens from the front.
+pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let si = track.index_at(t.clone()).ok_or(EditError::NoSegment)?;
+    match &track.segments[si] {
+        Segment::Clip(c) => {
+            let seg_start = track.start_of(si);
+            let delta = t.clone() - seg_start;
+            if delta <= Seconds::from_integer(0) {
+                return Err(EditError::NothingToTrim(format_seconds(&t)));
+            }
+            let after = Clip {
+                id: c.id,
+                asset: c.asset,
+                asset_in: c.asset_in.clone() + delta.clone(),
+                asset_out: c.asset_out.clone(),
+            };
+            at_least_a_frame(project, &after.duration())?;
+            let before = Segment::Clip(c.clone());
+            let mut ops = vec![EditOp::Replace {
+                track: ti,
+                index: si,
+                before,
+                after: Segment::Clip(after),
+            }];
+            ops.push(EditOp::Insert {
+                track: ti,
+                index: si,
+                segment: Segment::Gap(Gap { duration: delta }),
+            });
+            Ok(Batch {
+                ops,
+                desc: format!("trim in to {}", format_seconds(&t)),
+            })
+        }
+        Segment::Gap(_) => {
+            let (ti, first, _last, rs, _re) = gap_region_at(project, &t)?;
+            let track = &project.timeline.tracks[ti];
+            let delta = t.clone() - rs.clone();
+            if delta <= Seconds::from_integer(0) {
+                return Err(EditError::NothingToTrim(format_seconds(&t)));
+            }
+            if first == 0 {
+                // Leading gap: shorten from the front — the timeline start
+                // advances past the trimmed material.
+                let g = match &track.segments[first] {
+                    Segment::Gap(g) => g.clone(),
+                    Segment::Clip(_) => unreachable!("gap region starts with a gap"),
+                };
+                if g.duration - delta.clone() <= Seconds::from_integer(0) {
+                    // the whole region would vanish: remove it
+                    let mut ops = Vec::new();
+                    for k in (first..=_last_of(first, &track.segments)).rev() {
+                        let seg = track.segments[k].clone();
+                        ops.push(EditOp::Remove { track: ti, index: k, segment: seg });
+                    }
+                    return Ok(Batch {
+                        ops,
+                        desc: format!("trim gap in to {}", format_seconds(&t)),
+                    });
+                }
+                return Ok(Batch {
+                    ops: vec![EditOp::Replace {
+                        track: ti,
+                        index: first,
+                        before: Segment::Gap(g),
+                        after: Segment::Gap(Gap { duration: g.duration - delta }),
+                    }],
+                    desc: format!("trim gap in to {}", format_seconds(&t)),
+                });
+            }
+            // Interior gap: the previous clip's tail extends into it.
+            let (pi, prev) = match &track.segments[first - 1] {
+                Segment::Clip(c) => (first - 1, c.clone()),
+                Segment::Gap(_) => unreachable!("region merges adjacent gaps"),
+            };
+            let mut after = prev.clone();
+            after.asset_out = prev.asset_out.clone() + delta.clone();
+            let asset = project
+                .asset(after.asset)
+                .ok_or(EditError::ClipNotFound(after.asset))?;
+            if let Some(d) = asset.duration()
+                && after.asset_out > d
+            {
+                return Err(EditError::BeyondAsset {
+                    id: prev.id,
+                    out: format_seconds(&after.asset_out),
+                    duration: format_seconds(&d),
+                });
+            }
+            let region_len = _last_of(first, &track.segments);
+            let _ = region_len;
+            let mut ops = vec![EditOp::Replace {
+                track: ti,
+                index: pi,
+                before: Segment::Clip(prev),
+                after: Segment::Clip(after),
+            }];
+            // shrink the region's FIRST gap by delta
+            let first_gap = match &track.segments[first] {
+                Segment::Gap(g) => g.clone(),
+                Segment::Clip(_) => unreachable!(),
+            };
+            ops.push(EditOp::Replace {
+                track: ti,
+                index: first,
+                before: Segment::Gap(first_gap.clone()),
+                after: Segment::Gap(Gap { duration: first_gap.duration - delta }),
+            });
+            Ok(Batch {
+                ops,
+                desc: format!("trim gap in to {}", format_seconds(&t)),
+            })
+        }
+    }
+}
+
+fn _last_of(first: usize, segments: &[Segment]) -> usize {
+    let mut last = first;
+    while last + 1 < segments.len() && matches!(segments[last + 1], Segment::Gap(_)) {
+        last += 1;
+    }
+    last
+}

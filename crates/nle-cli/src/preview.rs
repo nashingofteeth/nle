@@ -13,7 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nle_core::{format_seconds, Clip, Project, Seconds};
+use nle_core::timeline::Segment as TimelineSegment;
+use nle_core::{format_seconds, Project, Seconds};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -53,44 +54,34 @@ pub enum Segment {
     },
 }
 
-/// Flatten the video track into ordered segments (clips + gaps).
+/// Flatten the video track into ordered preview segments.
 pub fn segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
     let track = project
         .timeline
         .video_track()
         .ok_or(PreviewError::NoVideoTrack)?;
-    let mut clips: Vec<&Clip> = track.clips.iter().collect();
-    clips.sort_by_key(|c| c.start);
-    if clips.is_empty() {
+    if track.segments.is_empty() {
         return Err(PreviewError::Empty);
     }
 
     let mut segs = Vec::new();
-    let mut cursor = Seconds::from_integer(0);
-    for clip in clips {
-        if clip.start > cursor {
-            segs.push(Segment::Gap {
-                length: clip.start - cursor,
-            });
+    for seg in &track.segments {
+        match seg {
+            TimelineSegment::Clip(c) => {
+                let asset = project
+                    .asset(c.asset)
+                    .ok_or(PreviewError::MissingAsset(c.asset))?;
+                segs.push(Segment::Clip {
+                    path: asset.path.clone(),
+                    start: c.asset_in,
+                    length: c.duration(),
+                });
+            }
+            TimelineSegment::Gap(g) => segs.push(Segment::Gap {
+                length: g.duration,
+            }),
         }
-        let asset = project
-            .asset(clip.asset)
-            .ok_or(PreviewError::MissingAsset(clip.asset))?;
-        segs.push(Segment::Clip {
-            path: asset.path.clone(),
-            start: clip.asset_in,
-            length: clip.duration(),
-        });
-        cursor = clip.end();
     }
-
-    // Trailing sequence tail → gap segment.
-    if let Some(len) = &project.timeline.length
-        && *len > cursor {
-            segs.push(Segment::Gap {
-                length: *len - cursor,
-            });
-        }
     Ok(segs)
 }
 
@@ -182,8 +173,31 @@ pub fn ensure_black_file(width: u32, height: u32, fps: &Seconds) -> Result<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nle_core::media::{RawFormat, RawStream};
-    use nle_core::{RawProbe, Timeline, Track, TrackKind};
+    use nle_core::media::{RawFormat, RawProbe, RawStream};
+    use nle_core::timeline::{Clip as TimelineClip, Gap as TimelineGap, Segment as TimelineSegment};
+    use nle_core::VideoSettings;
+
+    fn seg_clip(id: u32, ain: i64, aout: i64) -> TimelineSegment {
+        TimelineSegment::Clip(TimelineClip {
+            id,
+            asset: 1,
+            asset_in: Seconds::from_integer(ain),
+            asset_out: Seconds::from_integer(aout),
+        })
+    }
+
+    fn project_with_gap() -> Project {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        p.video = Some(VideoSettings { width: 320, height: 240 });
+        let (_a, _) = p.add_asset("/media/red.mp4".into(), probe_report("5"));
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            seg_clip(1, 1, 3),   // [0..2) src 1..3
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
+            seg_clip(2, 0, 3),   // [5..8) src 0..3
+        ];
+        p
+    }
 
     fn probe_report(duration: &str) -> nle_core::RawProbe {
         RawProbe {
@@ -204,42 +218,6 @@ mod tests {
         }
     }
 
-    fn project_with_gap() -> Project {
-        let mut p = Project::new();
-        p.fps = Some(Seconds::new(30, 1));
-        p.video = Some(nle_core::VideoSettings { width: 320, height: 240 });
-        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("5"));
-        p.timeline = Timeline {
-            length: None,
-            tracks: vec![Track {
-                kind: TrackKind::Video,
-                clips: vec![
-                    Clip {
-                        id: 1,
-                        asset: a,
-                        start: Seconds::from_integer(0),
-                        asset_in: Seconds::from_integer(1),
-                        asset_out: Seconds::from_integer(3),
-                    },
-                    Clip {
-                        id: 2,
-                        asset: a,
-                        start: Seconds::from_integer(5),
-                        asset_in: Seconds::new(1, 2),
-                        asset_out: Seconds::new(7, 2),
-                    },
-                ],
-            }],
-        };
-        p
-    }
-
-    #[test]
-    fn quote_always_uses_length_prefix() {
-        assert_eq!(edl_quote("plain.mp4"), "%9%plain.mp4");
-        assert_eq!(edl_quote("a,b;c"), "%5%a,b;c");
-    }
-
     #[test]
     fn segments_flatten_clips_and_gaps_in_order() {
         let p = project_with_gap();
@@ -255,7 +233,7 @@ mod tests {
                 Segment::Gap { length: Seconds::from_integer(3) },
                 Segment::Clip {
                     path: "/media/red.mp4".into(),
-                    start: Seconds::new(1, 2),
+                    start: Seconds::from_integer(0),
                     length: Seconds::from_integer(3),
                 },
             ]
@@ -263,16 +241,9 @@ mod tests {
     }
 
     #[test]
-    fn segments_include_the_trailing_tail() {
-        let mut p = project_with_gap();
-        p.timeline.length = Some(Seconds::from_integer(10)); // clips+gap end at 8
-        let segs = segments(&p).unwrap();
-        assert_eq!(
-            segs.last(),
-            Some(&Segment::Gap {
-                length: Seconds::from_integer(2)
-            })
-        );
+    fn quote_always_uses_length_prefix() {
+        assert_eq!(edl_quote("plain.mp4"), "%9%plain.mp4");
+        assert_eq!(edl_quote("a,b;c"), "%5%a,b;c");
     }
 
     #[test]

@@ -1,25 +1,23 @@
-//! Graph compiler v0: single video track → one `filter_complex` graph.
+//! Graph compiler: video track segments → one `filter_complex` graph.
 //!
-//! The timeline is a sequence of segments (clips and gaps). Each becomes
-//! two filter chains — video and audio — normalized to the project's
-//! output settings, then concatenated:
+//! The model IS the segment list now — there's no gap synthesis or
+//! position math: each segment becomes two filter chains (video+audio),
+//! normalized to the project's output settings, then concatenated.
 //!
 //! ```text
-//! [0:v]trim=start=2,duration=3,setpts=PTS-STARTPTS,scale=…,fps=…[v0]
-//! [0:a]atrim=start=2,duration=3,asetpts=PTS-STARTPTS,aformat=…[a0]
+//! [0:v]trim=start=2:duration=3,setpts=PTS-STARTPTS,scale=…,fps=…[v0]
+//! [0:a]atrim=start=2:duration=3,asetpts=PTS-STARTPTS,aformat=…[a0]
 //! color=…:d=2[v1]           ← gap → black
 //! anullsrc…[a1]             ← gap → silence
 //! [v0][v1]concat=n=2:v=1:a=0[vout]
 //! [a0][a1]concat=n=2:v=0:a=1[aout]
 //! ```
-//!
-//! All positions snap to the frame grid of the project frame rate, so
-//! every cut point is frame-exact even though the model stores seconds.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nle_core::{format_seconds, Clip, Project, Seconds};
+use nle_core::{format_seconds, Project, Seconds};
+use nle_core::timeline::Segment;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
@@ -38,10 +36,6 @@ pub enum CompileError {
     NoSize,
     #[error("no video track in timeline")]
     NoVideoTrack,
-    #[error("clip #{0} is shorter than one frame at the project frame rate")]
-    TooShort(u32),
-    #[error("clips overlap on the timeline near {0}")]
-    Overlap(String),
     #[error("asset #{0} is referenced by the timeline but missing from the media pool")]
     MissingAsset(u32),
 }
@@ -56,14 +50,11 @@ pub enum ExportError {
     Ffmpeg(#[from] FfmpegError),
 }
 
-/// One segment of the flattened timeline.
-enum Segment {
+/// One flattened segment for the filter graph.
+enum Piece {
     Clip {
-        /// Index into ExportPlan::inputs.
         input: usize,
-        /// Source in-point (seconds, frame-aligned).
         src_start: String,
-        /// Segment duration (seconds, frame-aligned).
         dur: String,
         has_audio: bool,
     },
@@ -83,7 +74,7 @@ pub struct ExportPlan {
     pub fps: Seconds,
     /// Total output frames.
     pub frames: i64,
-    /// Exact total duration (frames / fps).
+    /// Exact total duration (sum of segment durations).
     pub duration: Seconds,
 }
 
@@ -93,80 +84,48 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
         .timeline
         .video_track()
         .ok_or(CompileError::NoVideoTrack)?;
-    let mut clips: Vec<&Clip> = track.clips.iter().collect();
-    clips.sort_by_key(|a| a.start);
-    if clips.is_empty() {
+    if track.segments.is_empty() {
         return Err(CompileError::Empty);
     }
     let fps = project.fps.ok_or(CompileError::NoFps)?;
     let settings = project.video.as_ref().ok_or(CompileError::NoSize)?;
     let (w, h) = (settings.width, settings.height);
+    let fps_s = format!("{}/{}", fps.numer(), fps.denom());
 
-    // Timeline position → frame index on the output grid.
-    // round() returns a Ratio; to_integer() is the i64 extraction.
-    let frame = |t: &Seconds| -> i64 { (*t * fps).round().to_integer() };
-
-    let mut segments: Vec<Segment> = Vec::new();
+    let mut pieces: Vec<Piece> = Vec::new();
     let mut input_of: HashMap<u32, usize> = HashMap::new();
     let mut inputs: Vec<PathBuf> = Vec::new();
-    let mut cursor = 0i64; // current end of output, in frames
 
-    for clip in clips {
-        let asset = project
-            .asset(clip.asset)
-            .ok_or(CompileError::MissingAsset(clip.asset))?;
-
-        let start_f = frame(&clip.start);
-        if start_f < cursor {
-            return Err(CompileError::Overlap(format_seconds(&clip.start)));
-        }
-        if start_f > cursor {
-            // gap → black + silence (cursor jumps ahead below, past the gap)
-            let gap = Seconds::new(start_f - cursor, 1) / fps;
-            segments.push(Segment::Gap { dur: format_seconds(&gap) });
-        }
-
-        let in_f = frame(&clip.asset_in);
-        let out_f = frame(&clip.asset_out);
-        if out_f <= in_f {
-            return Err(CompileError::TooShort(clip.id));
-        }
-
-        // One -i per distinct asset; clips sharing an asset share the input
-        // (the graph is purely sequential, so inputs are never busy twice).
-        let input = *input_of.entry(clip.asset).or_insert_with(|| {
-            inputs.push(asset.path.clone());
-            inputs.len() - 1
-        });
-
-        let src_start = Seconds::new(in_f, 1) / fps;
-        let dur = Seconds::new(out_f - in_f, 1) / fps;
-        segments.push(Segment::Clip {
-            input,
-            src_start: format_seconds(&src_start),
-            dur: format_seconds(&dur),
-            has_audio: asset.probe.has_audio(),
-        });
-        cursor = start_f + (out_f - in_f);
-    }
-
-    // Trailing sequence tail: fill with black + silence so the export
-    // honors the timeline's displayed end.
-    if let Some(len) = &project.timeline.length {
-        let len_f = frame(len);
-        if len_f > cursor {
-            let gap = Seconds::new(len_f - cursor, 1) / fps;
-            segments.push(Segment::Gap { dur: format_seconds(&gap) });
-            cursor = len_f;
+    for seg in &track.segments {
+        match seg {
+            Segment::Clip(c) => {
+                let asset = project
+                    .asset(c.asset)
+                    .ok_or(CompileError::MissingAsset(c.asset))?;
+                // One -i per distinct asset; the graph is sequential, so
+                // inputs are never busy twice.
+                let input = *input_of.entry(c.asset).or_insert_with(|| {
+                    inputs.push(asset.path.clone());
+                    inputs.len() - 1
+                });
+                pieces.push(Piece::Clip {
+                    input,
+                    src_start: format_seconds(&c.asset_in),
+                    dur: format_seconds(&c.duration()),
+                    has_audio: asset.probe.has_audio(),
+                });
+            }
+            Segment::Gap(g) => pieces.push(Piece::Gap {
+                dur: format_seconds(&g.duration),
+            }),
         }
     }
 
     // Emit the graph.
-    let fps_s = format!("{}/{}", fps.numer(), fps.denom());
     let mut graph = String::new();
-    for (i, seg) in segments.iter().enumerate() {
-        match seg {
-            Segment::Clip { input, src_start, dur, has_audio } => {
+    for (i, piece) in pieces.iter().enumerate() {
+        match piece {
+            Piece::Clip { input, src_start, dur, has_audio } => {
                 graph.push_str(&format!(
                     "[{input}:v]trim=start={src_start}:duration={dur},setpts=PTS-STARTPTS,\
                      scale={w}:{h},setsar=1,fps={fps_s},format=yuv420p[v{i}];\n"
@@ -187,7 +146,7 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
                     ));
                 }
             }
-            Segment::Gap { dur } => {
+            Piece::Gap { dur } => {
                 graph.push_str(&format!(
                     "color=c=black:s={w}x{h}:r={fps_s}:d={dur},format=yuv420p[v{i}];\n"
                 ));
@@ -200,31 +159,23 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
             }
         }
     }
-    let n = segments.len();
+    let n = pieces.len();
     let v_in: String = (0..n).map(|i| format!("[v{i}]")).collect();
     let a_in: String = (0..n).map(|i| format!("[a{i}]")).collect();
     graph.push_str(&format!("{v_in}concat=n={n}:v=1:a=0[vout];\n"));
     graph.push_str(&format!("{a_in}concat=n={n}:v=0:a=1[aout]\n"));
 
+    let duration = track.end();
+    let frames = (secs_f64(&duration) * secs_f64(&fps)).round() as i64;
     Ok(ExportPlan {
         inputs,
         graph,
         width: w,
         height: h,
         fps,
-        frames: cursor,
-        duration: Seconds::new(cursor, 1) / fps,
+        frames,
+        duration,
     })
-}
-
-/// Export settings beyond what the graph compiler decides.
-#[derive(Debug, Clone)]
-pub struct ExportSpec {
-    pub output: PathBuf,
-    pub encoder: Encoder,
-    pub crf: u8,
-    pub preset: String,
-    pub bitrate: String,
 }
 
 /// Hardware encoders can't sit directly after a software filter graph —
@@ -244,6 +195,16 @@ fn apply_encoder_tail(graph: String, encoder: Encoder) -> (String, &'static str)
         }
     };
     (graph, vmap)
+}
+
+/// Export settings beyond what the graph compiler decides.
+#[derive(Debug, Clone)]
+pub struct ExportSpec {
+    pub output: PathBuf,
+    pub encoder: Encoder,
+    pub crf: u8,
+    pub preset: String,
+    pub bitrate: String,
 }
 
 /// Compile the graph and run the export. Returns the plan on success.
@@ -286,14 +247,18 @@ pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, Export
     Ok(plan) // script deleted on drop, after ffmpeg is done
 }
 
+fn secs_f64(t: &Seconds) -> f64 {
+    *t.numer() as f64 / *t.denom() as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nle_core::media::{RawFormat, RawStream, RawProbe};
-    use nle_core::Project;
-    use std::path::PathBuf;
+    use nle_core::media::{RawFormat, RawProbe, RawStream};
+    use nle_core::timeline::{Clip, Gap};
+    use nle_core::VideoSettings;
 
-    fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> nle_core::RawProbe {
+    fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
             index: 0,
             codec_type: Some("video".into()),
@@ -327,13 +292,16 @@ mod tests {
 
     fn project_with_two_clips() -> Project {
         let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        p.video = Some(VideoSettings { width: 1920, height: 1080 });
         let (a0, _) = p.add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
         let (a1, _) = p.add_asset("b.mp4".into(), probe_report("8", 1280, 720, "30000/1001", false));
-        p.add_clip(a0, None, Seconds::from_integer(0), Seconds::from_integer(10))
-            .unwrap();
-        // gap 10s→12s, then 3s from b.mp4's second 3 seconds
-        p.add_clip(a1, Some(Seconds::from_integer(12)), Seconds::from_integer(2), Seconds::from_integer(5))
-            .unwrap();
+        let track = p.timeline.video_track_mut().unwrap();
+        track.segments = vec![
+            Segment::Clip(Clip { id: 1, asset: a0, asset_in: Seconds::from_integer(0), asset_out: Seconds::from_integer(10) }),
+            Segment::Gap(Gap { duration: Seconds::from_integer(2) }),
+            Segment::Clip(Clip { id: 2, asset: a1, asset_in: Seconds::from_integer(2), asset_out: Seconds::from_integer(5) }),
+        ];
         p
     }
 
@@ -351,7 +319,7 @@ mod tests {
         // clip 1: full 10s from input 0
         assert!(g.contains("[0:v]trim=start=0:duration=10,"), "{g}");
         assert!(g.contains("[0:a]atrim=start=0:duration=10,"), "{g}");
-        // gap 10→12 → black + silence
+        // gap → black + silence
         assert!(g.contains("color=c=black:s=1920x1080:r=30/1:d=2"), "{g}");
         // clip 2: src 2–5 from input 1; b.mp4 has no audio → anullsrc
         assert!(g.contains("[1:v]trim=start=2:duration=3,"), "{g}");
@@ -366,42 +334,21 @@ mod tests {
     }
 
     #[test]
-    fn frame_snapping_keeps_cuts_exact() {
-        let mut p = Project::new();
-        let (a, _) = p.add_asset("a.mp4".into(), probe_report("15", 640, 480, "30000/1001", true));
-        // in-point 0.5s → 14.985 frames → snaps to 15; out 12.5s → 374.6 → 375
-        p.add_clip(a, None, Seconds::new(1, 2), Seconds::new(25, 2)).unwrap();
-        let plan = compile_export(&p).unwrap();
-        // seconds on the frame grid: 15/29.97 = 0.5005, 360 frames = 12.012s
-        assert!(plan.graph.contains("trim=start=0.5005:duration=12.012,"), "{}", plan.graph);
-        assert_eq!(plan.frames, 360);
-    }
-
-    #[test]
-    fn rejects_empty_and_too_short() {
-        let empty = Project::new();
-        assert!(matches!(compile_export(&empty), Err(CompileError::Empty)));
-
-        let mut p = Project::new();
-        let (a, _) = p.add_asset("a.mp4".into(), probe_report("10", 640, 480, "30/1", true));
-        // 0.01s = 0.3 frames @30 → less than one frame
-        p.add_clip(a, None, Seconds::from_integer(0), Seconds::new(1, 100)).unwrap();
-        assert!(matches!(
-            compile_export(&p),
-            Err(CompileError::TooShort(1))
-        ));
-    }
-
-    #[test]
-    fn trailing_tail_fills_the_export() {
+    fn trailing_gap_segment_fills_the_export() {
         let mut p = project_with_two_clips();
-        p.timeline.length = Some(Seconds::new(20, 1)); // clips end at 15
+        p.timeline.video_track_mut().unwrap().segments.push(Segment::Gap(Gap {
+            duration: Seconds::from_integer(5),
+        }));
         let plan = compile_export(&p).unwrap();
-        // gap [15..20) → black + silence, 150 extra frames
         assert!(plan.graph.contains("color=c=black:s=1920x1080:r=30/1:d=5"), "{}", plan.graph);
-        assert!(plan.graph.contains("anullsrc=r=48000:cl=stereo,atrim=duration=5"), "{}", plan.graph);
         assert_eq!(plan.frames, 600);
         assert_eq!(plan.duration, Seconds::from_integer(20));
+    }
+
+    #[test]
+    fn rejects_empty() {
+        let empty = Project::new();
+        assert!(matches!(compile_export(&empty), Err(CompileError::Empty)));
     }
 
     #[test]
