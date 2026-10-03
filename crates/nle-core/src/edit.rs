@@ -528,6 +528,115 @@ pub fn delete_gap(project: &Project, playhead: f64) -> Result<Batch, EditError> 
     })
 }
 
+/// Trim a gap's in-edge to the (snapped) playhead: the previous clip
+/// extends into the gap (its source tail grows — needs material); a
+/// leading gap instead shifts every clip left. A trailing gap's in-edge
+/// also extends the last clip.
+pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let ti = video_track_index(project)?;
+    let track = project
+        .timeline
+        .video_track()
+        .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))?;
+    let at = snap(project, playhead)?;
+
+    let mut gs = Seconds::from_integer(0);
+    let mut prev: Option<&Clip> = None;
+    let mut ge: Option<Seconds> = None;
+    for c in &track.clips {
+        if at < c.start {
+            ge = Some(c.start);
+            break;
+        }
+        gs = c.end();
+        prev = Some(c);
+    }
+    // at must be strictly inside the gap [gs, ge) — ge may be None (trailing).
+    if at <= gs || ge.as_ref().is_some_and(|ge| at >= *ge) {
+        return Err(EditError::NoGap);
+    }
+    let delta = at - gs;
+
+    match prev {
+        Some(p) => {
+            let mut after = p.clone();
+            after.asset_out += delta;
+            let asset = project
+                .asset(p.asset)
+                .ok_or(EditError::ClipNotFound(p.asset))?;
+            if let Some(d) = asset.duration()
+                && after.asset_out > d {
+                    return Err(EditError::BeyondAsset(format_seconds(&after.asset_out)));
+                }
+            Ok(Batch {
+                ops: vec![EditOp::ReplaceClip { track: ti, before: p.clone(), after }],
+                desc: format!("trim gap in to {}", format_seconds(&at)),
+            })
+        }
+        // Leading gap: nothing to extend — pull every clip left instead.
+        None => {
+            let ops = track
+                .clips
+                .iter()
+                .map(|c| {
+                    let mut after = c.clone();
+                    after.start -= delta;
+                    EditOp::ReplaceClip { track: ti, before: c.clone(), after }
+                })
+                .collect();
+            Ok(Batch {
+                ops,
+                desc: format!("trim gap in to {}", format_seconds(&at)),
+            })
+        }
+    }
+}
+
+/// Trim a gap's out-edge to the (snapped) playhead: the next clip and
+/// everything after it slide left — the timeline shrinks, no new gaps.
+/// A trailing gap has no out-edge to trim.
+pub fn trim_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let ti = video_track_index(project)?;
+    let track = project
+        .timeline
+        .video_track()
+        .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))?;
+    let at = snap(project, playhead)?;
+
+    let mut gs = Seconds::from_integer(0);
+    let mut ge: Option<Seconds> = None;
+    for c in &track.clips {
+        if at < c.start {
+            ge = Some(c.start);
+            break;
+        }
+        gs = c.end();
+    }
+    let ge = ge.ok_or(EditError::NoGap)?; // trailing gap: no out-edge
+    if at <= gs || at >= ge {
+        return Err(EditError::NoGap);
+    }
+    let delta = ge - at;
+
+    let ops: Vec<EditOp> = track
+        .clips
+        .iter()
+        .filter(|c| c.start >= ge)
+        .map(|c| {
+            let mut after = c.clone();
+            after.start -= delta;
+            EditOp::ReplaceClip { track: ti, before: c.clone(), after }
+        })
+        .collect();
+    if ops.is_empty() {
+        return Err(EditError::NoGap);
+    }
+    Ok(Batch {
+        ops,
+        desc: format!("trim gap out to {}", format_seconds(&at)),
+    })
+}
+
 /// Paste a yanked clip. `at = Some(playhead)` inserts at that position
 /// (overlap-checked); `None` appends at the end of the video track.
 pub fn paste(project: &Project, snapshot: &Clip, at: Option<f64>) -> Result<Batch, EditError> {
@@ -922,6 +1031,87 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(History::load(&path).is_err());
         assert!(History::load(&dir.path().join("missing.json")).is_err());
+    }
+
+    #[test]
+    fn gap_trims_shrink_from_either_side() {
+        // [0..2) #1 src 1..3 · gap [2..3) · [3..5) #2 src 0..2 · [5..7) #3
+        let mut p = fixture();
+        let mut h = History::default();
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.add_clip(a, Some(Seconds::from_integer(5)), Seconds::from_integer(0), Seconds::from_integer(2))
+            .unwrap(); // #3 [5..7)
+
+        // trim gap in at 2.5: #1's tail extends into the gap
+        let batch = trim_gap_in(&p, 2.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).end(), Seconds::new(5, 2));
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::new(7, 2)); // src 1..3.5
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3), "next clip untouched");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(3));
+
+        // trim gap out at 2.5: #2 and #3 slide left by 0.5, spans intact
+        let batch = trim_gap_out(&p, 2.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::new(5, 2));
+        assert_eq!(clip_by_id(&p, 2).end(), Seconds::new(9, 2));
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::new(9, 2), "whole right side slides");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3));
+
+        // playhead not in the gap → rejected
+        assert!(matches!(trim_gap_in(&p, 1.0), Err(EditError::NoGap)));
+        assert!(matches!(trim_gap_out(&p, 4.0), Err(EditError::NoGap)));
+    }
+
+    #[test]
+    fn gap_trim_edges_and_leading_gap() {
+        // leading gap [0..1): #1 [1..3) src 0..2, #2 [3..5) src 0..2
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        p.video = Some(VideoSettings { width: 320, height: 240 });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.add_clip(a, Some(Seconds::from_integer(1)), Seconds::from_integer(0), Seconds::from_integer(2))
+            .unwrap();
+        p.add_clip(a, Some(Seconds::from_integer(3)), Seconds::from_integer(0), Seconds::from_integer(2))
+            .unwrap();
+        let mut h = History::default();
+
+        // trim the leading gap's in-edge at 0.5: everything slides left 0.5
+        let batch = trim_gap_in(&p, 0.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).start, Seconds::new(1, 2));
+        assert_eq!(
+            clip_by_id(&p, 1).asset_in,
+            Seconds::from_integer(0),
+            "content unchanged, repositioned"
+        );
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::new(5, 2));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 1).start, Seconds::from_integer(1));
+
+        // trailing gap: no out-edge to trim, but the in-edge extends the last clip
+        let batch = delete_clip(&p, 2).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert!(matches!(trim_gap_out(&p, 3.5), Err(EditError::NoGap)));
+        let batch = trim_gap_in(&p, 3.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).end(), Seconds::new(7, 2));
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::new(5, 2)); // src 0..2.5
+    }
+
+    #[test]
+    fn gap_trim_respects_source_material() {
+        // asset lasts 2.1s; clip #1 [1..3) src 0..2
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        p.video = Some(VideoSettings { width: 320, height: 240 });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("2.1"));
+        p.add_clip(a, Some(Seconds::from_integer(1)), Seconds::from_integer(0), Seconds::from_integer(2))
+            .unwrap();
+        // extending the tail past the asset's material → rejected
+        assert!(matches!(trim_gap_in(&p, 3.2), Err(EditError::BeyondAsset(_))));
     }
 
     #[test]

@@ -448,35 +448,31 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('y') => app.pending = Pending::Y,
         // ---- editing (counts deliberately don't multiply edit ops) ----
         KeyCode::Char('i') => {
-            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
-                app.set_message("playhead is in a gap — j/w/b to a clip");
-                return;
+            let result = match clip_under(&app.project, app.playhead) {
+                Some(c) => edit::trim_in(&app.project, c.id, app.playhead),
+                None => edit::trim_gap_in(&app.project, app.playhead),
             };
-            let result = edit::trim_in(&app.project, clip.id, app.playhead);
             run_edit(app, player, result);
         }
         KeyCode::Char('I') => {
-            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
-                app.set_message("playhead is in a gap — j/w/b to a clip");
-                return;
+            let result = match clip_under(&app.project, app.playhead) {
+                Some(c) => edit::trim_in_ripple(&app.project, c.id, app.playhead),
+                None => edit::trim_gap_in(&app.project, app.playhead),
             };
-            let result = edit::trim_in_ripple(&app.project, clip.id, app.playhead);
             run_edit(app, player, result);
         }
         KeyCode::Char('o') => {
-            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
-                app.set_message("playhead is in a gap — j/w/b to a clip");
-                return;
+            let result = match clip_under(&app.project, app.playhead) {
+                Some(c) => edit::trim_out(&app.project, c.id, app.playhead),
+                None => edit::trim_gap_out(&app.project, app.playhead),
             };
-            let result = edit::trim_out(&app.project, clip.id, app.playhead);
             run_edit(app, player, result);
         }
         KeyCode::Char('O') => {
-            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
-                app.set_message("playhead is in a gap — j/w/b to a clip");
-                return;
+            let result = match clip_under(&app.project, app.playhead) {
+                Some(c) => edit::trim_out_ripple(&app.project, c.id, app.playhead),
+                None => edit::trim_gap_out(&app.project, app.playhead),
             };
-            let result = edit::trim_out_ripple(&app.project, clip.id, app.playhead);
             run_edit(app, player, result);
         }
         KeyCode::Char('s') => {
@@ -800,7 +796,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         app.history.depth()
     );
 
-    let help = "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · r reload · : cmd · q quit";
+    let help = "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · r reload · : cmd · q quit";
 
     let mut lines = vec![
         Line::from(clip_line),
