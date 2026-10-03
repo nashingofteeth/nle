@@ -12,8 +12,9 @@ pub mod time;
 pub mod timeline;
 
 pub use edit::{
-    delete_clip, delete_gap, delete_ripple, paste, split, trim_gap_in, trim_gap_out, trim_in,
-    trim_in_ripple, trim_out, trim_out_ripple, Batch, EditError, EditOp, History,
+    delete_clip, delete_gap, delete_ripple, paste, split, trim_gap_in, trim_gap_out,
+    trim_gap_out_ripple, trim_in, trim_in_ripple, trim_out, trim_out_ripple, Batch, EditError,
+    EditOp, History,
 };
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use project::{Asset, Project, ProjectError, VideoSettings};

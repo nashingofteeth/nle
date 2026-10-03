@@ -471,7 +471,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('O') => {
             let result = match clip_under(&app.project, app.playhead) {
                 Some(c) => edit::trim_out_ripple(&app.project, c.id, app.playhead),
-                None => edit::trim_gap_out(&app.project, app.playhead),
+                None => edit::trim_gap_out_ripple(&app.project, app.playhead),
             };
             run_edit(app, player, result);
         }

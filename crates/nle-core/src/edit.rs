@@ -32,8 +32,10 @@ pub enum EditError {
     NotInClip(String),
     #[error("result would be shorter than one frame")]
     TooShort,
-    #[error("out-point {0} is beyond the asset's duration")]
-    BeyondAsset(String),
+    #[error("cannot extend clip #{id} — no source after {out} (asset ends at {duration})")]
+    BeyondAsset { id: u32, out: String, duration: String },
+    #[error("cannot extend clip #{id} — needs {needed} of source before its in-point ({ain})")]
+    BeforeAsset { id: u32, needed: String, ain: String },
     #[error("nothing to undo")]
     NothingToUndo,
     #[error("nothing to redo")]
@@ -319,9 +321,14 @@ pub fn trim_out(project: &Project, clip_id: u32, playhead: f64) -> Result<Batch,
         .asset(clip.asset)
         .ok_or(EditError::ClipNotFound(clip.asset))?;
     if let Some(d) = asset.duration()
-        && new_out > d {
-            return Err(EditError::BeyondAsset(format_seconds(&new_out)));
-        }
+        && new_out > d
+    {
+        return Err(EditError::BeyondAsset {
+            id: clip.id,
+            out: format_seconds(&new_out),
+            duration: format_seconds(&d),
+        });
+    }
     let after = Clip {
         id: clip.id,
         asset: clip.asset,
@@ -565,9 +572,14 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
                 .asset(p.asset)
                 .ok_or(EditError::ClipNotFound(p.asset))?;
             if let Some(d) = asset.duration()
-                && after.asset_out > d {
-                    return Err(EditError::BeyondAsset(format_seconds(&after.asset_out)));
-                }
+                && after.asset_out > d
+            {
+                return Err(EditError::BeyondAsset {
+                    id: p.id,
+                    out: format_seconds(&after.asset_out),
+                    duration: format_seconds(&d),
+                });
+            }
             Ok(Batch {
                 ops: vec![EditOp::ReplaceClip { track: ti, before: p.clone(), after }],
                 desc: format!("trim gap in to {}", format_seconds(&at)),
@@ -601,7 +613,65 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
 /// Trim a gap's out-edge to the (snapped) playhead: the next clip and
 /// everything after it slide left — the timeline shrinks, no new gaps.
 /// A trailing gap has no out-edge to trim.
+/// Trim a gap's out-edge to the (snapped) playhead (`o`): the next
+/// clip's head extends into the gap — its start moves left and its
+/// source in-point reaches earlier (material permitting). Followers are
+/// untouched and the timeline end doesn't move. A trailing gap has no
+/// out-edge to trim.
 pub fn trim_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let ti = video_track_index(project)?;
+    let track = project
+        .timeline
+        .video_track()
+        .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))?;
+    let at = snap(project, playhead)?;
+
+    let mut gs = Seconds::from_integer(0);
+    let mut next: Option<&Clip> = None;
+    for c in &track.clips {
+        if at < c.start {
+            next = Some(c);
+            break;
+        }
+        gs = c.end();
+    }
+    let Some(next) = next else {
+        return Err(EditError::NoGap); // trailing gap: no out-edge
+    };
+    if at <= gs || at >= next.start {
+        return Err(EditError::NoGap);
+    }
+    let delta = next.start - at;
+    let needed = format_seconds(&delta);
+
+    let mut after = next.clone();
+    after.start = at;
+    after.asset_in = next.asset_in - delta;
+    if after.asset_in < Seconds::from_integer(0) {
+        return Err(EditError::BeforeAsset {
+            id: next.id,
+            needed,
+            ain: format_seconds(&next.asset_in),
+        });
+    }
+    Ok(Batch {
+        ops: vec![EditOp::ReplaceClip {
+            track: ti,
+            before: next.clone(),
+            after,
+        }],
+        desc: format!(
+            "trim gap out to {} — clip #{} head extended",
+            format_seconds(&at),
+            next.id
+        ),
+    })
+}
+
+/// Ripple trim of a gap's out-edge (`O`): the next clip and everything
+/// after it slide left — the timeline shrinks, no new gaps. A trailing
+/// gap has nothing to slide.
+pub fn trim_gap_out_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     let ti = video_track_index(project)?;
     let track = project
         .timeline
@@ -1061,19 +1131,51 @@ mod tests {
         h.undo(&mut p).unwrap();
         assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(3));
 
-        // trim gap out at 2.5: #2 and #3 slide left by 0.5, spans intact
+        // trim gap out at 2.5 (o): #2's head extends into the gap
+        p.timeline.tracks[0].clips[1].asset_in = Seconds::from_integer(1); // src 1..3
+        p.timeline.tracks[0].clips[1].asset_out = Seconds::from_integer(3);
         let batch = trim_gap_out(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("head extended"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        let c2 = clip_by_id(&p, 2);
+        assert_eq!(c2.start, Seconds::new(5, 2));
+        assert_eq!(c2.asset_in, Seconds::new(1, 2), "ain 1 − 0.5");
+        assert_eq!(c2.asset_out, Seconds::from_integer(3), "tail untouched");
+        assert_eq!(c2.end(), Seconds::from_integer(5), "timeline end unchanged");
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::from_integer(5), "followers untouched");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3));
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(1));
+
+        // material gate: ain 0.25 can't absorb a 0.5 head extension
+        p.timeline.tracks[0].clips[1].asset_in = Seconds::new(1, 4);
+        p.timeline.tracks[0].clips[1].asset_out = Seconds::new(9, 4); // src 0.25..2.25
+        assert!(matches!(trim_gap_out(&p, 2.5), Err(EditError::BeforeAsset { .. })));
+
+        // ripple variant (O): #2 and #3 slide left by 0.5, source kept
+        let batch = trim_gap_out_ripple(&p, 2.5).unwrap();
         assert!(batch.desc.contains("timeline shifted left 0.5"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 2).start, Seconds::new(5, 2));
-        assert_eq!(clip_by_id(&p, 2).end(), Seconds::new(9, 2));
-        assert_eq!(clip_by_id(&p, 3).start, Seconds::new(9, 2), "whole right side slides");
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::new(1, 4), "shift keeps source");
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::new(9, 2));
         h.undo(&mut p).unwrap();
         assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3));
 
-        // playhead not in the gap → rejected
+        // ripple variant (O): #2 and #3 slide left by 0.5, source kept
+        let batch = trim_gap_out_ripple(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("timeline shifted left 0.5"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::new(5, 2));
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::new(1, 4), "shift keeps source");
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::new(9, 2));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3));
+
+        // playhead not in the gap → rejected (both variants)
         assert!(matches!(trim_gap_in(&p, 1.0), Err(EditError::NoGap)));
         assert!(matches!(trim_gap_out(&p, 4.0), Err(EditError::NoGap)));
+        assert!(matches!(trim_gap_out_ripple(&p, 4.0), Err(EditError::NoGap)));
     }
 
     #[test]
@@ -1123,7 +1225,7 @@ mod tests {
         p.add_clip(a, Some(Seconds::from_integer(1)), Seconds::from_integer(0), Seconds::from_integer(2))
             .unwrap();
         // extending the tail past the asset's material → rejected
-        assert!(matches!(trim_gap_in(&p, 3.2), Err(EditError::BeyondAsset(_))));
+        assert!(matches!(trim_gap_in(&p, 3.2), Err(EditError::BeyondAsset { .. })));
     }
 
     #[test]
