@@ -694,11 +694,14 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
     // Marker row: cut ticks at segment boundaries, playhead ▲ on top.
+    // Ticks use ▌ (left half block) so they hug the cut's left edge —
+    // same convention as the ▏ divider in the track row; a centered
+    // glyph (╵) floats half a cell off the actual edge.
     let ph = marker_col(app.playhead, total, inner.width);
     let mut cells: Vec<char> = vec![' '; inner.width as usize];
     let last = cells.len() - 1;
     for &b in &boundaries {
-        cells[(b as usize).min(last)] = '╵';
+        cells[(b as usize).min(last)] = '▌';
     }
     cells[ph as usize] = '▲';
     let mut marker: Vec<Span> = Vec::new();
