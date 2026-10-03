@@ -703,7 +703,10 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     // the end line is the border, one column past the last cell's left
     // edge where a normal ▏ would sit.
     let eps = half_frame(&app.project);
-    let at_end = app.playhead >= total - eps;
+    // Seeking to the end (G/$) lands on the LAST FRAME's PTS — one frame
+    // before the duration — while a playthrough reaches duration exactly.
+    // A full-frame window covers both; anything earlier still renders ▏.
+    let at_end = app.playhead >= total - 2.0 * eps;
     let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
     let last = cells.len() - 1;
     for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
