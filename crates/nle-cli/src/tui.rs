@@ -190,17 +190,18 @@ impl App {
     }
 
     pub fn sync(&mut self, st: &PlaybackState) {
-        if let Some(t) = st.time_pos {
-            // Two-stage canonicalization: snap to the frame grid, then go
-            // magnetic to cuts. mpv's EDL positions drift off the project
-            // grid (source frame rounding — e.g. seeking to a cut lands
-            // one frame PAST it on the drifted black-segment grid), and
-            // every readout (white indicator, edit keys) keys off exact
-            // positions. Within ~1.5 frames of a cut, the playhead IS the
-            // cut.
-            let snapped = snap_to_frame(t, self.project.fps.as_ref());
-            self.playhead = snap_to_cut(snapped, &self.project);
-        }
+        // Authority split: while PLAYING, mpv's streamed position drives
+        // the playhead (only it knows the live position). While PAUSED,
+        // the MODEL owns it — the playhead only moves through our own
+        // seeks and frame-steps, so mpv's drift-flavored reports (EDL
+        // boundaries sit off the project grid) can never fight the
+        // canonical positions that cuts, the white indicator, and edit
+        // keys depend on.
+        if !st.paused && st.file_loaded
+            && let Some(t) = st.time_pos {
+                let snapped = snap_to_frame(t, self.project.fps.as_ref());
+                self.playhead = snap_to_cut(snapped, &self.project);
+            }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
         self.dead = st.dead;
@@ -233,15 +234,28 @@ impl App {
 
     fn seek_to(&mut self, player: &MpvPlayer, t: f64) {
         if self.guard_loaded() {
+            let target = t.max(0.0);
+            // Model position is authoritative when paused: set it now.
+            self.playhead = target;
             // Nudge a few ms INTO the target instant: EDL segment
             // boundaries sit a hair after the cut (source frame rounding),
             // so an exact seek would display the PREVIOUS segment's last
             // frame (gap/black) — the clip's color only appears after one
             // manual frame-step. 4ms clears the drift seen on this
-            // machine's timelines; the playhead snaps back to the exact
-            // cut afterward (magnet).
-            player.seek_absolute(t.max(0.0) + 0.004);
+            // machine's timelines.
+            player.seek_absolute(target + 0.004);
         }
+    }
+
+    /// Move the playhead by one frame (f/F): model-authoritative, clamped
+    /// to the sequence. mpv steps its own (drifted) neighbor — close
+    /// enough that the next step lands on the frame we display.
+    fn step_playhead(&mut self, dir: i64) {
+        let Some(fps) = self.project.fps.as_ref() else { return };
+        let f = secs(fps);
+        let last = ((self.total() * f).ceil() as i64 - 1).max(0);
+        let idx = ((self.playhead * f).round() as i64 + dir).clamp(0, last);
+        self.playhead = idx as f64 / f;
     }
 }
 
@@ -428,6 +442,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
                 for _ in 0..mult {
                     player.frame_step();
                 }
+                app.step_playhead(1);
             }
         }
         KeyCode::Char('F') => {
@@ -435,6 +450,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
                 for _ in 0..mult {
                     player.frame_back_step();
                 }
+                app.step_playhead(-1);
             }
         }
         KeyCode::Char('j') => match next_cut(&cut_points(&app.project), app.playhead, eps) {
@@ -1018,22 +1034,66 @@ mod tests {
     }
 
     #[test]
-    fn sync_applies_grid_and_cut_snapping() {
+    fn sync_applies_grid_and_cut_snapping_while_playing() {
         let mut p = project(); // cuts [0, 3, 5, 7], 30fps
         p.fps = Some(Seconds::new(30, 1));
         let mut app = App::new(p, PathBuf::from("t.json"));
         // mpv settled one frame past the cut at 5 → magnetic back to 5
         app.sync(&PlaybackState {
             time_pos: Some(5.0 + 1.0 / 30.0),
+            paused: false,
+            file_loaded: true,
             ..Default::default()
         });
         assert_eq!(app.playhead, 5.0);
         // mid-clip position: only grid-snapped
         app.sync(&PlaybackState {
             time_pos: Some(4.011),
+            paused: false,
+            file_loaded: true,
             ..Default::default()
         });
         assert_eq!(app.playhead, 4.0);
+    }
+
+    #[test]
+    fn sync_ignores_mpv_positions_while_paused() {
+        let mut p = project(); // cuts [0, 3, 5, 7]
+        p.fps = Some(Seconds::new(30, 1));
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 2.0;
+        // paused: drifted mpv reports must not move the model playhead
+        app.sync(&PlaybackState {
+            time_pos: Some(5.0 + 1.0 / 30.0),
+            paused: true,
+            file_loaded: true,
+            ..Default::default()
+        });
+        assert_eq!(app.playhead, 2.0);
+        // playing: the streamed position drives it (grid + magnet)
+        app.sync(&PlaybackState {
+            time_pos: Some(5.0 + 1.0 / 30.0),
+            paused: false,
+            file_loaded: true,
+            ..Default::default()
+        });
+        assert_eq!(app.playhead, 5.0);
+    }
+
+    #[test]
+    fn frame_steps_move_one_frame_and_clamp() {
+        let mut p = project(); // end 7.0 → 210 frames at 30fps
+        p.fps = Some(Seconds::new(30, 1));
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.step_playhead(1);
+        assert_eq!(app.playhead, 1.0 / 30.0);
+        app.step_playhead(-1);
+        assert_eq!(app.playhead, 0.0);
+        app.step_playhead(-1);
+        assert_eq!(app.playhead, 0.0, "clamped at the start");
+        app.playhead = 1000.0;
+        app.step_playhead(1);
+        assert_eq!(app.playhead, 209.0 / 30.0, "clamped at the last frame");
     }
 
     #[test]
