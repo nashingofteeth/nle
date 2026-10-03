@@ -702,11 +702,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     // At the timeline's end, hug the RIGHT edge of the last cell (▕) —
     // the end line is the border, one column past the last cell's left
     // edge where a normal ▏ would sit.
-    let eps = half_frame(&app.project);
-    // Seeking to the end (G/$) lands on the LAST FRAME's PTS — one frame
-    // before the duration — while a playthrough reaches duration exactly.
-    // A full-frame window covers both; anything earlier still renders ▏.
-    let at_end = app.playhead >= total - 2.0 * eps;
+    let at_end = is_at_end(app.playhead, app.total(), app.project.fps.as_ref());
     let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
     let last = cells.len() - 1;
     for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
@@ -811,6 +807,17 @@ fn marker_col(t: f64, total: f64, width: u16) -> u16 {
     (((t / total.max(1e-9)) * width as f64).round() as u16).min(width - 1)
 }
 
+/// "Is the playhead at the very end?" Seeking there lands on the last
+/// frame's PTS — one frame before the duration, and mpv reports it
+/// truncated ("13.983333" of 14.0 @ 60fps) — so the window is 1.5 frames,
+/// comfortably past both the frame boundary and the float rounding.
+fn is_at_end(playhead: f64, total: f64, fps: Option<&Seconds>) -> bool {
+    match fps {
+        Some(f) => playhead >= total - 1.5 / secs(f),
+        None => (total - playhead).abs() < 1e-6,
+    }
+}
+
 fn truncate_label(label: &str, width: u16) -> String {
     let w = width as usize;
     if w == 0 {
@@ -906,6 +913,25 @@ mod tests {
         // beyond the end clamps; zero-width row can't panic
         assert_eq!(marker_col(99.0, total, width), width - 1);
         assert_eq!(marker_col(1.0, total, 0), 0);
+    }
+
+    #[test]
+    fn at_end_window_covers_last_frame_and_rounding() {
+        let fps30 = Seconds::new(30, 1);
+        let fps60 = Seconds::new(60, 1);
+        let total = 14.0;
+        // playthrough: exactly the duration
+        assert!(is_at_end(14.0, total, Some(&fps30)));
+        // G/$: last frame's PTS, one frame before the end
+        assert!(is_at_end(13.9666666, total, Some(&fps30)));
+        // the regression: 60fps, mpv's truncated "13.983333" of 13.98333…
+        assert!(is_at_end(13.983333, total, Some(&fps60)));
+        // genuinely earlier positions are not "at end"
+        assert!(!is_at_end(13.9, total, Some(&fps30)));
+        assert!(!is_at_end(13.9, total, Some(&fps60)));
+        // no fps known → only exact-duration counts
+        assert!(is_at_end(14.0, total, None));
+        assert!(!is_at_end(13.999, total, None));
     }
 
     #[test]
