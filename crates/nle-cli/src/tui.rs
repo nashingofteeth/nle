@@ -666,11 +666,11 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    // Track row, built per column so the playhead can notch through it:
-    // a thin red line drawn over the clips (classic NLE playhead).
+    // Track row: segments with boundary dividers. The playhead doesn't
+    // live here (it renders on the marker row below).
     let mut x: u16 = 0;
     let mut cum: f64 = 0.0;
-    let mut cells: Vec<(char, Style)> = Vec::with_capacity(inner.width as usize);
+    let mut spans: Vec<Span> = Vec::new();
     let mut boundaries: Vec<u16> = vec![0];
     let n = parts.len();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
@@ -687,57 +687,41 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         } else {
             format!("▏{}", truncate_label(label, width.saturating_sub(1)))
         };
-        for ch in text.chars().take(width.into()) {
-            cells.push((ch, *style));
-        }
-        while (cells.len() as u16) < end_x {
-            cells.push((' ', *style));
-        }
+        spans.push(Span::styled(text, *style));
         boundaries.push(end_x);
         x = end_x;
     }
-    // The playhead: red ▏ notched into the row at its column. The bg
-    // stays the clip's color, so the line visibly crosses the clips.
+    let track_row = Rect { height: 1, ..inner };
+    f.render_widget(Paragraph::new(Line::from(spans)), track_row);
+
+    // Marker row: interior cut ticks (white) + the red playhead, all
+    // left-hugging ▏. When the playhead sits on a cut it takes over that
+    // column — one glyph per cell, and the position is the stronger
+    // signal.
     let ph = marker_col(app.playhead, total, inner.width);
-    if let Some(cell) = cells.get_mut(ph as usize) {
-        cell.0 = '▏';
-        cell.1 = cell.1.fg(Color::Red);
+    let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
+    let last = cells.len() - 1;
+    for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
+        cells[(b as usize).min(last)] = ('▏', Style::default().fg(Color::White));
     }
-    // Group runs of equal style into spans.
-    let mut spans: Vec<Span> = Vec::new();
+    cells[ph as usize] = ('▏', Style::default().fg(Color::Red));
+    let mut marker: Vec<Span> = Vec::new();
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
     for (ch, style) in cells {
         if run_style.as_ref() != Some(&style) {
             if let Some(s) = run_style {
-                spans.push(Span::styled(std::mem::take(&mut run), s));
+                marker.push(Span::styled(std::mem::take(&mut run), s));
             }
             run_style = Some(style);
         }
         run.push(ch);
     }
     if let Some(s) = run_style {
-        spans.push(Span::styled(run, s));
-    }
-    let track_row = Rect { height: 1, ..inner };
-    f.render_widget(Paragraph::new(Line::from(spans)), track_row);
-
-    // Marker row: cut ticks between clips only. The timeline's start and
-    // end aren't cuts (and the final one can't be drawn flush anyway —
-    // the border sits one column past the last cell).
-    let mut ticks: Vec<char> = vec![' '; inner.width as usize];
-    let last = ticks.len() - 1;
-    for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
-        ticks[(b as usize).min(last)] = '▏';
+        marker.push(Span::styled(run, s));
     }
     let playhead_row = Rect { y: inner.y + 1, height: 1, ..inner };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            ticks.into_iter().collect::<String>(),
-            Style::default().fg(Color::White),
-        ))),
-        playhead_row,
-    );
+    f.render_widget(Paragraph::new(Line::from(marker)), playhead_row);
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
