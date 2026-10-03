@@ -615,6 +615,15 @@ fn render(f: &mut Frame, app: &App) {
     render_info(f, info, app);
 }
 
+/// Current/total frame counts for display (1-based current, clamped to
+/// the last frame at the timeline's end).
+fn frame_counts(project: &Project, total: f64, playhead: f64) -> Option<(i64, i64)> {
+    let fps = project.fps.as_ref()?;
+    let total_frames = (total * secs(fps)).ceil().max(1.0) as i64;
+    let current = ((playhead * secs(fps)).floor() as i64 + 1).clamp(1, total_frames);
+    Some((current, total_frames))
+}
+
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let name = app
         .path
@@ -638,11 +647,15 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let count = app.count.map(|c| format!("{c}")).unwrap_or_default();
 
     let style = Style::default().bg(Color::Blue).fg(Color::White);
+    let frames = match frame_counts(&app.project, app.total(), app.playhead) {
+        Some((c, t)) => format!(" · f{c}/f{t}"),
+        None => String::new(),
+    };
     let line = Line::from(vec![
         Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {name} · "), style),
         Span::styled(fmt_timecode(app.playhead), style.add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" / {} · ", fmt_timecode(app.total())), style),
+        Span::styled(format!(" / {}{frames} · ", fmt_timecode(app.total())), style),
         Span::styled(format!("{icon} · {mode}{count}"), style),
     ]);
     f.render_widget(Paragraph::new(line), area);
@@ -724,8 +737,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         if at_end { '▕' } else { '▏' },
         Style::default().fg(Color::Red),
     );
-    let mut marker: Vec<Span> = Vec::new();
-    let mut run = String::new();
+    let mut marker: Vec<Span> = Vec::new();    let mut run = String::new();
     let mut run_style: Option<Style> = None;
     for (ch, style) in cells {
         if run_style.as_ref() != Some(&style) {
@@ -914,6 +926,22 @@ mod tests {
         // beyond the end clamps; zero-width row can't panic
         assert_eq!(marker_col(99.0, total, width), width - 1);
         assert_eq!(marker_col(1.0, total, 0), 0);
+    }
+
+    #[test]
+    fn frame_counts_are_clamped_and_1_based() {
+        let mut p = project();
+        p.fps = Some(Seconds::new(30, 1));
+        let total = secs(&p.timeline.video_track().unwrap().end()); // 7.0
+        assert_eq!(frame_counts(&p, total, 0.0), Some((1, 210)));
+        // playhead beyond the end clamps to the last frame
+        assert_eq!(frame_counts(&p, total, 8.2), Some((210, 210)));
+        // exact end: clamped to the last frame, never one past it
+        assert_eq!(frame_counts(&p, total, total), Some((210, 210)));
+        // no fps → no frame display
+        let mut no_fps = project();
+        no_fps.fps = None;
+        assert_eq!(frame_counts(&no_fps, 10.0, 5.0), None);
     }
 
     #[test]
