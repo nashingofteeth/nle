@@ -27,6 +27,18 @@ pub fn secs(t: &Seconds) -> f64 {
     *t.numer() as f64 / *t.denom() as f64
 }
 
+/// Snap a float position to the nearest frame of `fps` — the single
+/// quantization for playhead position (display, marker, edits agree).
+pub fn snap_to_frame(t: f64, fps: Option<&Seconds>) -> f64 {
+    match fps {
+        Some(f) => {
+            let n = (t * secs(f)).round();
+            n / secs(f)
+        }
+        None => t,
+    }
+}
+
 /// "62.25 s" → "01:02.2" (and "3661" → "1:01:01.0" past an hour).
 pub fn fmt_timecode(t: f64) -> String {
     let t = t.max(0.0);
@@ -165,7 +177,10 @@ impl App {
 
     pub fn sync(&mut self, st: &PlaybackState) {
         if let Some(t) = st.time_pos {
-            self.playhead = t;
+            // Snap to the frame grid: mpv's settled positions are frame
+            // PTS anyway (plus float fuzz), and this makes the displayed
+            // time, the marker column, and edit targets all agree.
+            self.playhead = snap_to_frame(t, self.project.fps.as_ref());
         }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
