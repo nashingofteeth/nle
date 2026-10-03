@@ -42,6 +42,14 @@ pub fn fmt_timecode(t: f64) -> String {
 
 // ------------------------------------------------------------ cut motions
 
+/// Half a frame at the project's frame rate — the tolerance within which
+/// a playhead counts as "standing on" a cut. mpv's EDL positions drift by
+/// up to a frame (source frame-boundary rounding), so motions must be
+/// drift-tolerant, not exact.
+pub fn half_frame(project: &Project) -> f64 {
+    project.fps.as_ref().map(|f| 0.5 / secs(f)).unwrap_or(1e-6)
+}
+
 /// All clip boundaries in seconds: 0, every clip start, every clip end.
 pub fn cut_points(project: &Project) -> Vec<f64> {
     let Some(track) = project.timeline.video_track() else {
@@ -57,22 +65,22 @@ pub fn cut_points(project: &Project) -> Vec<f64> {
     pts
 }
 
-pub fn next_cut(points: &[f64], t: f64) -> Option<f64> {
-    points.iter().copied().find(|&p| p > t + 1e-6)
+pub fn next_cut(points: &[f64], t: f64, eps: f64) -> Option<f64> {
+    points.iter().copied().find(|&p| p > t + eps)
 }
 
-pub fn prev_cut(points: &[f64], t: f64) -> Option<f64> {
-    points.iter().rev().copied().find(|&p| p < t - 1e-6)
+pub fn prev_cut(points: &[f64], t: f64, eps: f64) -> Option<f64> {
+    points.iter().rev().copied().find(|&p| p < t - eps)
 }
 
-pub fn next_clip_start(project: &Project, t: f64) -> Option<f64> {
+pub fn next_clip_start(project: &Project, t: f64, eps: f64) -> Option<f64> {
     let track = project.timeline.video_track()?;
-    track.clips.iter().map(|c| secs(&c.start)).find(|&s| s > t + 1e-6)
+    track.clips.iter().map(|c| secs(&c.start)).find(|&s| s > t + eps)
 }
 
-pub fn prev_clip_start(project: &Project, t: f64) -> Option<f64> {
+pub fn prev_clip_start(project: &Project, t: f64, eps: f64) -> Option<f64> {
     let track = project.timeline.video_track()?;
-    track.clips.iter().rev().map(|c| secs(&c.start)).find(|&s| s < t - 1e-6)
+    track.clips.iter().rev().map(|c| secs(&c.start)).find(|&s| s < t - eps)
 }
 
 // ------------------------------------------------------------ app state
@@ -316,6 +324,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         _ => {}
     }
     let mult = app.count.take().unwrap_or(1);
+    let eps = half_frame(&app.project);
 
     // Second key of a two-key sequence.
     match (&app.pending, code) {
@@ -361,26 +370,22 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
                 }
             }
         }
-        KeyCode::Char('j') => {
-            if let Some(t) = next_cut(&cut_points(&app.project), app.playhead) {
-                app.seek_to(player, t);
-            }
-        }
-        KeyCode::Char('k') => {
-            if let Some(t) = prev_cut(&cut_points(&app.project), app.playhead) {
-                app.seek_to(player, t);
-            }
-        }
-        KeyCode::Char('w') => {
-            if let Some(t) = next_clip_start(&app.project, app.playhead) {
-                app.seek_to(player, t);
-            }
-        }
-        KeyCode::Char('b') => {
-            if let Some(t) = prev_clip_start(&app.project, app.playhead) {
-                app.seek_to(player, t);
-            }
-        }
+        KeyCode::Char('j') => match next_cut(&cut_points(&app.project), app.playhead, eps) {
+            Some(t) => app.seek_to(player, t),
+            None => app.set_message("no cut after the playhead"),
+        },
+        KeyCode::Char('k') => match prev_cut(&cut_points(&app.project), app.playhead, eps) {
+            Some(t) => app.seek_to(player, t),
+            None => app.set_message("no cut before the playhead"),
+        },
+        KeyCode::Char('w') => match next_clip_start(&app.project, app.playhead, eps) {
+            Some(t) => app.seek_to(player, t),
+            None => app.set_message("no clip after the playhead"),
+        },
+        KeyCode::Char('b') => match prev_clip_start(&app.project, app.playhead, eps) {
+            Some(t) => app.seek_to(player, t),
+            None => app.set_message("no clip before the playhead"),
+        },
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('d') => app.pending = Pending::D,
         KeyCode::Char('y') => app.pending = Pending::Y,
@@ -758,23 +763,30 @@ mod tests {
     fn cut_points_boundaries() {
         let pts = cut_points(&project());
         assert_eq!(pts, vec![0.0, 3.0, 5.0, 7.0]);
-        assert_eq!(next_cut(&pts, 0.5), Some(3.0));
-        assert_eq!(next_cut(&pts, 3.0), Some(5.0));
-        assert_eq!(next_cut(&pts, 7.0), None);
-        assert_eq!(prev_cut(&pts, 4.0), Some(3.0));
-        assert_eq!(prev_cut(&pts, 0.0), None);
-        // epsilon: within 1e-6 of a boundary counts as ON it, so `j` skips
-        assert_eq!(next_cut(&pts, 2.9999999), Some(5.0));
+        let eps = 1e-6;
+        assert_eq!(next_cut(&pts, 0.5, eps), Some(3.0));
+        assert_eq!(next_cut(&pts, 3.0, eps), Some(5.0));
+        assert_eq!(next_cut(&pts, 7.0, eps), None);
+        assert_eq!(prev_cut(&pts, 4.0, eps), Some(3.0));
+        assert_eq!(prev_cut(&pts, 0.0, eps), None);
+        // epsilon: within half a frame of a cut counts as standing on it,
+        // so the motion goes to the ADJACENT cut
+        assert_eq!(next_cut(&pts, 2.9999999, 0.0167), Some(5.0));
     }
 
     #[test]
-    fn clip_start_motions() {
-        let p = project();
-        assert_eq!(next_clip_start(&p, 0.5), Some(5.0));
-        assert_eq!(next_clip_start(&p, 5.0), None);
-        assert_eq!(prev_clip_start(&p, 6.0), Some(5.0));
-        assert_eq!(prev_clip_start(&p, 5.0), Some(0.0));
-        assert_eq!(prev_clip_start(&p, 0.0), None);
+    fn motions_tolerate_playhead_drift() {
+        // mpv's EDL position can drift by ~a frame (source frame rounding).
+        // Half-frame eps: standing just past cut 3 → k reaches the cut
+        // BEFORE it, and one press later the cut itself is reachable.
+        let pts = vec![0.0, 3.0, 5.0, 7.0];
+        let eps = 0.5 / 30.0; // half a frame at 30fps
+        assert_eq!(prev_cut(&pts, 3.0005, eps), Some(0.0)); // on cut 3 → skip to previous
+        assert_eq!(prev_cut(&pts, 3.1, eps), Some(3.0)); // drifted a frame+ in → land on 3
+        assert_eq!(prev_cut(&pts, 0.033, eps), Some(0.0)); // first cut reachable
+        assert_eq!(next_cut(&pts, 2.9995, eps), Some(5.0)); // just before cut 3 → skip
+        assert_eq!(next_clip_start(&project(), 2.9995, eps), Some(5.0));
+        assert_eq!(prev_clip_start(&project(), 3.0005, eps), Some(0.0));
     }
 
     #[test]
