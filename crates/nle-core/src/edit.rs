@@ -870,12 +870,11 @@ pub fn trim_gap_out_ripple(project: &Project, playhead: f64) -> Result<Batch, Ed
     })
 }
 
-/// Ripple paste (`P`): insert the clipboard at the playhead, splitting
-/// whatever is there and shifting the rest right — the timeline grows by
-/// the clip's duration. Mid-clip: split and place between the halves.
-/// Mid-gap: split the gap and place between; followers slide only by the
-/// overflow when the gap can't absorb the clip. At a cut boundary the
-/// insert lands before the clip starting there.
+/// Ripple paste (`P`): insert the clipboard at the playhead — the
+/// timeline grows by the clip's duration. Mid-clip: split and place
+/// between the halves. Mid-gap: split the gap and place between.
+/// Followers slide right; the tail keeps its size. At a cut the insert
+/// lands before the clip starting there.
 pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch, EditError> {
     let ti = video_track_index(project)?;
     let track = project
@@ -948,50 +947,22 @@ pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result
         });
     }
 
-    // Gap case: open gap, or exactly on a cut (insert before that clip).
-    let mut next: Option<&Clip> = None;
-    for c in &track.clips {
-        if t <= c.start {
-            next = Some(c);
-            break;
+    // Gap case: open gap, or exactly on a cut (insert before that clip) —
+    // same insert semantics as clips: the gap splits around the paste,
+    // followers slide right, the timeline grows by dur.
+    for c2 in track.clips.iter().rev() {
+        if c2.start >= t {
+            let mut after = c2.clone();
+            after.start += dur;
+            ops.push(EditOp::ReplaceClip { track: ti, before: c2.clone(), after });
         }
     }
-    match next {
-        Some(n) => {
-            let room = n.start - t;
-            if dur > room {
-                // The gap can't absorb the clip: slide n and everything
-                // after by the overflow (reverse order — see above),
-                // THEN place the paste in the opened space.
-                let overflow = t + dur - n.start;
-                for c2 in track.clips.iter().rev() {
-                    if c2.start >= n.start {
-                        let mut after = c2.clone();
-                        after.start += overflow;
-                        ops.push(EditOp::ReplaceClip { track: ti, before: c2.clone(), after });
-                    }
-                }
-                if let Some(len) = project.timeline.length {
-                    ops.push(EditOp::SetLength {
-                        before: SerLen(Some(len)),
-                        after: SerLen(Some(len + overflow)),
-                    });
-                }
-            }
-            // fits: the gap is split and nothing else moves
-        }
-        None => {
-            // Trailing gap: extend the tail only if the clip outruns it.
-            let end_needed = t + dur;
-            if end_needed > project.timeline.end() {
-                ops.push(EditOp::SetLength {
-                    before: SerLen(project.timeline.length),
-                    after: SerLen(Some(end_needed)),
-                });
-            }
-        }
+    if let Some(len) = project.timeline.length {
+        ops.push(EditOp::SetLength {
+            before: SerLen(Some(len)),
+            after: SerLen(Some(len + dur)),
+        });
     }
-    // The space is open (or the gap fit): place the paste last.
     ops.push(EditOp::AddClip {
         track: ti,
         clip: Clip {
@@ -1545,8 +1516,8 @@ mod tests {
     }
 
     #[test]
-    fn ripple_paste_splits_gaps_and_slides_only_on_overflow() {
-        let mut p = fixture(); // gap [2..3)
+    fn ripple_paste_grows_the_timeline_in_gaps_too() {
+        let mut p = fixture(); // gap [2..3), 30fps
         let mut h = History::default();
         let tiny = Clip {
             id: 0,
@@ -1556,36 +1527,34 @@ mod tests {
             asset_out: Seconds::new(1, 2), // 0.5s clipboard
         };
 
-        // fits inside the gap: just placed between, nothing else moves
-        // (the 30fps grid snaps 2.25 → 2.2667)
+        // mid-gap: the gap splits around the paste, #2 slides right
         let batch = paste_ripple(&p, &tiny, 2.25).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 3).start, Seconds::new(34, 15), "placed in the gap");
-        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3), "#2 untouched");
-        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "no growth");
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::new(7, 2), "#2 slid right by dur");
+        assert_eq!(p.timeline.end(), Seconds::new(11, 2), "grew by dur");
         h.undo(&mut p).unwrap();
 
-        // overflow: 2s clip in a 1s gap → followers slide by 1s, tail grows
+        // trailing gap: same — the tail grows by dur
         let mut p2 = fixture();
         p2.timeline.length = Some(Seconds::from_integer(7));
         let clipboard = clip_by_id(&p2, 1); // 2s
         let batch = paste_ripple(&p2, &clipboard, 2.5).unwrap();
         h.apply(&mut p2, batch).unwrap();
-        assert_eq!(clip_by_id(&p2, 3).start, Seconds::new(5, 2), "pasted at playhead");
-        assert_eq!(clip_by_id(&p2, 2).start, Seconds::new(9, 2), "slid by the overflow");
-        assert_eq!(p2.timeline.length, Some(Seconds::new(17, 2)), "tail keeps its size");
+        assert_eq!(clip_by_id(&p2, 3).start, Seconds::new(5, 2));
+        assert_eq!(clip_by_id(&p2, 2).start, Seconds::from_integer(5), "slid by dur");
+        assert_eq!(p2.timeline.length, Some(Seconds::from_integer(9)), "tail grew by dur");
 
-        // trailing gap: the tail absorbs when there's room, grows when not
         let batch = delete_clip(&p2, 2).unwrap();
-        h.apply(&mut p2, batch).unwrap(); // removes #2; trailing gap [4.5..8.5)
+        h.apply(&mut p2, batch).unwrap(); // trailing gap [4.5..9)
         let short = Clip { asset_out: Seconds::new(1, 2), ..tiny };
-        let batch = paste_ripple(&p2, &short, 5.0).unwrap(); // 5.5 ≤ 8.5 → absorbed
+        let batch = paste_ripple(&p2, &short, 5.0).unwrap();
         h.apply(&mut p2, batch).unwrap();
-        assert_eq!(p2.timeline.length, Some(Seconds::new(17, 2)), "absorbed by the tail");
+        assert_eq!(p2.timeline.length, Some(Seconds::new(19, 2)), "grew by dur");
         let big = Clip { asset_out: Seconds::from_integer(3), ..tiny };
-        let batch = paste_ripple(&p2, &big, 6.0).unwrap(); // 9 > 8.5 → tail grows
+        let batch = paste_ripple(&p2, &big, 6.0).unwrap();
         h.apply(&mut p2, batch).unwrap();
-        assert_eq!(p2.timeline.length, Some(Seconds::from_integer(9)));
+        assert_eq!(p2.timeline.length, Some(Seconds::new(25, 2)), "grew by dur");
     }
 
     #[test]
