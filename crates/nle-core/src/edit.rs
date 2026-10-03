@@ -870,6 +870,144 @@ pub fn trim_gap_out_ripple(project: &Project, playhead: f64) -> Result<Batch, Ed
     })
 }
 
+/// Ripple paste (`P`): insert the clipboard at the playhead, splitting
+/// whatever is there and shifting the rest right — the timeline grows by
+/// the clip's duration. Mid-clip: split and place between the halves.
+/// Mid-gap: split the gap and place between; followers slide only by the
+/// overflow when the gap can't absorb the clip. At a cut boundary the
+/// insert lands before the clip starting there.
+pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch, EditError> {
+    let ti = video_track_index(project)?;
+    let track = project
+        .timeline
+        .video_track()
+        .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))?;
+    let t = snap(project, playhead)?;
+    let dur = snapshot.duration();
+
+    let mut ops: Vec<EditOp> = Vec::new();
+    let pid = project.next_clip_id();
+
+    // Mid-clip (strictly inside) → split it and insert between the halves.
+    let split_clip = track.clips.iter().find(|c| c.start < t && t < c.end());
+    if let Some(c) = split_clip {
+        let left_len = t - c.start;
+        let right_len = c.end() - t;
+        at_least_a_frame(project, &left_len)?;
+        at_least_a_frame(project, &right_len)?;
+
+        let mut left = c.clone();
+        left.asset_out = c.asset_in + left_len;
+        ops.push(EditOp::ReplaceClip { track: ti, before: c.clone(), after: left });
+        // Insert semantics: everything else at/after the cut shifts right.
+        // REVERSE order so each shift doesn't transiently overlap the
+        // not-yet-shifted follower.
+        for c2 in track.clips.iter().rev() {
+            if c2.id != c.id && c2.start >= t {
+                let mut after = c2.clone();
+                after.start += dur;
+                ops.push(EditOp::ReplaceClip { track: ti, before: c2.clone(), after });
+            }
+        }
+        // Space is open: the pasted clip, then the right half behind it.
+        ops.push(EditOp::AddClip {
+            track: ti,
+            clip: Clip {
+                id: pid,
+                asset: snapshot.asset,
+                start: t,
+                asset_in: snapshot.asset_in,
+                asset_out: snapshot.asset_out,
+            },
+        });
+        ops.push(EditOp::AddClip {
+            track: ti,
+            clip: Clip {
+                id: pid + 1,
+                asset: c.asset,
+                start: t + dur,
+                asset_in: c.asset_in + left_len,
+                asset_out: c.asset_out,
+            },
+        });
+        // Tail keeps its size.
+        if let Some(len) = project.timeline.length {
+            ops.push(EditOp::SetLength {
+                before: SerLen(Some(len)),
+                after: SerLen(Some(len + dur)),
+            });
+        }
+        return Ok(Batch {
+            ops,
+            desc: format!(
+                "ripple paste at {} — clip #{} inserted, clip #{} split",
+                format_seconds(&t),
+                pid,
+                c.id
+            ),
+        });
+    }
+
+    // Gap case: open gap, or exactly on a cut (insert before that clip).
+    let mut next: Option<&Clip> = None;
+    for c in &track.clips {
+        if t <= c.start {
+            next = Some(c);
+            break;
+        }
+    }
+    match next {
+        Some(n) => {
+            let room = n.start - t;
+            if dur > room {
+                // The gap can't absorb the clip: slide n and everything
+                // after by the overflow (reverse order — see above),
+                // THEN place the paste in the opened space.
+                let overflow = t + dur - n.start;
+                for c2 in track.clips.iter().rev() {
+                    if c2.start >= n.start {
+                        let mut after = c2.clone();
+                        after.start += overflow;
+                        ops.push(EditOp::ReplaceClip { track: ti, before: c2.clone(), after });
+                    }
+                }
+                if let Some(len) = project.timeline.length {
+                    ops.push(EditOp::SetLength {
+                        before: SerLen(Some(len)),
+                        after: SerLen(Some(len + overflow)),
+                    });
+                }
+            }
+            // fits: the gap is split and nothing else moves
+        }
+        None => {
+            // Trailing gap: extend the tail only if the clip outruns it.
+            let end_needed = t + dur;
+            if end_needed > project.timeline.end() {
+                ops.push(EditOp::SetLength {
+                    before: SerLen(project.timeline.length),
+                    after: SerLen(Some(end_needed)),
+                });
+            }
+        }
+    }
+    // The space is open (or the gap fit): place the paste last.
+    ops.push(EditOp::AddClip {
+        track: ti,
+        clip: Clip {
+            id: pid,
+            asset: snapshot.asset,
+            start: t,
+            asset_in: snapshot.asset_in,
+            asset_out: snapshot.asset_out,
+        },
+    });
+    Ok(Batch {
+        ops,
+        desc: format!("ripple paste at {} — clip #{} inserted", format_seconds(&t), pid),
+    })
+}
+
 /// Paste a yanked clip. `at = Some(playhead)` inserts at that position
 /// (overlap-checked); `None` appends at the end of the video track.
 pub fn paste(project: &Project, snapshot: &Clip, at: Option<f64>) -> Result<Batch, EditError> {
@@ -1374,6 +1512,80 @@ mod tests {
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 1).end(), Seconds::new(7, 2));
         assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::new(5, 2)); // src 0..2.5
+    }
+
+    #[test]
+    fn ripple_paste_splits_clips_and_grows_the_timeline() {
+        let mut p = fixture(); // #1 [0..2) src 1..3, #2 [3..5) src 0..2
+        let mut h = History::default();
+        let clipboard = clip_by_id(&p, 1); // src 1..3, 2s
+
+        // P mid-clip #1 at 1.0: split + insert between + #2 slides right
+        let batch = paste_ripple(&p, &clipboard, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(ids(&p), vec![1, 3, 4, 2]);
+        assert_eq!(clip_by_id(&p, 1).end(), Seconds::from_integer(1), "left half");
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(2));
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::from_integer(1), "pasted between");
+        assert_eq!(clip_by_id(&p, 3).asset_in, Seconds::from_integer(1), "clipboard src kept");
+        assert_eq!(clip_by_id(&p, 4).start, Seconds::from_integer(3), "right half after paste");
+        assert_eq!(clip_by_id(&p, 4).asset_in, Seconds::from_integer(2));
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(5), "follower shifted");
+        assert_eq!(p.timeline.end(), Seconds::from_integer(7), "grew by 2");
+        h.undo(&mut p).unwrap();
+        assert_eq!(ids(&p), vec![1, 2]);
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(3));
+
+        // P at a cut boundary (3.0 = #2's start): inserts BEFORE it
+        let batch = paste_ripple(&p, &clipboard, 3.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::from_integer(3), "pasted at the cut");
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(5), "#2 pushed right");
+        h.undo(&mut p).unwrap();
+    }
+
+    #[test]
+    fn ripple_paste_splits_gaps_and_slides_only_on_overflow() {
+        let mut p = fixture(); // gap [2..3)
+        let mut h = History::default();
+        let tiny = Clip {
+            id: 0,
+            asset: 1,
+            start: Seconds::from_integer(0),
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::new(1, 2), // 0.5s clipboard
+        };
+
+        // fits inside the gap: just placed between, nothing else moves
+        // (the 30fps grid snaps 2.25 → 2.2667)
+        let batch = paste_ripple(&p, &tiny, 2.25).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::new(34, 15), "placed in the gap");
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3), "#2 untouched");
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "no growth");
+        h.undo(&mut p).unwrap();
+
+        // overflow: 2s clip in a 1s gap → followers slide by 1s, tail grows
+        let mut p2 = fixture();
+        p2.timeline.length = Some(Seconds::from_integer(7));
+        let clipboard = clip_by_id(&p2, 1); // 2s
+        let batch = paste_ripple(&p2, &clipboard, 2.5).unwrap();
+        h.apply(&mut p2, batch).unwrap();
+        assert_eq!(clip_by_id(&p2, 3).start, Seconds::new(5, 2), "pasted at playhead");
+        assert_eq!(clip_by_id(&p2, 2).start, Seconds::new(9, 2), "slid by the overflow");
+        assert_eq!(p2.timeline.length, Some(Seconds::new(17, 2)), "tail keeps its size");
+
+        // trailing gap: the tail absorbs when there's room, grows when not
+        let batch = delete_clip(&p2, 2).unwrap();
+        h.apply(&mut p2, batch).unwrap(); // removes #2; trailing gap [4.5..8.5)
+        let short = Clip { asset_out: Seconds::new(1, 2), ..tiny };
+        let batch = paste_ripple(&p2, &short, 5.0).unwrap(); // 5.5 ≤ 8.5 → absorbed
+        h.apply(&mut p2, batch).unwrap();
+        assert_eq!(p2.timeline.length, Some(Seconds::new(17, 2)), "absorbed by the tail");
+        let big = Clip { asset_out: Seconds::from_integer(3), ..tiny };
+        let batch = paste_ripple(&p2, &big, 6.0).unwrap(); // 9 > 8.5 → tail grows
+        h.apply(&mut p2, batch).unwrap();
+        assert_eq!(p2.timeline.length, Some(Seconds::from_integer(9)));
     }
 
     #[test]

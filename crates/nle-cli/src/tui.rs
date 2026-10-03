@@ -582,7 +582,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
                 app.set_message("clipboard empty — yy first");
                 return;
             };
-            let result = edit::paste(&app.project, &clipboard, None);
+            let result = edit::paste_ripple(&app.project, &clipboard, app.playhead);
             run_edit(app, player, result);
         }
         KeyCode::Char('u') => match app.history.undo(&mut app.project) {
