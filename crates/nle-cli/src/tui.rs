@@ -192,11 +192,9 @@ impl App {
     }
 
     pub fn total(&self) -> f64 {
-        self.project
-            .timeline
-            .video_track()
-            .map(|t| secs(&t.end()))
-            .unwrap_or(0.0)
+        // Timeline::end includes the sequence tail — deletes/trims of the
+        // last clip leave a trailing gap that the UI must keep showing.
+        secs(&self.project.timeline.end())
     }
 
     fn guard_loaded(&mut self) -> bool {
@@ -980,6 +978,18 @@ mod tests {
         // mid-clip / mid-gap positions aren't either
         assert!(!on_cut(&p, 1.5));
         assert!(!on_cut(&p, 4.0));
+    }
+
+    #[test]
+    fn total_includes_the_sequence_tail() {
+        let mut p = project(); // clips end at 7.0
+        p.timeline.length = Some(Seconds::from_integer(10));
+        let app = App::new(p, PathBuf::from("t.json"));
+        assert_eq!(app.total(), 10.0);
+        // without a tail, it's the last clip's end
+        let mut p2 = project();
+        p2.timeline.length = None;
+        assert_eq!(App::new(p2, PathBuf::from("t.json")).total(), 7.0);
     }
 
     #[test]

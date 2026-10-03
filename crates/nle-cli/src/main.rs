@@ -335,7 +335,7 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         "{} — {} clip(s) · {} s",
         project_path.display(),
         track.clips.len(),
-        format_seconds(&track.end())
+        format_seconds(&project.timeline.end())
     );
     if let Some(fps) = &project.fps {
         head += &format!(" · {}/{} fps", fps.numer(), fps.denom());
