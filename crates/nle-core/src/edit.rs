@@ -50,6 +50,12 @@ pub enum EditError {
     Project(#[from] ProjectError),
 }
 
+/// Serde wrapper: Option<Seconds> as "n/d" strings — enum variant fields
+/// can't carry #[serde(with)] directly, so the newtype does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SerLen(#[serde(with = "crate::time::rational_ser::opt")] Option<Seconds>);
+
 /// One reversible change to the project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EditOp {
@@ -58,6 +64,12 @@ pub enum EditOp {
     RemoveClip { track: usize, clip: Clip },
     /// `before` identifies the clip (by id) and is the undo payload.
     ReplaceClip { track: usize, before: Clip, after: Clip },
+    /// Set the sequence tail length (Timeline::length) — how "leave a
+    /// gap" is represented when the last clip is deleted or trimmed.
+    SetLength {
+        before: SerLen,
+        after: SerLen,
+    },
 }
 
 impl EditOp {
@@ -73,6 +85,9 @@ impl EditOp {
             }
             EditOp::ReplaceClip { track, after, .. } => {
                 track_mut(project, *track)?.try_replace(after.clone())?;
+            }
+            EditOp::SetLength { after, .. } => {
+                project.timeline.length = after.0;
             }
         }
         Ok(())
@@ -93,6 +108,10 @@ impl EditOp {
                 track: *track,
                 before: after.clone(),
                 after: before.clone(),
+            },
+            EditOp::SetLength { before, after } => EditOp::SetLength {
+                before: SerLen(after.0),
+                after: SerLen(before.0),
             },
         }
     }
@@ -262,6 +281,42 @@ fn video_track_index(project: &Project) -> Result<usize, EditError> {
         .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))
 }
 
+/// The timeline's end after a batch that removes/replaces clips — used by
+/// ripple ops to collapse the sequence tail to the new reality. Reads
+/// each clip's end, preferring the post-batch value from `ReplaceClip`
+/// ops when one exists for it.
+fn end_after(project: &Project, skip_id: Option<u32>, ops: &[EditOp]) -> Seconds {
+    let mut end = Seconds::from_integer(0);
+    if let Some(track) = project.timeline.video_track() {
+        for c in &track.clips {
+            if Some(c.id) == skip_id {
+                continue;
+            }
+            let e = ops
+                .iter()
+                .rev()
+                .find_map(|op| match op {
+                    EditOp::ReplaceClip { before, after, .. } if before.id == c.id => {
+                        Some(after.end())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| c.end());
+            if e > end {
+                end = e;
+            }
+        }
+    }
+    // A replaced clip that remains also counts (it may be the last one).
+    for op in ops {
+        if let EditOp::ReplaceClip { after, .. } = op
+            && Some(after.id) != skip_id && after.end() > end {
+                end = after.end();
+            }
+    }
+    end
+}
+
 /// Snap a (float) playhead to the frame grid of the project's fps.
 fn snap(project: &Project, t: f64) -> Result<Seconds, EditError> {
     let fps = project.fps.ok_or(EditError::NoFps)?;
@@ -337,8 +392,21 @@ pub fn trim_out(project: &Project, clip_id: u32, playhead: f64) -> Result<Batch,
         asset_out: new_out,
     };
     at_least_a_frame(project, &after.duration())?;
+    let mut ops = vec![EditOp::ReplaceClip {
+        track: ti,
+        before: clip.clone(),
+        after,
+    }];
+    // Trimming the clip that defines the timeline end leaves a trailing
+    // gap (o preserves; O collapses).
+    if clip.end() >= project.timeline.end() {
+        ops.push(EditOp::SetLength {
+            before: SerLen(project.timeline.length),
+            after: SerLen(Some(clip.end())),
+        });
+    }
     Ok(Batch {
-        ops: vec![EditOp::ReplaceClip { track: ti, before: clip, after }],
+        ops,
         desc: format!("trim out of clip #{clip_id} to {}", format_seconds(&at)),
     })
 }
@@ -376,8 +444,20 @@ pub fn split(project: &Project, clip_id: u32, playhead: f64) -> Result<Batch, Ed
 /// Delete a clip, leaving a gap.
 pub fn delete_clip(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
     let (ti, clip) = find_clip(project, clip_id)?;
+    let mut ops = vec![EditOp::RemoveClip { track: ti, clip: clip.clone() }];
+    // Deleting the clip that defines the timeline end leaves a trailing
+    // gap: raise the sequence tail to the old end (dd preserves; D collapses).
+    let len_before = project.timeline.length;
+    if clip.end() >= project.timeline.end()
+        && len_before.as_ref().map(|l| clip.end() > *l).unwrap_or(true)
+    {
+        ops.push(EditOp::SetLength {
+            before: SerLen(len_before),
+            after: SerLen(Some(clip.end())),
+        });
+    }
     Ok(Batch {
-        ops: vec![EditOp::RemoveClip { track: ti, clip }],
+        ops,
         desc: format!("delete clip #{clip_id}"),
     })
 }
@@ -389,6 +469,12 @@ pub fn delete_ripple(project: &Project, clip_id: u32) -> Result<Batch, EditError
     let mut ops = vec![EditOp::RemoveClip { track: ti, clip: clip.clone() }];
     let track = &project.timeline.tracks[ti];
     push_chain_shift(&mut ops, track, ti, &clip.end(), &clip.duration());
+    // Ripple collapses the tail to the new end — the user chose to shrink.
+    let new_end = end_after(project, Some(clip.id), &ops);
+    ops.push(EditOp::SetLength {
+        before: SerLen(project.timeline.length),
+        after: SerLen(Some(new_end)),
+    });
     Ok(Batch {
         ops,
         desc: format!("ripple-delete clip #{clip_id}"),
@@ -443,6 +529,12 @@ pub fn trim_in_ripple(project: &Project, clip_id: u32, playhead: f64) -> Result<
     }];
     let track = &project.timeline.tracks[ti];
     push_chain_shift(&mut ops, track, ti, &clip.end(), &delta);
+    // Ripple collapses the tail to the new end.
+    let new_end = end_after(project, None, &ops);
+    ops.push(EditOp::SetLength {
+        before: SerLen(project.timeline.length),
+        after: SerLen(Some(new_end)),
+    });
     Ok(Batch {
         ops,
         desc: format!("ripple trim in of clip #{clip_id} to {}", format_seconds(&at)),
@@ -475,6 +567,12 @@ pub fn trim_out_ripple(project: &Project, clip_id: u32, playhead: f64) -> Result
     }];
     let track = &project.timeline.tracks[ti];
     push_chain_shift(&mut ops, track, ti, &clip.end(), &removed);
+    // Ripple collapses the tail to the new end.
+    let new_end = end_after(project, None, &ops);
+    ops.push(EditOp::SetLength {
+        before: SerLen(project.timeline.length),
+        after: SerLen(Some(new_end)),
+    });
     Ok(Batch {
         ops,
         desc: format!("ripple trim out of clip #{clip_id} to {}", format_seconds(&at)),
@@ -523,8 +621,23 @@ pub fn delete_gap(project: &Project, playhead: f64) -> Result<Batch, EditError> 
         })
         .collect();
     if ops.is_empty() {
-        return Err(EditError::NoGap);
+        // Trailing gap: dd shortens the sequence tail to the playhead.
+        return Ok(Batch {
+            ops: vec![EditOp::SetLength {
+                before: SerLen(project.timeline.length),
+                after: SerLen(Some(at)),
+            }],
+            desc: format!("delete trailing gap to {}", format_seconds(&at)),
+        });
     }
+    // Interior: the uniform shift pulls the last clip's end left —
+    // collapsing the sequence tail along with it.
+    let mut ops = ops;
+    let new_end = end_after(project, None, &ops);
+    ops.push(EditOp::SetLength {
+        before: SerLen(project.timeline.length),
+        after: SerLen(Some(new_end)),
+    });
     Ok(Batch {
         ops,
         desc: format!(
@@ -589,7 +702,7 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
         // Say so explicitly: this is the one gap trim that always
         // shortens the timeline, and that shouldn't be a surprise.
         None => {
-            let ops = track
+            let mut ops = track
                 .clips
                 .iter()
                 .map(|c| {
@@ -597,7 +710,14 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
                     after.start -= delta;
                     EditOp::ReplaceClip { track: ti, before: c.clone(), after }
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            // The uniform shift pulls the last clip's end left — collapse
+            // the sequence tail along with it.
+            let new_end = end_after(project, None, &ops);
+            ops.push(EditOp::SetLength {
+                before: SerLen(project.timeline.length),
+                after: SerLen(Some(new_end)),
+            });
             Ok(Batch {
                 ops,
                 desc: format!(
@@ -610,14 +730,11 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
     }
 }
 
-/// Trim a gap's out-edge to the (snapped) playhead: the next clip and
-/// everything after it slide left — the timeline shrinks, no new gaps.
-/// A trailing gap has no out-edge to trim.
 /// Trim a gap's out-edge to the (snapped) playhead (`o`): the next
 /// clip's head extends into the gap — its start moves left and its
 /// source in-point reaches earlier (material permitting). Followers are
 /// untouched and the timeline end doesn't move. A trailing gap has no
-/// out-edge to trim.
+/// out-edge to trim — `o` there shortens the sequence tail instead.
 pub fn trim_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     let ti = video_track_index(project)?;
     let track = project
@@ -636,7 +753,15 @@ pub fn trim_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError
         gs = c.end();
     }
     let Some(next) = next else {
-        return Err(EditError::NoGap); // trailing gap: no out-edge
+        // Trailing gap: `o` shortens the sequence tail to the playhead —
+        // the only edge there is to trim.
+        return Ok(Batch {
+            ops: vec![EditOp::SetLength {
+                before: SerLen(project.timeline.length),
+                after: SerLen(Some(at)),
+            }],
+            desc: format!("trim tail to {}", format_seconds(&at)),
+        });
     };
     if at <= gs || at >= next.start {
         return Err(EditError::NoGap);
@@ -707,6 +832,12 @@ pub fn trim_gap_out_ripple(project: &Project, playhead: f64) -> Result<Batch, Ed
     if ops.is_empty() {
         return Err(EditError::NoGap);
     }
+    let mut ops = ops;
+    let new_end = end_after(project, None, &ops);
+    ops.push(EditOp::SetLength {
+        before: SerLen(project.timeline.length),
+        after: SerLen(Some(new_end)),
+    });
     Ok(Batch {
         ops,
         desc: format!(
@@ -1205,10 +1336,16 @@ mod tests {
         h.undo(&mut p).unwrap();
         assert_eq!(clip_by_id(&p, 1).start, Seconds::from_integer(1));
 
-        // trailing gap: no out-edge to trim, but the in-edge extends the last clip
+        // trailing gap (dd preserved the end as tail length): `o` shortens
+        // the tail; `O` has nothing to slide
         let batch = delete_clip(&p, 2).unwrap();
         h.apply(&mut p, batch).unwrap();
-        assert!(matches!(trim_gap_out(&p, 3.5), Err(EditError::NoGap)));
+        assert_eq!(p.timeline.length, Some(Seconds::from_integer(5)), "dd on the last clip leaves the gap");
+        assert!(matches!(trim_gap_out_ripple(&p, 3.5), Err(EditError::NoGap)));
+        let batch = trim_gap_out(&p, 3.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(p.timeline.length, Some(Seconds::new(7, 2)));
+        // ... but the gap's in-edge extends the last clip
         let batch = trim_gap_in(&p, 3.5).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 1).end(), Seconds::new(7, 2));

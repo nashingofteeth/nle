@@ -83,6 +83,14 @@ pub fn segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
         });
         cursor = clip.end();
     }
+
+    // Trailing sequence tail → gap segment.
+    if let Some(len) = &project.timeline.length
+        && *len > cursor {
+            segs.push(Segment::Gap {
+                length: *len - cursor,
+            });
+        }
     Ok(segs)
 }
 
@@ -202,6 +210,7 @@ mod tests {
         p.video = Some(nle_core::VideoSettings { width: 320, height: 240 });
         let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("5"));
         p.timeline = Timeline {
+            length: None,
             tracks: vec![Track {
                 kind: TrackKind::Video,
                 clips: vec![
@@ -250,6 +259,19 @@ mod tests {
                     length: Seconds::from_integer(3),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn segments_include_the_trailing_tail() {
+        let mut p = project_with_gap();
+        p.timeline.length = Some(Seconds::from_integer(10)); // clips+gap end at 8
+        let segs = segments(&p).unwrap();
+        assert_eq!(
+            segs.last(),
+            Some(&Segment::Gap {
+                length: Seconds::from_integer(2)
+            })
         );
     }
 

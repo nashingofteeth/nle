@@ -120,6 +120,12 @@ impl Track {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Timeline {
     pub tracks: Vec<Track>,
+    /// Sequence tail: keeps the timeline's displayed end at least this
+    /// long, even when the last clip is deleted or trimmed (dd and o
+    /// leave a trailing gap; ripple ops collapse it). None = end at the
+    /// last clip.
+    #[serde(default, with = "rational_ser::opt")]
+    pub length: Option<Seconds>,
 }
 
 impl Default for Timeline {
@@ -136,6 +142,7 @@ impl Timeline {
                 kind: TrackKind::Video,
                 clips: Vec::new(),
             }],
+            length: None,
         }
     }
 
@@ -149,13 +156,19 @@ impl Timeline {
             .find(|t| t.kind == TrackKind::Video)
     }
 
-    /// End of the whole timeline (across all tracks).
+    /// End of the timeline: the last clip's end, or the sequence tail
+    /// length — whichever is later.
     pub fn end(&self) -> Seconds {
-        self.tracks
+        let clip_end = self
+            .tracks
             .iter()
             .map(|t| t.end())
             .max()
-            .unwrap_or_else(|| Seconds::from_integer(0))
+            .unwrap_or_else(|| Seconds::from_integer(0));
+        match self.length {
+            Some(len) if len > clip_end => len,
+            _ => clip_end,
+        }
     }
 
     /// Remove a clip by id, searching all tracks.
@@ -169,8 +182,16 @@ impl Timeline {
         Err(TimelineError::ClipNotFound(id))
     }
 
-    /// Structural sanity: positive spans, sorted non-overlapping clips.
+    /// Structural sanity: positive spans, sorted non-overlapping clips,
+    /// non-negative sequence tail.
     pub fn validate(&self) -> Result<(), TimelineError> {
+        if let Some(len) = self.length
+            && len < Seconds::from_integer(0) {
+                return Err(TimelineError::Corrupt(format!(
+                    "negative sequence tail {}",
+                    format_seconds(&len)
+                )));
+            }
         for (ti, track) in self.tracks.iter().enumerate() {
             let mut prev_end = Seconds::from_integer(0);
             for (ci, clip) in track.clips.iter().enumerate() {
@@ -232,7 +253,7 @@ mod tests {
         let mut track = Track { kind: TrackKind::Video, clips: vec![] };
         track.try_insert(clip(1, 0, 5)).unwrap();
         track.try_insert(clip(2, 5, 5)).unwrap();
-        let mut timeline = Timeline { tracks: vec![track] };
+        let mut timeline = Timeline { tracks: vec![track], length: None };
         timeline.remove_clip(2).unwrap();
         assert!(timeline.remove_clip(99).is_err());
         timeline.validate().unwrap();

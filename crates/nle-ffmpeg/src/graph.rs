@@ -150,6 +150,17 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
         cursor = start_f + (out_f - in_f);
     }
 
+    // Trailing sequence tail: fill with black + silence so the export
+    // honors the timeline's displayed end.
+    if let Some(len) = &project.timeline.length {
+        let len_f = frame(len);
+        if len_f > cursor {
+            let gap = Seconds::new(len_f - cursor, 1) / fps;
+            segments.push(Segment::Gap { dur: format_seconds(&gap) });
+            cursor = len_f;
+        }
+    }
+
     // Emit the graph.
     let fps_s = format!("{}/{}", fps.numer(), fps.denom());
     let mut graph = String::new();
@@ -379,6 +390,18 @@ mod tests {
             compile_export(&p),
             Err(CompileError::TooShort(1))
         ));
+    }
+
+    #[test]
+    fn trailing_tail_fills_the_export() {
+        let mut p = project_with_two_clips();
+        p.timeline.length = Some(Seconds::new(20, 1)); // clips end at 15
+        let plan = compile_export(&p).unwrap();
+        // gap [15..20) → black + silence, 150 extra frames
+        assert!(plan.graph.contains("color=c=black:s=1920x1080:r=30/1:d=5"), "{}", plan.graph);
+        assert!(plan.graph.contains("anullsrc=r=48000:cl=stereo,atrim=duration=5"), "{}", plan.graph);
+        assert_eq!(plan.frames, 600);
+        assert_eq!(plan.duration, Seconds::from_integer(20));
     }
 
     #[test]

@@ -875,6 +875,7 @@ mod tests {
     fn project() -> Project {
         let mut p = Project::new();
         p.timeline = Timeline {
+            length: None,
             tracks: vec![Track {
                 kind: TrackKind::Video,
                 clips: vec![
