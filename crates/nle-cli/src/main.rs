@@ -199,8 +199,17 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
     if empty {
         bail!("timeline is empty — add clips first (the monitor needs content)");
     }
-    let player =
-        mpv::MpvPlayer::spawn(&format!("nle monitor — {}", project_path.display()))?;
+    let media_title = format!(
+        "nle — {}",
+        project_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| project_path.display().to_string())
+    );
+    let player = mpv::MpvPlayer::spawn(
+        &format!("nle monitor — {}", project_path.display()),
+        &media_title,
+    )?;
     player.observe()?;
     let edl = preview::build_edl(&project)?;
     player.load(&edl);

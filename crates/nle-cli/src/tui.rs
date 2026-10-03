@@ -212,6 +212,8 @@ pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result
     let history = History::load(&history_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
     app.history = history;
+    // Media title (MPRIS "Now playing") follows the clip under the playhead.
+    let mut last_media_title: Option<String> = None;
 
     loop {
         let st = player.state();
@@ -230,10 +232,29 @@ pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result
             app.awaiting_unload = false;
         }
         if let Some(t) = app.pending_seek
-            && st.file_loaded && !app.awaiting_unload {
-                player.seek_absolute(t.max(0.0));
-                app.pending_seek = None;
+            && st.file_loaded
+            && !app.awaiting_unload
+        {
+            player.seek_absolute(t.max(0.0));
+            app.pending_seek = None;
+        }
+
+        // Keep the desktop's "Now playing" in sync with the clip playing.
+        if st.file_loaded {
+            let current = clip_under(&app.project, app.playhead)
+                .map(|c| {
+                    app.project
+                        .asset(c.asset)
+                        .and_then(|a| a.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+                        .unwrap_or_else(|| "clip".to_string())
+                })
+                .unwrap_or_else(|| "gap".to_string());
+            let title = format!("{current} — nle");
+            if last_media_title.as_deref() != Some(title.as_str()) {
+                player.set_media_title(&title);
+                last_media_title = Some(title);
             }
+        }
 
         if app.quit {
             break;

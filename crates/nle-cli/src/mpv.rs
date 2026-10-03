@@ -53,7 +53,11 @@ pub struct MpvPlayer {
 
 impl MpvPlayer {
     /// Spawn mpv in idle mode with an IPC socket and connect to it.
-    pub fn spawn(title: &str) -> Result<Self, MpvError> {
+    ///
+    /// `media_title` feeds `--force-media-title` — what mpv reports over
+    /// MPRIS ("Now playing") and shows in the OSC; without it, an `edl://`
+    /// URL leaks into the desktop's media indicator.
+    pub fn spawn(window_title: &str, media_title: &str) -> Result<Self, MpvError> {
         let socket_path = std::env::temp_dir().join(format!("nle-mpv-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&socket_path); // stale socket from a crash
 
@@ -66,7 +70,8 @@ impl MpvPlayer {
                 "--hr-seek=yes",        // every seek is frame-exact
                 "--force-window=yes",
                 &format!("--input-ipc-server={}", socket_path.display()),
-                &format!("--title={title}"),
+                &format!("--title={window_title}"),
+                &format!("--force-media-title={media_title}"),
             ])
             .spawn()?;
 
@@ -138,6 +143,11 @@ impl MpvPlayer {
     /// Snapshot of the reader thread's knowledge.
     pub fn state(&self) -> PlaybackState {
         self.state.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Update what MPRIS / the OSC report as the media title.
+    pub fn set_media_title(&self, title: &str) {
+        let _ = self.send(serde_json::json!(["set_property", "force-media-title", title]));
     }
 
     /// Ask mpv to exit cleanly.
