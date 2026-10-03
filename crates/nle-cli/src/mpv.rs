@@ -123,8 +123,21 @@ impl MpvPlayer {
     }
 
     /// Load (or replace) the file to play. `url` may be an edl:// URI.
-    pub fn load(&self, url: &str) {
-        let _ = self.send(serde_json::json!(["loadfile", url, "replace"]));
+    /// `start` positions the playhead DURING the load (mpv seeks as it
+    /// opens the file) — no race with the ready event, so edits restore
+    /// the playhead reliably.
+    pub fn load(&self, url: &str, start: Option<f64>) {
+        let cmd = match start {
+            Some(t) => serde_json::json!([
+                "loadfile",
+                url,
+                "replace",
+                0,
+                format!("start={t:.6}")
+            ]),
+            None => serde_json::json!(["loadfile", url, "replace", 0]),
+        };
+        let _ = self.send(cmd);
     }
 
     pub fn toggle_pause(&self) {

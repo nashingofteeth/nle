@@ -39,6 +39,27 @@ pub fn snap_to_frame(t: f64, fps: Option<&Seconds>) -> f64 {
     }
 }
 
+/// Magnetic snap: within ~1.5 frames of a cut, the playhead lands exactly
+/// on it. EDL drift makes seeks to cut times settle a frame past them;
+/// this keeps the playhead (and with it the white indicator, `k`/`b`
+/// targets, and edit points) canonical.
+pub fn snap_to_cut(t: f64, project: &Project) -> f64 {
+    let Some(fps) = project.fps.as_ref() else {
+        return t;
+    };
+    let radius = 1.5 / secs(fps);
+    let mut best = t;
+    let mut best_d = radius;
+    for c in cut_points(project) {
+        let d = (t - c).abs();
+        if d <= best_d {
+            best_d = d;
+            best = c;
+        }
+    }
+    best
+}
+
 /// "62.25 s" → "01:02.2" (and "3661" → "1:01:01.0" past an hour).
 pub fn fmt_timecode(t: f64) -> String {
     let t = t.max(0.0);
@@ -127,11 +148,6 @@ pub struct App {
     /// Undo/redo stack of edit batches (session-only).
     pub history: History,
     pub reload_requested: bool,
-    /// Seek to apply once the (re)loaded file is ready.
-    pub pending_seek: Option<f64>,
-    /// After a reload we must see `file_loaded=false` before trusting
-    /// `file_loaded=true` again (else we'd seek the OLD file).
-    pub awaiting_unload: bool,
     pub quit: bool,
     pub message: String,
     // synced from mpv every tick
@@ -158,8 +174,6 @@ impl App {
             clipboard: None,
             history: History::default(),
             reload_requested: false,
-            pending_seek: None,
-            awaiting_unload: false,
             quit: false,
             message: String::new(),
             paused: true,
@@ -177,10 +191,15 @@ impl App {
 
     pub fn sync(&mut self, st: &PlaybackState) {
         if let Some(t) = st.time_pos {
-            // Snap to the frame grid: mpv's settled positions are frame
-            // PTS anyway (plus float fuzz), and this makes the displayed
-            // time, the marker column, and edit targets all agree.
-            self.playhead = snap_to_frame(t, self.project.fps.as_ref());
+            // Two-stage canonicalization: snap to the frame grid, then go
+            // magnetic to cuts. mpv's EDL positions drift off the project
+            // grid (source frame rounding — e.g. seeking to a cut lands
+            // one frame PAST it on the drifted black-segment grid), and
+            // every readout (white indicator, edit keys) keys off exact
+            // positions. Within ~1.5 frames of a cut, the playhead IS the
+            // cut.
+            let snapped = snap_to_frame(t, self.project.fps.as_ref());
+            self.playhead = snap_to_cut(snapped, &self.project);
         }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
@@ -246,18 +265,6 @@ pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result
             }
         }
 
-        // Apply a queued seek once the (re)loaded file is actually playing.
-        if app.awaiting_unload && !st.file_loaded {
-            app.awaiting_unload = false;
-        }
-        if let Some(t) = app.pending_seek
-            && st.file_loaded
-            && !app.awaiting_unload
-        {
-            player.seek_absolute(t.max(0.0));
-            app.pending_seek = None;
-        }
-
         // Keep the desktop's "Now playing" in sync with the clip playing.
         if st.file_loaded {
             let current = clip_under(&app.project, app.playhead)
@@ -301,16 +308,14 @@ pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result
 }
 
 /// Reload the project (and its undo history) from disk and rebuild the
-/// preview. Lets you edit `nle.json` in another window (e.g. vim) and
-/// watch it here.
+/// preview at the current playhead. Lets you edit `nle.json` in another
+/// window (e.g. vim) and watch it here.
 fn reload_project(app: &mut App, player: &MpvPlayer) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
     let edl = preview::build_edl(&project)?;
     app.project = project;
     app.history = History::load(&history_path(&app.path)).unwrap_or_default();
-    player.load(&edl);
-    app.pending_seek = Some(app.playhead);
-    app.awaiting_unload = true;
+    player.load(&edl, Some(app.playhead));
     Ok(())
 }
 
@@ -570,7 +575,8 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
 
 /// Atomic save + preview rebuild. Called after every successful edit
 /// (and undo/redo) — no manual save state to get wrong. The undo history
-/// sidecar is written alongside the project.
+/// sidecar is written alongside the project, and the preview reloads
+/// with the playhead position baked into the load (no race).
 fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
     if let Err(e) = app.project.save(&app.path) {
         app.set_message(&format!("save failed: {e}"));
@@ -580,11 +586,7 @@ fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
         app.set_message(&format!("history save failed: {e}"));
     }
     match preview::build_edl(&app.project) {
-        Ok(edl) => {
-            player.load(&edl);
-            app.pending_seek = Some(app.playhead);
-            app.awaiting_unload = true;
-        }
+        Ok(edl) => player.load(&edl, Some(app.playhead)),
         Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
     }
 }
@@ -990,6 +992,41 @@ mod tests {
         let mut p2 = project();
         p2.timeline.length = None;
         assert_eq!(App::new(p2, PathBuf::from("t.json")).total(), 7.0);
+    }
+
+    #[test]
+    fn snap_to_cut_is_magnetic_within_one_and_a_half_frames() {
+        let mut p = project(); // cuts at 0, 3, 5, 7
+        p.fps = Some(Seconds::new(30, 1));
+        let radius = 1.5 / 30.0;
+        // a drifted seek that landed one frame PAST the cut snaps back
+        assert_eq!(snap_to_cut(3.0 + radius, &p), 3.0);
+        assert_eq!(snap_to_cut(3.0 - radius, &p), 3.0);
+        // nearest cut wins when two are in range (gap narrower than 3 frames)
+        // ... and mid-clip positions stay untouched
+        assert_eq!(snap_to_cut(3.5, &p), 3.5);
+        assert_eq!(snap_to_cut(1.0, &p), 1.0);
+        // exactly at the boundary of the radius: still captured (<=)
+        assert_eq!(snap_to_cut(3.0 + 1.5 / 30.0, &p), 3.0);
+    }
+
+    #[test]
+    fn sync_applies_grid_and_cut_snapping() {
+        let mut p = project(); // cuts [0, 3, 5, 7], 30fps
+        p.fps = Some(Seconds::new(30, 1));
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        // mpv settled one frame past the cut at 5 → magnetic back to 5
+        app.sync(&PlaybackState {
+            time_pos: Some(5.0 + 1.0 / 30.0),
+            ..Default::default()
+        });
+        assert_eq!(app.playhead, 5.0);
+        // mid-clip position: only grid-snapped
+        app.sync(&PlaybackState {
+            time_pos: Some(4.011),
+            ..Default::default()
+        });
+        assert_eq!(app.playhead, 4.0);
     }
 
     #[test]

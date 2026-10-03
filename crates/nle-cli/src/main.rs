@@ -212,7 +212,7 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
     )?;
     player.observe()?;
     let edl = preview::build_edl(&project)?;
-    player.load(&edl);
+    player.load(&edl, None);
     tui::run(project, project_path.to_path_buf(), player)?;
     Ok(())
 }
