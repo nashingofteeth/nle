@@ -385,7 +385,13 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     match code {
         KeyCode::Char(' ') => {
             if app.guard_loaded() {
-                player.toggle_pause();
+                if app.eof {
+                    // At the end: play restarts from the beginning.
+                    player.seek_absolute(0.0);
+                    player.set_pause(false);
+                } else {
+                    player.toggle_pause();
+                }
             }
         }
         KeyCode::Char('h') => app.seek_rel(player, -(mult as f64)),

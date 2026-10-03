@@ -127,6 +127,10 @@ impl MpvPlayer {
         let _ = self.send(serde_json::json!(["cycle", "pause"]));
     }
 
+    pub fn set_pause(&self, on: bool) {
+        let _ = self.send(serde_json::json!(["set_property", "pause", on]));
+    }
+
     pub fn seek_relative(&self, delta: f64) {
         let _ = self.send(serde_json::json!(["seek", delta, "relative"]));
     }
