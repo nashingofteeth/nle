@@ -126,6 +126,10 @@ pub struct App {
     pub paused: bool,
     pub loaded: bool,
     pub dead: bool,
+    /// mpv reached the end of the timeline (playthrough, or seek past the
+    /// last frame) — the two-endings contract: EOF renders flush at the
+    /// border, the last-frame position renders where it actually is.
+    pub eof: bool,
     pub mpv_error: Option<String>,
     pub exit_message: Option<String>,
 }
@@ -149,6 +153,7 @@ impl App {
             paused: true,
             loaded: false,
             dead: false,
+            eof: false,
             mpv_error: None,
             exit_message: None,
         }
@@ -165,6 +170,7 @@ impl App {
         self.paused = st.paused;
         self.loaded = st.file_loaded;
         self.dead = st.dead;
+        self.eof = st.eof;
         if let Some(e) = &st.last_error {
             self.mpv_error = Some(e.clone());
         }
@@ -699,10 +705,10 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     // column — one glyph per cell, and the position is the stronger
     // signal.
     let ph = marker_col(app.playhead, total, inner.width);
-    // At the timeline's end, hug the RIGHT edge of the last cell (▕) —
-    // the end line is the border, one column past the last cell's left
-    // edge where a normal ▏ would sit.
-    let at_end = is_at_end(app.playhead, app.total(), app.project.fps.as_ref());
+    // Two endings, mirroring mpv: EOF (playthrough finished) is the
+    // border itself → flush ▕. Anywhere else — including paused on the
+    // last frame — renders where the playhead actually is, ▏.
+    let at_end = app.eof;
     let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
     let last = cells.len() - 1;
     for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
@@ -807,17 +813,6 @@ fn marker_col(t: f64, total: f64, width: u16) -> u16 {
     (((t / total.max(1e-9)) * width as f64).round() as u16).min(width - 1)
 }
 
-/// "Is the playhead at the very end?" Seeking there lands on the last
-/// frame's PTS — one frame before the duration, and mpv reports it
-/// truncated ("13.983333" of 14.0 @ 60fps) — so the window is 1.5 frames,
-/// comfortably past both the frame boundary and the float rounding.
-fn is_at_end(playhead: f64, total: f64, fps: Option<&Seconds>) -> bool {
-    match fps {
-        Some(f) => playhead >= total - 1.5 / secs(f),
-        None => (total - playhead).abs() < 1e-6,
-    }
-}
-
 fn truncate_label(label: &str, width: u16) -> String {
     let w = width as usize;
     if w == 0 {
@@ -913,25 +908,6 @@ mod tests {
         // beyond the end clamps; zero-width row can't panic
         assert_eq!(marker_col(99.0, total, width), width - 1);
         assert_eq!(marker_col(1.0, total, 0), 0);
-    }
-
-    #[test]
-    fn at_end_window_covers_last_frame_and_rounding() {
-        let fps30 = Seconds::new(30, 1);
-        let fps60 = Seconds::new(60, 1);
-        let total = 14.0;
-        // playthrough: exactly the duration
-        assert!(is_at_end(14.0, total, Some(&fps30)));
-        // G/$: last frame's PTS, one frame before the end
-        assert!(is_at_end(13.9666666, total, Some(&fps30)));
-        // the regression: 60fps, mpv's truncated "13.983333" of 13.98333…
-        assert!(is_at_end(13.983333, total, Some(&fps60)));
-        // genuinely earlier positions are not "at end"
-        assert!(!is_at_end(13.9, total, Some(&fps30)));
-        assert!(!is_at_end(13.9, total, Some(&fps60)));
-        // no fps known → only exact-duration counts
-        assert!(is_at_end(14.0, total, None));
-        assert!(!is_at_end(13.999, total, None));
     }
 
     #[test]

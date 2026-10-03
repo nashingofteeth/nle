@@ -36,6 +36,9 @@ pub struct PlaybackState {
     pub paused: bool,
     /// A file finished loading and is ready for commands.
     pub file_loaded: bool,
+    /// Playback reached the end (duration) — distinct from "paused on the
+    /// last frame", which reports a position one frame before the end.
+    pub eof: bool,
     /// The socket closed: mpv was closed or crashed.
     pub dead: bool,
     /// Last error mpv reported (e.g. loadfile failure).
@@ -241,6 +244,7 @@ fn apply_property(st: &mut PlaybackState, name: Option<&str>, data: Option<serde
         Some("time-pos") => st.time_pos = data.as_ref().and_then(|v| v.as_f64()),
         Some("duration") => st.duration = data.as_ref().and_then(|v| v.as_f64()),
         Some("pause") => st.paused = data.as_ref().and_then(|v| v.as_bool()).unwrap_or(false),
+        Some("eof-reached") => st.eof = data.as_ref().and_then(|v| v.as_bool()).unwrap_or(false),
         _ => {}
     }
 }
