@@ -514,10 +514,10 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         }
         KeyCode::Char('D') => {
             // ripple delete: a clip ripples its successors; a gap deletes
-            // itself (which is inherently a ripple)
+            // itself and collapses the sequence tail
             let result = match clip_under(&app.project, app.playhead) {
                 Some(c) => edit::delete_ripple(&app.project, c.id),
-                None => edit::delete_gap(&app.project, app.playhead),
+                None => edit::delete_gap_ripple(&app.project, app.playhead),
             };
             run_edit(app, player, result);
         }
