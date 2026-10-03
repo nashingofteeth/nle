@@ -71,6 +71,10 @@ impl MpvPlayer {
                 "--keep-open=always",   // at EOF: pause at the end, don't quit
                 "--pause",              // start paused at 0
                 "--hr-seek=yes",        // every seek is frame-exact
+                // EDL segment switches hiccup the audio chain; mpv's default
+                // framedrop then SKIPS video frames to resync. Holding the
+                // last frame reads far better than losing frames.
+                "--framedrop=no",
                 "--force-window=yes",
                 &format!("--input-ipc-server={}", socket_path.display()),
                 &format!("--title={window_title}"),
