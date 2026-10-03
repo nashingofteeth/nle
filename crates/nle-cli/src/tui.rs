@@ -233,7 +233,14 @@ impl App {
 
     fn seek_to(&mut self, player: &MpvPlayer, t: f64) {
         if self.guard_loaded() {
-            player.seek_absolute(t.max(0.0));
+            // Nudge a few ms INTO the target instant: EDL segment
+            // boundaries sit a hair after the cut (source frame rounding),
+            // so an exact seek would display the PREVIOUS segment's last
+            // frame (gap/black) — the clip's color only appears after one
+            // manual frame-step. 4ms clears the drift seen on this
+            // machine's timelines; the playhead snaps back to the exact
+            // cut afterward (magnet).
+            player.seek_absolute(t.max(0.0) + 0.004);
         }
     }
 }
