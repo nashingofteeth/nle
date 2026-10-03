@@ -39,6 +39,7 @@ pub fn probe(path: &Path) -> Result<RawProbe, ProbeError> {
             "-show_format",
             "-show_streams",
         ])
+        .arg("--")
         .arg(path)
         .output()?;
     if !out.status.success() {

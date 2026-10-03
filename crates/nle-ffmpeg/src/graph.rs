@@ -266,6 +266,8 @@ pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, Export
     args.push("192k".into());
     args.push("-movflags".into());
     args.push("+faststart".into());
+    // `--` ends option parsing (protects outputs named like options).
+    args.push("--".into());
     args.push(spec.output.display().to_string());
 
     eprintln!("$ ffmpeg {}", args.join(" "));

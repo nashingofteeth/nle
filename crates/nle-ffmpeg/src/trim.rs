@@ -169,6 +169,10 @@ pub fn build_args(spec: &TrimSpec) -> Result<Vec<String>, TrimError> {
         a.push("+faststart".into());
     }
 
+    // `--` ends option parsing: a file literally named "-version.mp4" can't
+    // be misread as an option. (Inputs via `-i` are safe — option values
+    // are consumed literally — but the trailing OUTPUT is positional.)
+    a.push("--".into());
     a.push(spec.output.display().to_string());
     Ok(a)
 }
@@ -206,6 +210,9 @@ mod tests {
         // seek before input, duration after → fast + accurate
         assert!(line.contains("-ss 12.5 -i in.mp4 -t 7.5"), "{line}");
         assert!(line.contains("-c:v libx264"), "{line}");
+        // `--` guards the positional output against option-injection
+        assert_eq!(args.last().map(String::as_str), Some("out.mp4"));
+        assert_eq!(args[args.len() - 2], "--");
     }
 
     #[test]

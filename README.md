@@ -51,6 +51,24 @@ Times accept plain seconds (`12.5`) or timecodes (`0:01:23.500`).
 The project file (`nle.json`) is plain JSON with exact rational times
 (`"30000/1001"`) — human-readable and drift-free.
 
+## Dependency policy
+
+Low-dependency stance: **the current set is frozen.** No new runtime
+dependencies without explicit justification (a hand-rolled ~50 lines beats
+a transitive tree for most needs).
+
+- Direct deps (10): clap, anyhow, thiserror, serde, serde_json,
+  num-rational, tempfile, ratatui, crossterm (+3 internal crates).
+  Zero network code in the tree.
+- `Cargo.lock` is committed — builds are reproducible; upgrades are
+  deliberate events, not side effects.
+- After any dependency change: `cargo update` deliberately, then run
+  `cargo audit` (RustSec advisories) before committing.
+- External system binaries (`ffmpeg`, `ffprobe`, `mpv`) are the real
+  attack surface, not crates: they're invoked without a shell, option
+  injection is blocked with `--` before every positional path, and mpv
+  runs with an isolated config and its own IPC socket.
+
 ## Export presets (planned, M6)
 
 - `preview` — VAAPI hardware, near-instant, lower quality

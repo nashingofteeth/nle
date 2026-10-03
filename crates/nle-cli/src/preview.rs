@@ -160,6 +160,7 @@ pub fn ensure_black_file(width: u32, height: u32, fps: &Seconds) -> Result<PathB
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "32k",
         ])
+        .arg("--")
         .arg(&tmp)
         .status()?;
     if !status.success() {
