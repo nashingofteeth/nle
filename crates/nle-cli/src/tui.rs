@@ -229,6 +229,9 @@ impl App {
     fn seek_rel(&mut self, player: &MpvPlayer, delta: f64) {
         if self.guard_loaded() {
             player.seek_relative(delta);
+            // Model-authoritative while paused: h/l moves the playhead by
+            // the same arithmetic the display uses.
+            self.playhead = (self.playhead + delta).clamp(0.0, self.total());
         }
     }
 
