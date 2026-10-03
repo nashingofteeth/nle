@@ -694,7 +694,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
     // Marker row: cut ticks at segment boundaries, playhead ▲ on top.
-    let ph = (((app.playhead / total) * (w - 1.0)).round() as u16).min(inner.width - 1);
+    let ph = marker_col(app.playhead, total, inner.width);
     let mut cells: Vec<char> = vec![' '; inner.width as usize];
     let last = cells.len() - 1;
     for &b in &boundaries {
@@ -795,6 +795,16 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Column of a time position on the timeline row. Used for BOTH the
+/// playhead marker and the boundary ticks — one scale, or they drift
+/// apart (the playhead used (w-1) once and sat a column off the end).
+fn marker_col(t: f64, total: f64, width: u16) -> u16 {
+    if width == 0 {
+        return 0;
+    }
+    (((t / total.max(1e-9)) * width as f64).round() as u16).min(width - 1)
+}
+
 fn truncate_label(label: &str, width: u16) -> String {
     let w = width as usize;
     if w == 0 {
@@ -875,6 +885,21 @@ mod tests {
         assert_eq!(next_cut(&pts, 2.9995, eps), Some(5.0)); // just before cut 3 → skip
         assert_eq!(next_clip_start(&project(), 2.9995, eps), Some(5.0));
         assert_eq!(prev_clip_start(&project(), 3.0005, eps), Some(0.0));
+    }
+
+    #[test]
+    fn marker_column_alignment() {
+        let total = 14.0;
+        let width = 100;
+        // ends meet: playhead at 0 → col 0, at the end → the last column
+        assert_eq!(marker_col(0.0, total, width), 0);
+        assert_eq!(marker_col(total, total, width), width - 1);
+        // a boundary at half the timeline sits at half the row — the same
+        // scale the segment spans use, so ticks and playhead agree
+        assert_eq!(marker_col(7.0, total, width), 50);
+        // beyond the end clamps; zero-width row can't panic
+        assert_eq!(marker_col(99.0, total, width), width - 1);
+        assert_eq!(marker_col(1.0, total, 0), 0);
     }
 
     #[test]
