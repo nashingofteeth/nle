@@ -693,18 +693,17 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let track_row = Rect { height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
-    // Marker row: cut ticks at segment boundaries, playhead ▲ on top.
-    // Ticks use ▏ (one-eighth block, left-hugging) — thin, flush with the
-    // clip boundary, and the same glyph the track row divider uses, so
-    // tick and divider read as one line. Centered glyphs (╵) float half
-    // a cell off the actual edge.
+    // Marker row: cut ticks at segment boundaries, red playhead on top.
+    // Everything on this row is left-hugging (▏ ticks, ▍ playhead) so the
+    // playhead lands exactly on the clip boundary line — centered glyphs
+    // (▲) float half a cell off the actual edge.
     let ph = marker_col(app.playhead, total, inner.width);
     let mut cells: Vec<char> = vec![' '; inner.width as usize];
     let last = cells.len() - 1;
     for &b in &boundaries {
         cells[(b as usize).min(last)] = '▏';
     }
-    cells[ph as usize] = '▲';
+    cells[ph as usize] = '▍';
     let mut marker: Vec<Span> = Vec::new();
     let tick_style = Style::default().fg(Color::White);
     let head_style = Style::default().fg(Color::Red);
