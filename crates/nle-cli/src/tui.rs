@@ -415,11 +415,12 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             run_edit(app, player, result);
         }
         KeyCode::Char('D') => {
-            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
-                app.set_message("playhead is in a gap — j/w/b to a clip");
-                return;
+            // ripple delete: a clip ripples its successors; a gap deletes
+            // itself (which is inherently a ripple)
+            let result = match clip_under(&app.project, app.playhead) {
+                Some(c) => edit::delete_ripple(&app.project, c.id),
+                None => edit::delete_gap(&app.project, app.playhead),
             };
-            let result = edit::delete_ripple(&app.project, clip.id);
             run_edit(app, player, result);
         }
         KeyCode::Char('p') => {
@@ -518,11 +519,11 @@ fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
 }
 
 fn edit_delete(app: &mut App, player: &MpvPlayer) {
-    let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
-        app.set_message("playhead is in a gap — j/w/b to a clip");
-        return;
+    // `dd` deletes whatever is under the playhead: a clip, or the gap.
+    let result = match clip_under(&app.project, app.playhead) {
+        Some(c) => edit::delete_clip(&app.project, c.id),
+        None => edit::delete_gap(&app.project, app.playhead),
     };
-    let result = edit::delete_clip(&app.project, clip.id);
     run_edit(app, player, result);
 }
 
@@ -677,7 +678,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         app.history.depth()
     );
 
-    let help = "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim · s split · dd/D del · yy/p/P · u/Ctrl-r undo · r reload · : cmd · q quit";
+    let help = "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · r reload · : cmd · q quit";
 
     let mut lines = vec![
         Line::from(clip_line),

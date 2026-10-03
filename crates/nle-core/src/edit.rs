@@ -33,6 +33,8 @@ pub enum EditError {
     NothingToRedo,
     #[error("no frame rate set — add a clip first")]
     NoFps,
+    #[error("playhead is not in a gap")]
+    NoGap,
     #[error(transparent)]
     Timeline(#[from] TimelineError),
     #[error(transparent)]
@@ -334,6 +336,60 @@ pub fn delete_ripple(project: &Project, clip_id: u32) -> Result<Batch, EditError
     })
 }
 
+/// Delete the gap containing the (snapped) playhead: every clip after it
+/// shifts left to close the gap. A trailing gap has nothing to shift.
+pub fn delete_gap(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let ti = video_track_index(project)?;
+    let track = project
+        .timeline
+        .video_track()
+        .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))?;
+    let at = snap(project, playhead)?;
+
+    // The gap containing `at`: [end of the last clip starting at-or-before
+    // `at`, start of the first clip starting after `at`).
+    let mut gap_start = Seconds::from_integer(0);
+    let mut gap_end: Option<Seconds> = None;
+    for c in &track.clips {
+        if at < c.start {
+            gap_end = Some(c.start);
+            break;
+        }
+        gap_start = c.end();
+    }
+    let gap_end = gap_end.ok_or(EditError::NoGap)?; // trailing gap
+    if gap_end <= gap_start {
+        return Err(EditError::NoGap); // playhead sits inside a clip
+    }
+    let shift = gap_end - gap_start;
+
+    let ops: Vec<EditOp> = track
+        .clips
+        .iter()
+        .filter(|c| c.start >= gap_end)
+        .map(|c| {
+            let mut after = c.clone();
+            after.start -= shift;
+            EditOp::ReplaceClip {
+                track: ti,
+                before: c.clone(),
+                after,
+            }
+        })
+        .collect();
+    if ops.is_empty() {
+        return Err(EditError::NoGap);
+    }
+    Ok(Batch {
+        ops,
+        desc: format!(
+            "delete gap {}–{}",
+            format_seconds(&gap_start),
+            format_seconds(&gap_end)
+        ),
+    })
+}
+
 /// Paste a yanked clip. `at = Some(playhead)` inserts at that position
 /// (overlap-checked); `None` appends at the end of the video track.
 pub fn paste(project: &Project, snapshot: &Clip, at: Option<f64>) -> Result<Batch, EditError> {
@@ -587,6 +643,48 @@ mod tests {
             h.apply(&mut p, batch).unwrap();
         }
         assert_eq!(h.depth(), MAX_HISTORY);
+    }
+
+    #[test]
+    fn delete_gap_closes_it_up() {
+        // [0..1) #1 · gap [1..3) · [3..5) #2 · [5..7) #3
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        p.video = Some(VideoSettings { width: 320, height: 240 });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let mk = |id: u32, start: i64, dur: i64| Clip {
+            id,
+            asset: a,
+            start: Seconds::from_integer(start),
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(dur),
+        };
+        p.timeline.video_track_mut().unwrap().clips = vec![mk(1, 0, 1), mk(2, 3, 2), mk(3, 5, 2)];
+        p.validate().unwrap();
+        let mut h = History::default();
+
+        // playhead in the middle of the gap
+        let batch = delete_gap(&p, 2.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(ids(&p), vec![1, 2, 3]);
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(1));
+        assert_eq!(clip_by_id(&p, 3).start, Seconds::from_integer(3));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3));
+
+        // leading gap: everything shifts
+        let batch = delete_gap(&p, 0.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).start, Seconds::from_integer(0));
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(1));
+
+        // inside a clip → not a gap
+        assert!(matches!(delete_gap(&p, 1.5), Err(EditError::NoGap)));
+        // trailing gap → nothing to shift
+        let mut p2 = fixture();
+        let batch = delete_clip(&p2, 2).unwrap();
+        h.apply(&mut p2, batch).unwrap(); // now [0..2), gap 2..end
+        assert!(matches!(delete_gap(&p2, 5.0), Err(EditError::NoGap)));
     }
 
     #[test]
