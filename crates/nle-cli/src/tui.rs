@@ -561,6 +561,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             run_edit(app, player, result);
         }
         KeyCode::Char('D') => {
+            edit_yank(app); // D yanks too
             // ripple delete: a clip ripples its successors; a gap delete
             // always ripples (closes the gap, shrinks the timeline)
             let result = match clip_under(&app.project, app.playhead) {
@@ -666,7 +667,7 @@ fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
 }
 
 fn edit_delete(app: &mut App, player: &MpvPlayer) {
-    // `dd` deletes whatever is under the playhead: a clip, or the gap.
+    edit_yank(app); // dd yanks first (vim: dd fills the register)
     let result = match clip_under(&app.project, app.playhead) {
         Some(c) => edit::delete_clip(&app.project, c.id),
         None => edit::delete_gap(&app.project, app.playhead),
