@@ -856,8 +856,14 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 .map(|a| a.path.display().to_string())
                 .unwrap_or_else(|| "?".into());
             let fps = app.project.fps.as_ref();
+            let clip_fps = app
+                .project
+                .asset(c.asset)
+                .and_then(|a| a.fps())
+                .map(|f| format!(" · {:.2}fps", secs(&f)))
+                .unwrap_or_default();
             format!(
-                "clip #{}  {}   {} – {} · len {}   (src {} – {})",
+                "clip #{}  {}   {} – {} · len {}{clip_fps}   (src {} – {})",
                 c.id,
                 asset,
                 fmt_timecode(secs(&c.start), fps),
