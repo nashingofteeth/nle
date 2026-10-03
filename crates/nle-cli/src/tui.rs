@@ -722,11 +722,12 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let track_row = Rect { height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
-    // Marker row: pure cut ticks — white, left-hugging, never touched by
-    // the playhead (that lives on the track row above now).
+    // Marker row: cut ticks between clips only. The timeline's start and
+    // end aren't cuts (and the final one can't be drawn flush anyway —
+    // the border sits one column past the last cell).
     let mut ticks: Vec<char> = vec![' '; inner.width as usize];
     let last = ticks.len() - 1;
-    for &b in &boundaries {
+    for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
         ticks[(b as usize).min(last)] = '▏';
     }
     let playhead_row = Rect { y: inner.y + 1, height: 1, ..inner };
