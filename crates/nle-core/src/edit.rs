@@ -574,6 +574,8 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
             })
         }
         // Leading gap: nothing to extend — pull every clip left instead.
+        // Say so explicitly: this is the one gap trim that always
+        // shortens the timeline, and that shouldn't be a surprise.
         None => {
             let ops = track
                 .clips
@@ -586,7 +588,11 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
                 .collect();
             Ok(Batch {
                 ops,
-                desc: format!("trim gap in to {}", format_seconds(&at)),
+                desc: format!(
+                    "trim gap in to {} — timeline shifted left {}",
+                    format_seconds(&at),
+                    format_seconds(&delta)
+                ),
             })
         }
     }
@@ -633,7 +639,11 @@ pub fn trim_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError
     }
     Ok(Batch {
         ops,
-        desc: format!("trim gap out to {}", format_seconds(&at)),
+        desc: format!(
+            "trim gap out to {} — timeline shifted left {}",
+            format_seconds(&at),
+            format_seconds(&delta)
+        ),
     })
 }
 
@@ -1053,6 +1063,7 @@ mod tests {
 
         // trim gap out at 2.5: #2 and #3 slide left by 0.5, spans intact
         let batch = trim_gap_out(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("timeline shifted left 0.5"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 2).start, Seconds::new(5, 2));
         assert_eq!(clip_by_id(&p, 2).end(), Seconds::new(9, 2));
@@ -1080,6 +1091,7 @@ mod tests {
 
         // trim the leading gap's in-edge at 0.5: everything slides left 0.5
         let batch = trim_gap_in(&p, 0.5).unwrap();
+        assert!(batch.desc.contains("timeline shifted left 0.5"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 1).start, Seconds::new(1, 2));
         assert_eq!(
