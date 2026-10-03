@@ -601,9 +601,11 @@ pub fn delete_gap(project: &Project, playhead: f64) -> Result<Batch, EditError> 
         gap_start = c.end();
     }
     // Trailing gap: dd removes it entirely — the timeline collapses back
-    // to the last clip's end. (Partial shortening is `o`.)
+    // to the last clip's end. (Partial shortening is `o`.) The gap's
+    // FIRST frame is the last clip's end instant — clip ends are
+    // exclusive, so `at == gap_start` is in the gap, not the clip.
     let Some(gap_end) = gap_end else {
-        if at <= gap_start {
+        if at < gap_start {
             return Err(EditError::NoGap); // playhead inside the last clip
         }
         return Ok(Batch {
@@ -1380,8 +1382,9 @@ mod tests {
         let batch = delete_clip(&p, 2).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert_eq!(p.timeline.length, Some(Seconds::from_integer(5)));
-        // dd in the trailing gap [2..5): removes the whole tail
-        let batch = delete_gap(&p, 4.0).unwrap();
+        // dd in the trailing gap [2..5): removes the whole tail — including
+        // from its very first frame (the last clip's end instant)
+        let batch = delete_gap(&p, 2.0).unwrap();
         assert!(batch.desc.contains("trailing"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         assert_eq!(p.timeline.length, None);
