@@ -398,12 +398,28 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             let result = edit::trim_in(&app.project, clip.id, app.playhead);
             run_edit(app, player, result);
         }
+        KeyCode::Char('I') => {
+            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
+                app.set_message("playhead is in a gap — j/w/b to a clip");
+                return;
+            };
+            let result = edit::trim_in_ripple(&app.project, clip.id, app.playhead);
+            run_edit(app, player, result);
+        }
         KeyCode::Char('o') => {
             let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
                 app.set_message("playhead is in a gap — j/w/b to a clip");
                 return;
             };
             let result = edit::trim_out(&app.project, clip.id, app.playhead);
+            run_edit(app, player, result);
+        }
+        KeyCode::Char('O') => {
+            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
+                app.set_message("playhead is in a gap — j/w/b to a clip");
+                return;
+            };
+            let result = edit::trim_out_ripple(&app.project, clip.id, app.playhead);
             run_edit(app, player, result);
         }
         KeyCode::Char('s') => {

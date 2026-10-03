@@ -311,18 +311,28 @@ pub fn delete_clip(project: &Project, clip_id: u32) -> Result<Batch, EditError> 
 pub fn delete_ripple(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
     let (ti, clip) = find_clip(project, clip_id)?;
     let mut ops = vec![EditOp::RemoveClip { track: ti, clip: clip.clone() }];
-    let shift = clip.duration();
-    let mut cursor = clip.end();
     let track = &project.timeline.tracks[ti];
+    push_chain_shift(&mut ops, track, ti, &clip.end(), &clip.duration());
+    Ok(Batch {
+        ops,
+        desc: format!("ripple-delete clip #{clip_id}"),
+    })
+}
+
+/// Append `ReplaceClip` ops shifting every clip contiguous from `from`
+/// left by `by` (stops at a pre-existing gap). Shared by ripple delete
+/// and ripple trims.
+fn push_chain_shift(ops: &mut Vec<EditOp>, track: &Track, ti: usize, from: &Seconds, by: &Seconds) {
+    let mut cursor = *from;
     for c in &track.clips {
         if c.start < cursor {
-            continue; // clip at or before the removed one
+            continue; // at or before the edited clip
         }
         if c.start != cursor {
-            break; // gap — ripple stops here
+            break; // gap — the chain ends here
         }
         let mut after = c.clone();
-        after.start -= shift;
+        after.start -= *by;
         ops.push(EditOp::ReplaceClip {
             track: ti,
             before: c.clone(),
@@ -330,9 +340,68 @@ pub fn delete_ripple(project: &Project, clip_id: u32) -> Result<Batch, EditError
         });
         cursor += c.duration();
     }
+}
+
+/// Ripple trim-in (`I`): remove the clip's head up to the (snapped)
+/// playhead, keep the clip's position, and shift contiguous successors
+/// left — the timeline shrinks, no gap opens.
+pub fn trim_in_ripple(project: &Project, clip_id: u32, playhead: f64) -> Result<Batch, EditError> {
+    let (ti, clip) = find_clip(project, clip_id)?;
+    let at = snap(project, playhead)?;
+    if at <= clip.start || at >= clip.end() {
+        return Err(EditError::NotInClip(format_seconds(&at)));
+    }
+    let delta = at - clip.start;
+    let after = Clip {
+        id: clip.id,
+        asset: clip.asset,
+        start: clip.start, // stays put
+        asset_in: clip.asset_in + delta,
+        asset_out: clip.asset_out,
+    };
+    at_least_a_frame(project, &after.duration())?;
+    let mut ops = vec![EditOp::ReplaceClip {
+        track: ti,
+        before: clip.clone(),
+        after,
+    }];
+    let track = &project.timeline.tracks[ti];
+    push_chain_shift(&mut ops, track, ti, &clip.end(), &delta);
     Ok(Batch {
         ops,
-        desc: format!("ripple-delete clip #{clip_id}"),
+        desc: format!("ripple trim in of clip #{clip_id} to {}", format_seconds(&at)),
+    })
+}
+
+/// Ripple trim-out (`O`): remove the clip's tail from the (snapped)
+/// playhead on, and shift contiguous successors left. No gap opens.
+pub fn trim_out_ripple(project: &Project, clip_id: u32, playhead: f64) -> Result<Batch, EditError> {
+    let (ti, clip) = find_clip(project, clip_id)?;
+    let at = snap(project, playhead)?;
+    if at <= clip.start || at >= clip.end() {
+        return Err(EditError::NotInClip(format_seconds(&at)));
+    }
+    // new_out < old asset_out (which was within the asset), so no asset
+    // bound check is needed.
+    let after = Clip {
+        id: clip.id,
+        asset: clip.asset,
+        start: clip.start,
+        asset_in: clip.asset_in,
+        asset_out: clip.asset_in + (at - clip.start),
+    };
+    at_least_a_frame(project, &after.duration())?;
+    let removed = clip.end() - at;
+    let mut ops = vec![EditOp::ReplaceClip {
+        track: ti,
+        before: clip.clone(),
+        after,
+    }];
+    let track = &project.timeline.tracks[ti];
+    push_chain_shift(&mut ops, track, ti, &clip.end(), &removed);
+    Ok(Batch {
+        ops,
+        desc: format!("ripple trim out of clip #{clip_id} to {}", format_seconds(&at)),
     })
 }
 
@@ -685,6 +754,57 @@ mod tests {
         let batch = delete_clip(&p2, 2).unwrap();
         h.apply(&mut p2, batch).unwrap(); // now [0..2), gap 2..end
         assert!(matches!(delete_gap(&p2, 5.0), Err(EditError::NoGap)));
+    }
+
+    #[test]
+    fn ripple_trims_close_the_gap() {
+        // #1 [0..2) src 1..3, then a flush neighbor #3 [2..4) — remove the
+        // fixture's #2 first so the neighbors really touch
+        let mut p = fixture();
+        p.remove_clip(2).unwrap();
+        let mut h = History::default();
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.add_clip(a, Some(Seconds::from_integer(2)), Seconds::from_integer(0), Seconds::from_integer(2))
+            .unwrap(); // #3 [2..4)
+
+        // ripple trim-in #1 at 1.0: #1 becomes [0..1) src 2..3, the
+        // neighbor shifts to 1
+        let batch = trim_in_ripple(&p, 1, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let c1 = clip_by_id(&p, 1);
+        assert_eq!(c1.start, Seconds::from_integer(0), "clip stays put");
+        assert_eq!(c1.asset_in, Seconds::from_integer(2));
+        assert_eq!(c1.end(), Seconds::from_integer(1));
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(1), "successor shifted");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_in, Seconds::from_integer(1));
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(2));
+
+        // ripple trim-out #1 at 1.0: #1 [0..1) src 1..2, neighbor shifts to 1
+        let batch = trim_out_ripple(&p, 1, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let c1 = clip_by_id(&p, 1);
+        assert_eq!(c1.asset_out, Seconds::from_integer(2));
+        assert_eq!(c1.end(), Seconds::from_integer(1));
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(1));
+    }
+
+    #[test]
+    fn ripple_trims_stop_at_gaps() {
+        // #1 [0..2) src 1..3, #2 [3..5) — a gap between them
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = trim_in_ripple(&p, 1, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_in, Seconds::from_integer(2));
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3), "gap stops the ripple");
+
+        // fresh fixture for trim-out (the first apply mutated the model)
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = trim_out_ripple(&p, 1, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3), "gap stops the ripple");
     }
 
     #[test]
