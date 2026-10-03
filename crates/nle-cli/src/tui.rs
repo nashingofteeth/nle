@@ -636,6 +636,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let mut x: u16 = 0;
     let mut cum: f64 = 0.0;
     let mut spans: Vec<Span> = Vec::new();
+    let mut boundaries: Vec<u16> = vec![0];
     let n = parts.len();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
         cum += dur;
@@ -644,20 +645,54 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
             end_x = inner.width;
         }
         let width = end_x.saturating_sub(x).max(1);
-        spans.push(Span::styled(truncate_label(label, width), *style));
+        // A divider at the boundary, drawn on this segment's own
+        // background so it contrasts with both neighbors.
+        let text = if i == 0 {
+            truncate_label(label, width)
+        } else {
+            format!("▏{}", truncate_label(label, width.saturating_sub(1)))
+        };
+        spans.push(Span::styled(text, *style));
+        boundaries.push(end_x);
         x = end_x;
     }
     let track_row = Rect { height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
-    // Playhead marker on the row below.
-    let col = (((app.playhead / total) * (w - 1.0)).round() as u16).min(inner.width - 1);
-    let marker = format!("{}▲", " ".repeat(col as usize));
+    // Marker row: cut ticks at segment boundaries, playhead ▲ on top.
+    let ph = (((app.playhead / total) * (w - 1.0)).round() as u16).min(inner.width - 1);
+    let mut cells: Vec<char> = vec![' '; inner.width as usize];
+    let last = cells.len() - 1;
+    for &b in &boundaries {
+        cells[(b as usize).min(last)] = '╵';
+    }
+    cells[ph as usize] = '▲';
+    let mut marker: Vec<Span> = Vec::new();
+    let tick_style = Style::default().fg(Color::DarkGray);
+    let head_style = Style::default().fg(Color::Red);
+    let mut run = String::new();
+    let mut run_is_head = false;
+    for (i, ch) in cells.iter().enumerate() {
+        let is_head = i == ph as usize;
+        if is_head != run_is_head {
+            if !run.is_empty() {
+                marker.push(Span::styled(
+                    std::mem::take(&mut run),
+                    if run_is_head { head_style } else { tick_style },
+                ));
+            }
+            run_is_head = is_head;
+        }
+        run.push(*ch);
+    }
+    if !run.is_empty() {
+        marker.push(Span::styled(
+            run,
+            if run_is_head { head_style } else { tick_style },
+        ));
+    }
     let playhead_row = Rect { y: inner.y + 1, height: 1, ..inner };
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(marker, Style::default().fg(Color::Red)))),
-        playhead_row,
-    );
+    f.render_widget(Paragraph::new(Line::from(marker)), playhead_row);
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
