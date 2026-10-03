@@ -6,6 +6,11 @@
 //! the whole project. Batches are validated as a whole: if any op fails,
 //! the already-applied ones are rolled back and the project is untouched.
 
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write as _;
+use std::path::Path;
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::project::{Project, ProjectError};
@@ -14,6 +19,8 @@ use crate::timeline::{Clip, TimelineError, Track, TrackKind};
 
 /// Deepest undo stack we keep (batches).
 pub const MAX_HISTORY: usize = 100;
+/// Sidecar file format version (bump when EditOp changes shape).
+pub const HISTORY_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -42,7 +49,7 @@ pub enum EditError {
 }
 
 /// One reversible change to the project.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EditOp {
     AddClip { track: usize, clip: Clip },
     /// The embedded clip is the removed snapshot (its inverse re-adds it).
@@ -90,7 +97,7 @@ impl EditOp {
 }
 
 /// A user action: ops applied together, undone together.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Batch {
     pub ops: Vec<EditOp>,
     /// Human description, shown in the TUI message line.
@@ -147,6 +154,68 @@ impl History {
     pub fn depth(&self) -> usize {
         self.done.len()
     }
+
+    /// Serializable snapshot of both stacks (persisted in a sidecar file).
+    pub fn state(&self) -> HistoryState {
+        HistoryState {
+            version: HISTORY_VERSION,
+            done: self.done.clone(),
+            undone: self.undone.clone(),
+        }
+    }
+
+    /// Rebuild a History from a snapshot, honoring the depth cap.
+    pub fn restore(state: HistoryState) -> Self {
+        if state.version != HISTORY_VERSION {
+            return Self::default();
+        }
+        let mut done = state.done;
+        if done.len() > MAX_HISTORY {
+            let excess = done.len() - MAX_HISTORY;
+            done.drain(0..excess);
+        }
+        Self {
+            done,
+            undone: state.undone,
+        }
+    }
+
+    /// Atomic save to the sidecar file (crash can't corrupt it).
+    pub fn save(&self, path: &Path) -> Result<(), std::io::Error> {
+        let mut json = serde_json::to_string_pretty(&self.state())?;
+        json.push('\n');
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let tmp = NamedTempFile::new_in(dir)?;
+        tmp.as_file().write_all(json.as_bytes())?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    /// Load a sidecar. Missing or unreadable file → error; use
+    /// `History::default()` at the call site to start fresh.
+    pub fn load(path: &Path) -> Result<Self, std::io::Error> {
+        let text = fs::read_to_string(path)?;
+        let state: HistoryState = serde_json::from_str(&text)
+            .map_err(|e| std::io::Error::other(format!("corrupt history file: {e}")))?;
+        if state.version != HISTORY_VERSION {
+            return Err(std::io::Error::other(format!(
+                "history version {} unsupported (this build reads v{HISTORY_VERSION})",
+                state.version
+            )));
+        }
+        Ok(Self::restore(state))
+    }
+}
+
+/// Serializable snapshot of the undo/redo stacks (the sidecar file).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HistoryState {
+    pub version: u32,
+    pub done: Vec<Batch>,
+    pub undone: Vec<Batch>,
 }
 
 /// Apply ops in order; on any failure, roll back the applied prefix in
@@ -805,6 +874,54 @@ mod tests {
         let batch = trim_out_ripple(&p, 1, 1.0).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(3), "gap stops the ripple");
+    }
+
+    #[test]
+    fn history_persists_to_sidecar() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = split(&p, 1, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        h.undo(&mut p).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.history.json");
+        h.save(&path).unwrap();
+
+        let mut loaded = History::load(&path).unwrap();
+        assert_eq!(loaded.state(), h.state());
+        // the persisted REDO survives a "restart": a fresh process can
+        // redo the split against a freshly loaded project
+        assert!(!loaded.can_undo() && loaded.can_redo());
+        let mut p2 = fixture();
+        loaded.redo(&mut p2).unwrap();
+        assert_eq!(ids(&p2), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn history_restore_honors_cap_and_version() {
+        let mut state = HistoryState { version: HISTORY_VERSION, done: vec![], undone: vec![] };
+        for i in 0..(MAX_HISTORY + 5) {
+            state.done.push(Batch {
+                ops: vec![],
+                desc: format!("batch {i}"),
+            });
+        }
+        let h = History::restore(state.clone());
+        assert_eq!(h.depth(), MAX_HISTORY);
+        assert_eq!(h.state().done[0].desc, format!("batch {}", 5)); // oldest dropped
+
+        state.version = 99;
+        assert!(History::restore(state).done.is_empty());
+    }
+
+    #[test]
+    fn corrupt_sidecar_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "not json").unwrap();
+        assert!(History::load(&path).is_err());
+        assert!(History::load(&dir.path().join("missing.json")).is_err());
     }
 
     #[test]

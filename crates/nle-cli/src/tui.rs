@@ -5,7 +5,7 @@
 //! command line. Playback keys are sent to mpv; state flows back through
 //! the reader thread and is rendered on the next tick (~20fps redraw).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -202,9 +202,16 @@ impl App {
 
 // ------------------------------------------------------------ event loop
 
+/// Sidecar path for the undo history: `nle.json` → `nle.history.json`.
+fn history_path(project_path: &Path) -> PathBuf {
+    project_path.with_extension("history.json")
+}
+
 pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
+    let history = History::load(&history_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
+    app.history = history;
 
     loop {
         let st = player.state();
@@ -253,12 +260,14 @@ pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result
     Ok(())
 }
 
-/// Reload the project from disk and rebuild the preview. Lets you edit
-/// `nle.json` in another window (e.g. vim) and watch it here.
+/// Reload the project (and its undo history) from disk and rebuild the
+/// preview. Lets you edit `nle.json` in another window (e.g. vim) and
+/// watch it here.
 fn reload_project(app: &mut App, player: &MpvPlayer) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
     let edl = preview::build_edl(&project)?;
     app.project = project;
+    app.history = History::load(&history_path(&app.path)).unwrap_or_default();
     player.load(&edl);
     app.pending_seek = Some(app.playhead);
     app.awaiting_unload = true;
@@ -518,11 +527,15 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
 }
 
 /// Atomic save + preview rebuild. Called after every successful edit
-/// (and undo/redo) — no manual save state to get wrong.
+/// (and undo/redo) — no manual save state to get wrong. The undo history
+/// sidecar is written alongside the project.
 fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
     if let Err(e) = app.project.save(&app.path) {
         app.set_message(&format!("save failed: {e}"));
         return;
+    }
+    if let Err(e) = app.history.save(&history_path(&app.path)) {
+        app.set_message(&format!("history save failed: {e}"));
     }
     match preview::build_edl(&app.project) {
         Ok(edl) => {
