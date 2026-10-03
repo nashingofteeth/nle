@@ -699,12 +699,20 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     // column — one glyph per cell, and the position is the stronger
     // signal.
     let ph = marker_col(app.playhead, total, inner.width);
+    // At the timeline's end, hug the RIGHT edge of the last cell (▕) —
+    // the end line is the border, one column past the last cell's left
+    // edge where a normal ▏ would sit.
+    let eps = half_frame(&app.project);
+    let at_end = app.playhead >= total - eps;
     let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
     let last = cells.len() - 1;
     for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
         cells[(b as usize).min(last)] = ('▏', Style::default().fg(Color::White));
     }
-    cells[ph as usize] = ('▏', Style::default().fg(Color::Red));
+    cells[ph as usize] = (
+        if at_end { '▕' } else { '▏' },
+        Style::default().fg(Color::Red),
+    );
     let mut marker: Vec<Span> = Vec::new();
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
