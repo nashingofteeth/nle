@@ -84,16 +84,40 @@ fn gap_under(project: &Project, t: f64) -> Option<(Seconds, Seconds)> {
     Some((start, end))
 }
 
-/// "62.25 s" → "01:02.2" (and "3661" → "1:01:01.0" past an hour).
-pub fn fmt_timecode(t: f64) -> String {
+/// "62.25 s" → "01:02:08" — MM:SS:FF, the last field being the frame
+/// within the second at the project's frame rate (SMPTE style). Falls
+/// back to tenths ("01:02.2") when no fps is known. The frame index is
+/// ROUNDED (t is frame-snapped anyway) so the timecode always agrees
+/// with the f{n} counter — no float fuzz in the fields.
+pub fn fmt_timecode(t: f64, fps: Option<&Seconds>) -> String {
     let t = t.max(0.0);
-    let h = (t / 3600.0).floor() as u64;
-    let m = ((t % 3600.0) / 60.0).floor() as u64;
-    let s = t % 60.0;
-    if h > 0 {
-        format!("{h}:{m:02}:{s:04.1}")
-    } else {
-        format!("{m:02}:{s:04.1}")
+    match fps {
+        Some(f) => {
+            let f = secs(f);
+            let fps_n = f.round() as u64;
+            let frames = (t * f).round() as u64;
+            let (ff, whole) = if fps_n > 0 {
+                (frames % fps_n, frames / fps_n)
+            } else {
+                (0, 0)
+            };
+            let (h, m, s) = (whole / 3600, (whole % 3600) / 60, whole % 60);
+            if h > 0 {
+                format!("{h}:{m:02}:{s:02}:{ff:02}")
+            } else {
+                format!("{m:02}:{s:02}:{ff:02}")
+            }
+        }
+        None => {
+            let h = (t / 3600.0).floor() as u64;
+            let m = ((t % 3600.0) / 60.0).floor() as u64;
+            let s = t % 60.0;
+            if h > 0 {
+                format!("{h}:{m:02}:{s:04.1}")
+            } else {
+                format!("{m:02}:{s:04.1}")
+            }
+        }
     }
 }
 
@@ -715,8 +739,17 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let line = Line::from(vec![
         Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {name} · "), style),
-        Span::styled(fmt_timecode(app.playhead), style.add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" / {}{frames} · ", fmt_timecode(app.total())), style),
+        Span::styled(
+            fmt_timecode(app.playhead, app.project.fps.as_ref()),
+            style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                " / {}{frames} · ",
+                fmt_timecode(app.total(), app.project.fps.as_ref())
+            ),
+            style,
+        ),
         Span::styled(format!("{icon} · {mode}{count}"), style),
     ]);
     f.render_widget(Paragraph::new(line), area);
@@ -822,31 +855,35 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 .asset(c.asset)
                 .map(|a| a.path.display().to_string())
                 .unwrap_or_else(|| "?".into());
+            let fps = app.project.fps.as_ref();
             format!(
                 "clip #{}  {}   {} – {} · len {}   (src {} – {})",
                 c.id,
                 asset,
-                fmt_timecode(secs(&c.start)),
-                fmt_timecode(secs(&c.end())),
-                fmt_timecode(secs(&c.duration())),
-                fmt_timecode(secs(&c.asset_in)),
-                fmt_timecode(secs(&c.asset_out))
+                fmt_timecode(secs(&c.start), fps),
+                fmt_timecode(secs(&c.end()), fps),
+                fmt_timecode(secs(&c.duration()), fps),
+                fmt_timecode(secs(&c.asset_in), fps),
+                fmt_timecode(secs(&c.asset_out), fps)
             )
         })
         .unwrap_or_else(|| match gap_under(&app.project, t) {
-            Some((gs, ge)) => format!(
-                "— gap —  {} – {} · len {}",
-                fmt_timecode(secs(&gs)),
-                fmt_timecode(secs(&ge)),
-                fmt_timecode(secs(&(ge - gs)))
-            ),
+            Some((gs, ge)) => {
+                let fps = app.project.fps.as_ref();
+                format!(
+                    "— gap —  {} – {} · len {}",
+                    fmt_timecode(secs(&gs), fps),
+                    fmt_timecode(secs(&ge), fps),
+                    fmt_timecode(secs(&(ge - gs)), fps)
+                )
+            }
             None => "— gap —".to_string(),
         });
 
     let stats = format!(
         "{} clip(s) · {} · {} fps · undo depth {}",
         app.project.timeline.video_track().map(|t| t.clips.len()).unwrap_or(0),
-        fmt_timecode(app.total()),
+        fmt_timecode(app.total(), app.project.fps.as_ref()),
         app.project
             .fps
             .as_ref()
@@ -962,10 +999,18 @@ mod tests {
 
     #[test]
     fn timecode_formatting() {
-        assert_eq!(fmt_timecode(0.0), "00:00.0");
-        assert_eq!(fmt_timecode(62.25), "01:02.2");
-        assert_eq!(fmt_timecode(3661.0), "1:01:01.0");
-        assert_eq!(fmt_timecode(-5.0), "00:00.0");
+        let fps30 = Seconds::new(30, 1);
+        let fps60 = Seconds::new(60, 1);
+        // MM:SS:FF at the project frame rate
+        assert_eq!(fmt_timecode(0.0, Some(&fps30)), "00:00:00");
+        assert_eq!(fmt_timecode(8.2, Some(&fps60)), "00:08:12");
+        // 62.25 sits between 30fps frames → quantizes to the nearest
+        assert_eq!(fmt_timecode(62.25, Some(&fps30)), "01:02:08");
+        assert_eq!(fmt_timecode(3661.0, Some(&fps30)), "1:01:01:00");
+        assert_eq!(fmt_timecode(-5.0, Some(&fps30)), "00:00:00");
+        // no fps known → tenths fallback
+        assert_eq!(fmt_timecode(62.25, None), "01:02.2");
+        assert_eq!(fmt_timecode(0.0, None), "00:00.0");
     }
 
     #[test]
