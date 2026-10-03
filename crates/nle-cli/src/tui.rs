@@ -60,6 +60,30 @@ pub fn snap_to_cut(t: f64, project: &Project) -> f64 {
     best
 }
 
+/// The bounds of the gap containing `t` — between the last clip ending
+/// at-or-before `t` and the first clip starting after it (the trailing
+/// bound is the sequence tail when one exists). None when `t` is inside
+/// a clip, or when there's no actual gap (no tail past the last clip).
+fn gap_under(project: &Project, t: f64) -> Option<(Seconds, Seconds)> {
+    let track = project.timeline.video_track()?;
+    if clip_under(project, t).is_some() {
+        return None; // inside a clip
+    }
+    let mut start = Seconds::from_integer(0);
+    let mut end = project.timeline.end();
+    for c in &track.clips {
+        if secs(&c.start) > t {
+            end = c.start;
+            break;
+        }
+        start = c.end();
+    }
+    if end <= start {
+        return None; // no materialized gap (no tail past the last clip)
+    }
+    Some((start, end))
+}
+
 /// "62.25 s" → "01:02.2" (and "3661" → "1:01:01.0" past an hour).
 pub fn fmt_timecode(t: f64) -> String {
     let t = t.max(0.0);
@@ -799,16 +823,25 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 .map(|a| a.path.display().to_string())
                 .unwrap_or_else(|| "?".into());
             format!(
-                "clip #{}  {}   {} – {}   (src {} – {})",
+                "clip #{}  {}   {} – {} · len {}   (src {} – {})",
                 c.id,
                 asset,
                 fmt_timecode(secs(&c.start)),
                 fmt_timecode(secs(&c.end())),
+                fmt_timecode(secs(&c.duration())),
                 fmt_timecode(secs(&c.asset_in)),
                 fmt_timecode(secs(&c.asset_out))
             )
         })
-        .unwrap_or_else(|| "— gap —".to_string());
+        .unwrap_or_else(|| match gap_under(&app.project, t) {
+            Some((gs, ge)) => format!(
+                "— gap —  {} – {} · len {}",
+                fmt_timecode(secs(&gs)),
+                fmt_timecode(secs(&ge)),
+                fmt_timecode(secs(&(ge - gs)))
+            ),
+            None => "— gap —".to_string(),
+        });
 
     let stats = format!(
         "{} clip(s) · {} · {} fps · undo depth {}",
@@ -1097,6 +1130,28 @@ mod tests {
         app.playhead = 1000.0;
         app.step_playhead(1);
         assert_eq!(app.playhead, 209.0 / 30.0, "clamped at the last frame");
+    }
+
+    #[test]
+    fn gap_under_bounds() {
+        let p = project(); // clips [0..3) and [5..7)
+        // interior gap [3..5)
+        assert_eq!(
+            gap_under(&p, 4.0),
+            Some((Seconds::from_integer(3), Seconds::from_integer(5)))
+        );
+        // inside a clip → None
+        assert_eq!(gap_under(&p, 1.0), None);
+        assert_eq!(gap_under(&p, 0.0), None);
+        // past the last clip with no tail → nothing there
+        assert_eq!(gap_under(&p, 8.0), None);
+        // with a tail: the trailing gap is materialized
+        let mut p2 = project();
+        p2.timeline.length = Some(Seconds::from_integer(10));
+        assert_eq!(
+            gap_under(&p2, 8.0),
+            Some((Seconds::from_integer(7), Seconds::from_integer(10)))
+        );
     }
 
     #[test]
