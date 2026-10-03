@@ -666,10 +666,11 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    // Cumulative rounding: no drift, and the last segment fills the row.
+    // Track row, built per column so the playhead can notch through it:
+    // a thin red line drawn over the clips (classic NLE playhead).
     let mut x: u16 = 0;
     let mut cum: f64 = 0.0;
-    let mut spans: Vec<Span> = Vec::new();
+    let mut cells: Vec<(char, Style)> = Vec::with_capacity(inner.width as usize);
     let mut boundaries: Vec<u16> = vec![0];
     let n = parts.len();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
@@ -686,50 +687,56 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         } else {
             format!("▏{}", truncate_label(label, width.saturating_sub(1)))
         };
-        spans.push(Span::styled(text, *style));
+        for ch in text.chars().take(width.into()) {
+            cells.push((ch, *style));
+        }
+        while (cells.len() as u16) < end_x {
+            cells.push((' ', *style));
+        }
         boundaries.push(end_x);
         x = end_x;
+    }
+    // The playhead: red ▏ notched into the row at its column. The bg
+    // stays the clip's color, so the line visibly crosses the clips.
+    let ph = marker_col(app.playhead, total, inner.width);
+    if let Some(cell) = cells.get_mut(ph as usize) {
+        cell.0 = '▏';
+        cell.1 = cell.1.fg(Color::Red);
+    }
+    // Group runs of equal style into spans.
+    let mut spans: Vec<Span> = Vec::new();
+    let mut run = String::new();
+    let mut run_style: Option<Style> = None;
+    for (ch, style) in cells {
+        if run_style.as_ref() != Some(&style) {
+            if let Some(s) = run_style {
+                spans.push(Span::styled(std::mem::take(&mut run), s));
+            }
+            run_style = Some(style);
+        }
+        run.push(ch);
+    }
+    if let Some(s) = run_style {
+        spans.push(Span::styled(run, s));
     }
     let track_row = Rect { height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
-    // Marker row: cut ticks at segment boundaries + the playhead.
-    // Everything is a left-hugging ▏ so all markers reference the same
-    // column edge: white ticks at cuts, a red ▏ for the playhead (which
-    // overwrites the tick in its column — the stronger signal wins).
-    let ph = marker_col(app.playhead, total, inner.width);
-    let mut cells: Vec<char> = vec![' '; inner.width as usize];
-    let last = cells.len() - 1;
+    // Marker row: pure cut ticks — white, left-hugging, never touched by
+    // the playhead (that lives on the track row above now).
+    let mut ticks: Vec<char> = vec![' '; inner.width as usize];
+    let last = ticks.len() - 1;
     for &b in &boundaries {
-        cells[(b as usize).min(last)] = '▏';
-    }
-    cells[ph as usize] = '▏';
-    let mut marker: Vec<Span> = Vec::new();
-    let tick_style = Style::default().fg(Color::White);
-    let head_style = Style::default().fg(Color::Red);
-    let mut run = String::new();
-    let mut run_is_head = false;
-    for (i, ch) in cells.iter().enumerate() {
-        let is_head = i == ph as usize;
-        if is_head != run_is_head {
-            if !run.is_empty() {
-                marker.push(Span::styled(
-                    std::mem::take(&mut run),
-                    if run_is_head { head_style } else { tick_style },
-                ));
-            }
-            run_is_head = is_head;
-        }
-        run.push(*ch);
-    }
-    if !run.is_empty() {
-        marker.push(Span::styled(
-            run,
-            if run_is_head { head_style } else { tick_style },
-        ));
+        ticks[(b as usize).min(last)] = '▏';
     }
     let playhead_row = Rect { y: inner.y + 1, height: 1, ..inner };
-    f.render_widget(Paragraph::new(Line::from(marker)), playhead_row);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            ticks.into_iter().collect::<String>(),
+            Style::default().fg(Color::White),
+        ))),
+        playhead_row,
+    );
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
