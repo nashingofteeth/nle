@@ -513,11 +513,11 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             run_edit(app, player, result);
         }
         KeyCode::Char('D') => {
-            // ripple delete: a clip ripples its successors; a gap deletes
-            // itself and collapses the sequence tail
+            // ripple delete: a clip ripples its successors; a gap delete
+            // always ripples (closes the gap, shrinks the timeline)
             let result = match clip_under(&app.project, app.playhead) {
                 Some(c) => edit::delete_ripple(&app.project, c.id),
-                None => edit::delete_gap_ripple(&app.project, app.playhead),
+                None => edit::delete_gap(&app.project, app.playhead),
             };
             run_edit(app, player, result);
         }
@@ -759,7 +759,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     // exact). EOF still hugs the border with ▕.
     let ph = marker_col(app.playhead, total, inner.width);
     let at_end = app.eof;
-    let color = if on_cut(&app.project, app.playhead) {
+    let color = if on_boundary(&app.project, app.playhead) {
         Color::White
     } else {
         Color::Red
@@ -854,19 +854,21 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// True when the (frame-snapped) playhead sits exactly on an interior
-/// cut — a clip start or end that isn't the timeline's own start/end.
-/// Both values come from the same rational→f64 conversions, so exact
+/// True when the (frame-snapped) playhead sits exactly on an edit
+/// boundary: an interior cut, the timeline's start, or its end (a clip
+/// end / trailing-gap start counts; the timeline's own edges count too).
+/// Both sides come from the same rational→f64 conversions, so exact
 /// comparison is meaningful; the epsilon only guards against drift.
-fn on_cut(project: &Project, t: f64) -> bool {
+fn on_boundary(project: &Project, t: f64) -> bool {
     let Some(track) = project.timeline.video_track() else {
         return false;
     };
-    let total = secs(&track.end());
-    let is_edge = |t: f64| t.abs() < 1e-9 || (total - t).abs() < 1e-9;
+    let total = secs(&project.timeline.end());
+    if t.abs() < 1e-9 || (total - t).abs() < 1e-9 {
+        return true;
+    }
     track.clips.iter().any(|c| {
-        let (s, e) = (secs(&c.start), secs(&c.end()));
-        ((s - t).abs() < 1e-9 || (e - t).abs() < 1e-9) && !is_edge(t)
+        (secs(&c.start) - t).abs() < 1e-9 || (secs(&c.end()) - t).abs() < 1e-9
     })
 }
 
@@ -995,17 +997,15 @@ mod tests {
     }
 
     #[test]
-    fn on_cut_detects_exact_interior_cuts() {
-        let p = project(); // clips [0..3) and [5..7) → interior cuts 3 and 5
-        let total = secs(&p.timeline.video_track().unwrap().end()); // 7.0
-        assert!(on_cut(&p, 3.0));
-        assert!(on_cut(&p, 5.0));
-        // timeline edges are not cuts
-        assert!(!on_cut(&p, 0.0));
-        assert!(!on_cut(&p, total));
-        // mid-clip / mid-gap positions aren't either
-        assert!(!on_cut(&p, 1.5));
-        assert!(!on_cut(&p, 4.0));
+    fn on_boundary_detects_cuts_and_edges() {
+        let p = project(); // clips [0..3) and [5..7) → cuts 3 and 5; edges 0 and 7
+        assert!(on_boundary(&p, 0.0), "timeline start");
+        assert!(on_boundary(&p, 3.0));
+        assert!(on_boundary(&p, 5.0));
+        assert!(on_boundary(&p, 7.0), "timeline end");
+        // mid-clip / mid-gap positions aren't boundaries
+        assert!(!on_boundary(&p, 1.5));
+        assert!(!on_boundary(&p, 4.0));
     }
 
     #[test]

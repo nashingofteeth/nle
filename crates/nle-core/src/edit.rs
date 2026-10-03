@@ -585,17 +585,11 @@ pub fn trim_out_ripple(project: &Project, clip_id: u32, playhead: f64) -> Result
 /// every later clip sliding left, and the sequence end is PRESERVED —
 /// the trailing gap grows to compensate. A trailing gap is removed
 /// entirely.
+/// Delete the gap under the playhead (dd and D): a ripple delete —
+/// interior gaps close with every later clip sliding left and the
+/// sequence tail collapsing (the timeline shrinks). A trailing gap is
+/// removed entirely.
 pub fn delete_gap(project: &Project, playhead: f64) -> Result<Batch, EditError> {
-    delete_gap_impl(project, playhead, false)
-}
-
-/// Ripple variant (`D`): same shift, but the sequence tail collapses to
-/// the new end — the timeline shrinks.
-pub fn delete_gap_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
-    delete_gap_impl(project, playhead, true)
-}
-
-fn delete_gap_impl(project: &Project, playhead: f64, collapse: bool) -> Result<Batch, EditError> {
     let ti = video_track_index(project)?;
     let track = project
         .timeline
@@ -635,9 +629,9 @@ fn delete_gap_impl(project: &Project, playhead: f64, collapse: bool) -> Result<B
     }
     let shift = gap_end - gap_start;
 
-    // Interior gap: every clip after it slides left (a ripple by nature).
-    // Whether the sequence tail follows depends on the variant: dd keeps
-    // the sequence end (the trailing gap grows), D collapses it.
+    // Interior gap: every clip after it slides left, and the sequence
+    // tail collapses along with the end — gap deletes always shrink the
+    // timeline.
     let mut ops: Vec<EditOp> = track
         .clips
         .iter()
@@ -652,20 +646,21 @@ fn delete_gap_impl(project: &Project, playhead: f64, collapse: bool) -> Result<B
             }
         })
         .collect();
-    if collapse {
-        let new_end = end_after(project, None, &ops);
+    // Gap ripples shrink the timeline by the GAP's length; the trailing
+    // gap itself survives with its size intact. (No tail -> the end
+    // simply follows the clips.)
+    if let Some(len) = project.timeline.length {
         ops.push(EditOp::SetLength {
-            before: SerLen(project.timeline.length),
-            after: SerLen(Some(new_end)),
+            before: SerLen(Some(len)),
+            after: SerLen(Some(len - shift)),
         });
     }
     Ok(Batch {
         ops,
         desc: format!(
-            "delete gap {}–{}{}",
+            "delete gap {}–{}",
             format_seconds(&gap_start),
-            format_seconds(&gap_end),
-            if collapse { " (collapsed)" } else { "" }
+            format_seconds(&gap_end)
         ),
     })
 }
@@ -733,13 +728,15 @@ pub fn trim_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError>
                     EditOp::ReplaceClip { track: ti, before: c.clone(), after }
                 })
                 .collect::<Vec<_>>();
-            // The uniform shift pulls the last clip's end left — collapse
-            // the sequence tail along with it.
-            let new_end = end_after(project, None, &ops);
-            ops.push(EditOp::SetLength {
-                before: SerLen(project.timeline.length),
-                after: SerLen(Some(new_end)),
-            });
+            // Gap ripples shrink the timeline by the GAP's length; the
+            // trailing gap itself survives with its size intact. (No tail
+            // -> the end simply follows the clips.)
+            if let Some(len) = project.timeline.length {
+                ops.push(EditOp::SetLength {
+                    before: SerLen(Some(len)),
+                    after: SerLen(Some(len - delta)),
+                });
+            }
             Ok(Batch {
                 ops,
                 desc: format!(
@@ -841,7 +838,7 @@ pub fn trim_gap_out_ripple(project: &Project, playhead: f64) -> Result<Batch, Ed
     }
     let delta = ge - at;
 
-    let ops: Vec<EditOp> = track
+    let mut ops: Vec<EditOp> = track
         .clips
         .iter()
         .filter(|c| c.start >= ge)
@@ -854,12 +851,15 @@ pub fn trim_gap_out_ripple(project: &Project, playhead: f64) -> Result<Batch, Ed
     if ops.is_empty() {
         return Err(EditError::NoGap);
     }
-    let mut ops = ops;
-    let new_end = end_after(project, None, &ops);
-    ops.push(EditOp::SetLength {
-        before: SerLen(project.timeline.length),
-        after: SerLen(Some(new_end)),
-    });
+    // Gap ripples shrink the timeline by the GAP's length; the trailing
+    // gap itself survives with its size intact. (No tail -> the end
+    // simply follows the clips.)
+    if let Some(len) = project.timeline.length {
+        ops.push(EditOp::SetLength {
+            before: SerLen(Some(len)),
+            after: SerLen(Some(len - delta)),
+        });
+    }
     Ok(Batch {
         ops,
         desc: format!(
@@ -1390,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn dd_preserves_the_tail_d_collapses_it() {
+    fn gap_deletes_ripple_and_shrink_the_timeline() {
         // [0..2) #1 · gap [2..3) · [3..5) #2 · [5..7) #3 · tail to 9
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
@@ -1408,23 +1408,20 @@ mod tests {
         p.validate().unwrap();
         let mut h = History::default();
 
-        // dd the interior gap [2..3): clips slide left, the END STAYS at 9
-        // — the trailing gap grows from 2s to 3s instead of being deleted
+        // dd the interior gap [2..3): clips slide left, the timeline
+        // shrinks by the GAP (1s), and the trailing gap keeps its size
         let batch = delete_gap(&p, 2.5).unwrap();
-        assert!(!batch.desc.contains("collapsed"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_by_id(&p, 2).start, Seconds::from_integer(2));
         assert_eq!(clip_by_id(&p, 3).start, Seconds::from_integer(4));
-        assert_eq!(p.timeline.length, Some(Seconds::from_integer(9)), "dd keeps the sequence end");
-        assert_eq!(p.timeline.end(), Seconds::from_integer(9));
+        assert_eq!(p.timeline.length, Some(Seconds::from_integer(8)), "tail size preserved");
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8));
         h.undo(&mut p).unwrap();
 
-        // D the same gap: the tail collapses to the new end
-        let batch = delete_gap_ripple(&p, 2.5).unwrap();
-        assert!(batch.desc.contains("collapsed"), "{}", batch.desc);
+        // D the same gap: identical (gaps always ripple)
+        let batch = delete_gap(&p, 2.5).unwrap();
         h.apply(&mut p, batch).unwrap();
-        assert_eq!(p.timeline.length, Some(Seconds::from_integer(6)));
-        assert_eq!(p.timeline.end(), Seconds::from_integer(6));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8));
     }
 
     #[test]
