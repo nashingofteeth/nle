@@ -600,12 +600,27 @@ pub fn delete_gap(project: &Project, playhead: f64) -> Result<Batch, EditError> 
         }
         gap_start = c.end();
     }
-    let gap_end = gap_end.ok_or(EditError::NoGap)?; // trailing gap
+    // Trailing gap: dd removes it entirely — the timeline collapses back
+    // to the last clip's end. (Partial shortening is `o`.)
+    let Some(gap_end) = gap_end else {
+        if at <= gap_start {
+            return Err(EditError::NoGap); // playhead inside the last clip
+        }
+        return Ok(Batch {
+            ops: vec![EditOp::SetLength {
+                before: SerLen(project.timeline.length),
+                after: SerLen(None),
+            }],
+            desc: "delete trailing gap".to_string(),
+        });
+    };
     if gap_end <= gap_start {
         return Err(EditError::NoGap); // playhead sits inside a clip
     }
     let shift = gap_end - gap_start;
 
+    // Interior gap: every clip after it slides left (a ripple by nature),
+    // and the sequence tail collapses along with the end.
     let ops: Vec<EditOp> = track
         .clips
         .iter()
@@ -620,16 +635,6 @@ pub fn delete_gap(project: &Project, playhead: f64) -> Result<Batch, EditError> 
             }
         })
         .collect();
-    if ops.is_empty() {
-        // Trailing gap: dd shortens the sequence tail to the playhead.
-        return Ok(Batch {
-            ops: vec![EditOp::SetLength {
-                before: SerLen(project.timeline.length),
-                after: SerLen(Some(at)),
-            }],
-            desc: format!("delete trailing gap to {}", format_seconds(&at)),
-        });
-    }
     // Interior: the uniform shift pulls the last clip's end left —
     // collapsing the sequence tail along with it.
     let mut ops = ops;
@@ -1138,11 +1143,13 @@ mod tests {
 
         // inside a clip → not a gap
         assert!(matches!(delete_gap(&p, 1.5), Err(EditError::NoGap)));
-        // trailing gap → nothing to shift
+        // dd in the trailing gap removes it entirely
         let mut p2 = fixture();
         let batch = delete_clip(&p2, 2).unwrap();
-        h.apply(&mut p2, batch).unwrap(); // now [0..2), gap 2..end
-        assert!(matches!(delete_gap(&p2, 5.0), Err(EditError::NoGap)));
+        h.apply(&mut p2, batch).unwrap(); // dd last clip → tail preserved (length 5)
+        let batch = delete_gap(&p2, 5.0).unwrap();
+        h.apply(&mut p2, batch).unwrap();
+        assert_eq!(p2.timeline.length, None);
     }
 
     #[test]
@@ -1363,6 +1370,27 @@ mod tests {
             .unwrap();
         // extending the tail past the asset's material → rejected
         assert!(matches!(trim_gap_in(&p, 3.2), Err(EditError::BeyondAsset { .. })));
+    }
+
+    #[test]
+    fn dd_on_trailing_gap_removes_it_entirely() {
+        let mut p = fixture(); // #1 [0..2), #2 [3..5)
+        let mut h = History::default();
+        // dd the last clip: its end is preserved as tail length
+        let batch = delete_clip(&p, 2).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(p.timeline.length, Some(Seconds::from_integer(5)));
+        // dd in the trailing gap [2..5): removes the whole tail
+        let batch = delete_gap(&p, 4.0).unwrap();
+        assert!(batch.desc.contains("trailing"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(p.timeline.length, None);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(2));
+        // undo restores the tail
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.length, Some(Seconds::from_integer(5)));
+        // playhead inside a clip is not a gap
+        assert!(matches!(delete_gap(&p, 1.0), Err(EditError::NoGap)));
     }
 
     #[test]
