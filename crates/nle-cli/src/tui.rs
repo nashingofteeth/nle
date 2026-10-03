@@ -693,24 +693,28 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let track_row = Rect { height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
-    // Marker row: cut ticks at segment boundaries, red playhead on top.
-    // Everything on this row is left-hugging (▏ ticks, ▍ playhead) so the
-    // playhead lands exactly on the clip boundary line — centered glyphs
-    // (▲) float half a cell off the actual edge.
+    // Marker row: cut ticks at segment boundaries + the playhead pointer.
+    // Ticks are left-hugging ▏ (flush with the clip boundary). The
+    // playhead keeps a caret as ► one cell left — its TIP touches the
+    // position's left edge, so it stays flush with the boundary line
+    // (a centered ▲ would float half a cell off; glyph ink is fixed by
+    // the font, the column is all we control). At the timeline origin
+    // the pointer flips to ◄ so its tip still touches position 0.
     let ph = marker_col(app.playhead, total, inner.width);
     let mut cells: Vec<char> = vec![' '; inner.width as usize];
     let last = cells.len() - 1;
     for &b in &boundaries {
         cells[(b as usize).min(last)] = '▏';
     }
-    cells[ph as usize] = '▍';
+    let head_col = if ph > 0 { ph - 1 } else { 0 };
+    cells[head_col as usize] = if ph > 0 { '►' } else { '◄' };
     let mut marker: Vec<Span> = Vec::new();
     let tick_style = Style::default().fg(Color::White);
     let head_style = Style::default().fg(Color::Red);
     let mut run = String::new();
     let mut run_is_head = false;
     for (i, ch) in cells.iter().enumerate() {
-        let is_head = i == ph as usize;
+        let is_head = i == head_col as usize;
         if is_head != run_is_head {
             if !run.is_empty() {
                 marker.push(Span::styled(
