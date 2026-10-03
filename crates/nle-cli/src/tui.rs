@@ -711,7 +711,6 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let mut x: u16 = 0;
     let mut cum: f64 = 0.0;
     let mut spans: Vec<Span> = Vec::new();
-    let mut boundaries: Vec<u16> = vec![0];
     let n = parts.len();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
         cum += dur;
@@ -728,31 +727,28 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
             format!("▏{}", truncate_label(label, width.saturating_sub(1)))
         };
         spans.push(Span::styled(text, *style));
-        boundaries.push(end_x);
         x = end_x;
     }
     let track_row = Rect { height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
-    // Marker row: interior cut ticks (white) + the red playhead, all
-    // left-hugging ▏. When the playhead sits on a cut it takes over that
-    // column — one glyph per cell, and the position is the stronger
-    // signal.
+    // Marker row: just the playhead — red ▏ normally, WHITE when it sits
+    // exactly on a cut frame (the snapped position makes that test
+    // exact). EOF still hugs the border with ▕.
     let ph = marker_col(app.playhead, total, inner.width);
-    // Two endings, mirroring mpv: EOF (playthrough finished) is the
-    // border itself → flush ▕. Anywhere else — including paused on the
-    // last frame — renders where the playhead actually is, ▏.
     let at_end = app.eof;
+    let color = if on_cut(&app.project, app.playhead) {
+        Color::White
+    } else {
+        Color::Red
+    };
     let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
-    let last = cells.len() - 1;
-    for &b in boundaries.iter().skip(1).take(boundaries.len().saturating_sub(2)) {
-        cells[(b as usize).min(last)] = ('▏', Style::default().fg(Color::White));
-    }
     cells[ph as usize] = (
         if at_end { '▕' } else { '▏' },
-        Style::default().fg(Color::Red),
+        Style::default().fg(color),
     );
-    let mut marker: Vec<Span> = Vec::new();    let mut run = String::new();
+    let mut marker: Vec<Span> = Vec::new();
+    let mut run = String::new();
     let mut run_style: Option<Style> = None;
     for (ch, style) in cells {
         if run_style.as_ref() != Some(&style) {
@@ -834,6 +830,22 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
             .block(Block::bordered().title(" info ")),
         area,
     );
+}
+
+/// True when the (frame-snapped) playhead sits exactly on an interior
+/// cut — a clip start or end that isn't the timeline's own start/end.
+/// Both values come from the same rational→f64 conversions, so exact
+/// comparison is meaningful; the epsilon only guards against drift.
+fn on_cut(project: &Project, t: f64) -> bool {
+    let Some(track) = project.timeline.video_track() else {
+        return false;
+    };
+    let total = secs(&track.end());
+    let is_edge = |t: f64| t.abs() < 1e-9 || (total - t).abs() < 1e-9;
+    track.clips.iter().any(|c| {
+        let (s, e) = (secs(&c.start), secs(&c.end()));
+        ((s - t).abs() < 1e-9 || (e - t).abs() < 1e-9) && !is_edge(t)
+    })
 }
 
 /// Column of a time position on the timeline row. Used for BOTH the
@@ -957,6 +969,20 @@ mod tests {
         let mut no_fps = project();
         no_fps.fps = None;
         assert_eq!(frame_counts(&no_fps, 10.0, 5.0), None);
+    }
+
+    #[test]
+    fn on_cut_detects_exact_interior_cuts() {
+        let p = project(); // clips [0..3) and [5..7) → interior cuts 3 and 5
+        let total = secs(&p.timeline.video_track().unwrap().end()); // 7.0
+        assert!(on_cut(&p, 3.0));
+        assert!(on_cut(&p, 5.0));
+        // timeline edges are not cuts
+        assert!(!on_cut(&p, 0.0));
+        assert!(!on_cut(&p, total));
+        // mid-clip / mid-gap positions aren't either
+        assert!(!on_cut(&p, 1.5));
+        assert!(!on_cut(&p, 4.0));
     }
 
     #[test]
