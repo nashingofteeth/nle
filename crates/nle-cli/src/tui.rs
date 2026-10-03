@@ -12,7 +12,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::Frame;
 
 use nle_core::edit;
@@ -767,7 +767,9 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     }
 
     f.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" info ")),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title(" info ")),
         area,
     );
 }
