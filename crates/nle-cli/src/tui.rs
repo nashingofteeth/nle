@@ -15,7 +15,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use nle_core::{Project, Seconds};
+use nle_core::edit;
+use nle_core::{Batch, Clip, EditError, History, Project, Seconds};
 
 use crate::mpv::{MpvPlayer, PlaybackState};
 use crate::preview::{self, Segment};
@@ -82,6 +83,15 @@ pub enum Mode {
     Command(String),
 }
 
+/// Which two-key sequence is waiting for its second keystroke (`gg`, `dd`, `yy`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Pending {
+    None,
+    G,
+    D,
+    Y,
+}
+
 pub struct App {
     pub project: Project,
     pub path: PathBuf,
@@ -90,8 +100,12 @@ pub struct App {
     pub playhead: f64,
     /// Pending vim count ("3" in `3l`).
     pub count: Option<u32>,
-    /// First `g` of `gg` is pending.
-    pub pending_g: bool,
+    /// Pending two-key sequence.
+    pub pending: Pending,
+    /// Yanked clip, for `p`/`P`.
+    pub clipboard: Option<Clip>,
+    /// Undo/redo stack of edit batches (session-only).
+    pub history: History,
     pub reload_requested: bool,
     /// Seek to apply once the (re)loaded file is ready.
     pub pending_seek: Option<f64>,
@@ -116,7 +130,9 @@ impl App {
             mode: Mode::Normal,
             playhead: 0.0,
             count: None,
-            pending_g: false,
+            pending: Pending::None,
+            clipboard: None,
+            history: History::default(),
             reload_requested: false,
             pending_seek: None,
             awaiting_unload: false,
@@ -264,7 +280,7 @@ fn command_key(app: &mut App, buf: String, key: KeyEvent) {
                     app.quit = true;
                     return; // keep the command text visible while exiting
                 }
-                "w" | "write" => app.set_message("nothing to save — timeline edits arrive in M3"),
+                "w" | "write" => app.set_message("edits save automatically — nothing to save"),
                 "" => {}
                 other => app.set_message(&format!("unknown command: {other}  (try :q)")),
             }
@@ -300,6 +316,26 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         _ => {}
     }
     let mult = app.count.take().unwrap_or(1);
+
+    // Second key of a two-key sequence.
+    match (&app.pending, code) {
+        (Pending::G, KeyCode::Char('g')) => {
+            app.pending = Pending::None;
+            app.seek_to(player, 0.0);
+            return;
+        }
+        (Pending::D, KeyCode::Char('d')) => {
+            app.pending = Pending::None;
+            edit_delete(app, player);
+            return;
+        }
+        (Pending::Y, KeyCode::Char('y')) => {
+            app.pending = Pending::None;
+            edit_yank(app);
+            return;
+        }
+        _ => {}
+    }
 
     match code {
         KeyCode::Char(' ') => {
@@ -345,15 +381,75 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
                 app.seek_to(player, t);
             }
         }
-        KeyCode::Char('g') => {
-            if app.pending_g {
-                app.pending_g = false;
-                app.seek_to(player, 0.0);
-            } else {
-                app.pending_g = true;
-            }
-            return;
+        KeyCode::Char('g') => app.pending = Pending::G,
+        KeyCode::Char('d') => app.pending = Pending::D,
+        KeyCode::Char('y') => app.pending = Pending::Y,
+        // ---- editing (counts deliberately don't multiply edit ops) ----
+        KeyCode::Char('i') => {
+            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
+                app.set_message("playhead is in a gap — j/w/b to a clip");
+                return;
+            };
+            let result = edit::trim_in(&app.project, clip.id, app.playhead);
+            run_edit(app, player, result);
         }
+        KeyCode::Char('o') => {
+            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
+                app.set_message("playhead is in a gap — j/w/b to a clip");
+                return;
+            };
+            let result = edit::trim_out(&app.project, clip.id, app.playhead);
+            run_edit(app, player, result);
+        }
+        KeyCode::Char('s') => {
+            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
+                app.set_message("playhead is in a gap — j/w/b to a clip");
+                return;
+            };
+            let result = edit::split(&app.project, clip.id, app.playhead);
+            run_edit(app, player, result);
+        }
+        KeyCode::Char('D') => {
+            let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
+                app.set_message("playhead is in a gap — j/w/b to a clip");
+                return;
+            };
+            let result = edit::delete_ripple(&app.project, clip.id);
+            run_edit(app, player, result);
+        }
+        KeyCode::Char('p') => {
+            let Some(clipboard) = app.clipboard.clone() else {
+                app.set_message("clipboard empty — yy first");
+                return;
+            };
+            let result = edit::paste(&app.project, &clipboard, Some(app.playhead));
+            run_edit(app, player, result);
+        }
+        KeyCode::Char('P') => {
+            let Some(clipboard) = app.clipboard.clone() else {
+                app.set_message("clipboard empty — yy first");
+                return;
+            };
+            let result = edit::paste(&app.project, &clipboard, None);
+            run_edit(app, player, result);
+        }
+        KeyCode::Char('u') => match app.history.undo(&mut app.project) {
+            Ok(desc) => {
+                app.set_message(&format!("undo: {desc}"));
+                persist_and_rebuild(app, player);
+            }
+            Err(e) => app.set_message(&e.to_string()),
+        },
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match app.history.redo(&mut app.project) {
+                Ok(desc) => {
+                    app.set_message(&format!("redo: {desc}"));
+                    persist_and_rebuild(app, player);
+                }
+                Err(e) => app.set_message(&e.to_string()),
+            }
+        }
+        // ---- navigation/transport (unchanged) ----
         KeyCode::Char('G') | KeyCode::Char('$') => app.seek_to(player, app.total()),
         KeyCode::Char('r') => app.reload_requested = true,
         KeyCode::Char('q') => app.quit = true,
@@ -361,9 +457,78 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         _ => {}
     }
 
-    // Any key other than `g` (or count digits) cancels a pending `gg`.
-    if !matches!(code, KeyCode::Char('g') | KeyCode::Char('0'..='9')) {
-        app.pending_g = false;
+    // Any key other than a pending-sequence starter (or count digits)
+    // cancels a pending two-key sequence.
+    if !matches!(
+        code,
+        KeyCode::Char('g') | KeyCode::Char('d') | KeyCode::Char('y') | KeyCode::Char('0'..='9')
+    ) {
+        app.pending = Pending::None;
+    }
+}
+
+// ------------------------------------------------------------ edit plumbing
+
+/// The clip the playhead sits inside, if any.
+fn clip_under(project: &Project, t: f64) -> Option<&Clip> {
+    let track = project.timeline.video_track()?;
+    track.clips.iter().find(|c| secs(&c.start) <= t && t < secs(&c.end()))
+}
+
+/// Apply an edit batch, then save + rebuild the preview so the monitor
+/// reflects the new timeline at the current playhead.
+fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>) {
+    let batch = match result {
+        Ok(b) => b,
+        Err(e) => {
+            app.set_message(&e.to_string());
+            return;
+        }
+    };
+    let desc = batch.desc.clone();
+    match app.history.apply(&mut app.project, batch) {
+        Ok(()) => {
+            app.set_message(&desc);
+            persist_and_rebuild(app, player);
+        }
+        Err(e) => app.set_message(&e.to_string()),
+    }
+}
+
+/// Atomic save + preview rebuild. Called after every successful edit
+/// (and undo/redo) — no manual save state to get wrong.
+fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
+    if let Err(e) = app.project.save(&app.path) {
+        app.set_message(&format!("save failed: {e}"));
+        return;
+    }
+    match preview::build_edl(&app.project) {
+        Ok(edl) => {
+            player.load(&edl);
+            app.pending_seek = Some(app.playhead);
+            app.awaiting_unload = true;
+        }
+        Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
+    }
+}
+
+fn edit_delete(app: &mut App, player: &MpvPlayer) {
+    let Some(clip) = clip_under(&app.project, app.playhead).cloned() else {
+        app.set_message("playhead is in a gap — j/w/b to a clip");
+        return;
+    };
+    let result = edit::delete_clip(&app.project, clip.id);
+    run_edit(app, player, result);
+}
+
+fn edit_yank(app: &mut App) {
+    match clip_under(&app.project, app.playhead) {
+        Some(c) => {
+            let id = c.id;
+            app.clipboard = Some(c.clone());
+            app.set_message(&format!("yanked clip #{id}"));
+        }
+        None => app.set_message("nothing to yank — playhead is in a gap"),
     }
 }
 
@@ -475,14 +640,8 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
     let t = app.playhead;
-    let track = app.project.timeline.video_track();
 
-    let clip_line = track
-        .and_then(|tr| {
-            tr.clips
-                .iter()
-                .find(|c| secs(&c.start) <= t && t < secs(&c.end()))
-        })
+    let clip_line = clip_under(&app.project, t)
         .map(|c| {
             let asset = app
                 .project
@@ -502,17 +661,18 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         .unwrap_or_else(|| "— gap —".to_string());
 
     let stats = format!(
-        "{} clip(s) · {} · {} fps",
+        "{} clip(s) · {} · {} fps · undo depth {}",
         app.project.timeline.video_track().map(|t| t.clips.len()).unwrap_or(0),
         fmt_timecode(app.total()),
         app.project
             .fps
             .as_ref()
             .map(|f| format!("{}/{}", f.numer(), f.denom()))
-            .unwrap_or_else(|| "?".into())
+            .unwrap_or_else(|| "?".into()),
+        app.history.depth()
     );
 
-    let help = "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · r reload · : cmd · q quit";
+    let help = "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim · s split · dd/D del · yy/p/P · u/Ctrl-r undo · r reload · : cmd · q quit";
 
     let mut lines = vec![
         Line::from(clip_line),

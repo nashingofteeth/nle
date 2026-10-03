@@ -163,7 +163,7 @@ impl Project {
         self.media.iter().map(|a| a.id).max().unwrap_or(0) + 1
     }
 
-    fn next_clip_id(&self) -> u32 {
+    pub(crate) fn next_clip_id(&self) -> u32 {
         self.timeline
             .tracks
             .iter()

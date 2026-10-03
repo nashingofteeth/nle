@@ -3,18 +3,17 @@
 Terminal-native video editor: TUI dashboard + mpv monitor window, vim keys,
 FFmpeg underneath. Built for this machine only.
 
-## Status: M2
+## Status: M3
 
-The mpv-like experience works: `nle edit` opens the TUI dashboard + mpv
-monitor with vim keys and instant, frame-accurate preview (no rendering —
-mpv's EDL protocol plays the timeline directly; gaps play black frames
-from a cached file). Next: M3 — editing inside the TUI.
+Editing for real: the TUI drives the model directly — trim in/out, split,
+delete (gap or ripple), yank/paste, undo/redo — with auto-save and instant
+preview rebuilds on every edit. Next: M4 — multi-track + audio.
 
 ## Layout
 
 | Crate | Job |
 |---|---|
-| `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops. No processes. |
+| `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops + undo history. No processes. |
 | `crates/nle-ffmpeg` | ffprobe/ffmpeg wrappers, filter-graph compiler. |
 | `crates/nle-cli` | The `nle` binary + TUI + mpv IPC client. |
 
@@ -26,10 +25,14 @@ N=./target/release/nle        # or just `nle` if cargo-installed
 
 # Interactive editor (the point)
 $N edit                       # TUI + mpv monitor; vim keys:
-#   space play/pause · h/l ±1s · H/L ±5s · f/F frame step
-#   j/k next/prev cut · w/b next/prev clip · gg/G/0 ends
-#   3l = 3s (counts) · r reload project from disk · :q quit
-# Tip: edit nle.json in another window, press r, watch it update.
+#   transport: space play/pause · h/l ±1s · H/L ±5s · f/F frame step
+#   motion:    j/k next/prev cut · w/b next/prev clip · gg/G/0 ends
+#              3l = 3s (counts)
+#   editing:   i/o trim in/out to playhead · s split at playhead
+#              dd delete (gap) · D delete + ripple · yy/p/P yank/paste
+#              u / Ctrl-r undo/redo (edits save automatically)
+#   misc:      r reload project from disk · :q quit · q quit
+# Tip: everything is undoable; the project file is written after every edit.
 
 # Project workflow
 $N init

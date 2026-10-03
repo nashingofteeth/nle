@@ -77,6 +77,32 @@ impl Track {
         Ok(())
     }
 
+    /// Replace a clip by id (used by trim/split edits), keeping sort order.
+    /// The replacement may move, so the vec is re-sorted and overlap-checked.
+    pub fn try_replace(&mut self, after: Clip) -> Result<(), TimelineError> {
+        let i = self
+            .find(after.id)
+            .ok_or(TimelineError::ClipNotFound(after.id))?;
+        for (j, existing) in self.clips.iter().enumerate() {
+            if j != i && existing.start < after.end() && after.start < existing.end() {
+                return Err(TimelineError::Overlap {
+                    existing: existing.id,
+                    at: format_seconds(&after.start),
+                });
+            }
+        }
+        self.clips[i] = after;
+        self.clips.sort_by_key(|c| c.start);
+        Ok(())
+    }
+
+    /// Remove a clip by id.
+    pub fn try_remove(&mut self, id: u32) -> Result<(), TimelineError> {
+        let i = self.find(id).ok_or(TimelineError::ClipNotFound(id))?;
+        self.clips.remove(i);
+        Ok(())
+    }
+
     /// Last end across all clips (0 for an empty track).
     pub fn end(&self) -> Seconds {
         self.clips
