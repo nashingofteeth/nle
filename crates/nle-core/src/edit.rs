@@ -1108,6 +1108,28 @@ fn pasted_piece(snapshot: &Segment, new_id: u32) -> Segment {
     }
 }
 
+/// Pasting a gap against an existing gap extends it instead of making a
+/// second, adjacent gap segment. Delegates to `extend_gap_tail`, so the
+/// ripple flag decides whether followers shift (`P`) or are overwritten
+/// (`p`). `None` when no gap ends at the playhead.
+fn extend_gap_ending_at(
+    project: &Project,
+    playhead: f64,
+    extra: Seconds,
+    ripple: bool,
+) -> Result<Option<Batch>, EditError> {
+    let Some(si) = trim_consume_target(project, playhead, false) else {
+        return Ok(None);
+    };
+    let ti = video_track_index(project)?;
+    if !matches!(project.timeline.tracks[ti].segments.get(si), Some(Segment::Gap(_))) {
+        return Ok(None);
+    }
+    let t = snap(project, playhead)?;
+    let end = secs_f64(&t) + secs_f64(&extra);
+    extend_gap_tail(project, si, end, ripple).map(Some)
+}
+
 /// `p` — replace-paste: drop the clipboard at the playhead, overwriting
 /// whatever its span covers. Covered gaps vanish, wholly-covered clips
 /// are removed, and a straddled follower is trimmed at its near edge;
@@ -1118,6 +1140,13 @@ pub fn paste(project: &Project, snapshot: &Segment, playhead: f64) -> Result<Bat
     let t = snap(project, playhead)?;
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
+    // A gap pasted at the end of a gap extends it (replace: the covered
+    // span is overwritten, followers do not shift).
+    if let Segment::Gap(pg) = snapshot
+        && let Some(batch) = extend_gap_ending_at(project, playhead, pg.duration, false)?
+    {
+        return Ok(batch);
+    }
     let dur = snapshot.duration();
     let pasted = pasted_piece(snapshot, project.next_clip_id());
 
@@ -1268,6 +1297,13 @@ pub fn paste_ripple(project: &Project, snapshot: &Segment, playhead: f64) -> Res
     let t = snap(project, playhead)?;
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
+    // A gap pasted at the end of a gap extends it and pushes followers
+    // right, rather than making a second adjacent gap segment.
+    if let Segment::Gap(pg) = snapshot
+        && let Some(batch) = extend_gap_ending_at(project, playhead, pg.duration, true)?
+    {
+        return Ok(batch);
+    }
     let what = match snapshot {
         Segment::Clip(_) => format!("clip #{}", project.next_clip_id()),
         Segment::Gap(_) => "gap".to_string(),
@@ -2881,6 +2917,29 @@ mod tests {
         let batch = paste(&q, &payload, 1.0).unwrap();
         h.apply(&mut q, batch).unwrap();
         assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)), "coalesced");
+        assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
+
+        // Pasting a gap at the END of an existing gap extends it rather
+        // than making a second adjacent gap.
+        let two = Segment::Gap(Gap { duration: Seconds::from_integer(2) });
+        let mut q = p.clone();
+        let mut h = History::default();
+        let batch = paste_ripple(&q, &two, 3.0).unwrap();
+        h.apply(&mut q, batch).unwrap();
+        let segs = q.timeline.video_track().unwrap().segments.clone();
+        assert_eq!(segs.len(), 3, "no extra gap segment");
+        assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(3)), "gap extended");
+        assert_eq!(q.timeline.end(), Seconds::from_integer(7), "followers push right");
+
+        // Replace-paste at the gap's end extends it and overwrites the
+        // covered span (length held).
+        let mut q = p.clone();
+        let mut h = History::default();
+        let batch = paste(&q, &two, 3.0).unwrap();
+        h.apply(&mut q, batch).unwrap();
+        let segs = q.timeline.video_track().unwrap().segments.clone();
+        assert_eq!(segs.len(), 2, "clip #2 overwritten, no extra gap");
+        assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
         assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
     }
 
