@@ -203,7 +203,7 @@ pub enum Mode {
     Extend(ExtendState),
 }
 
-/// Which boundary is armed in extend mode: a clip edge, or a gap's tail.
+/// Which boundary is armed in extend mode: a clip edge, or a gap edge.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Armed {
     /// Head (`head == true`) or tail of the clip with this id.
@@ -212,11 +212,9 @@ pub enum Armed {
     /// followers shift/are overwritten. `index` is the gap's segment
     /// index, stable while the mode is active. Unbounded.
     GapTail { index: usize },
-    /// A gap armed at its head (left edge) — extending it left replaces
-    /// the preceding segment. Bounded below by the timeline start.
+    /// A gap armed at its head (left edge) — extending it left inserts
+    /// space (or overwrites the preceding segment); unbounded below.
     GapHead { index: usize },
-    /// Timeline start (0) with a leading gap.
-    HeadGap,
 }
 
 /// Extend-mode session state. All bounds are timeline seconds; `hi` is
@@ -673,10 +671,9 @@ enum CommitKind {
     GrowTailPastEnd,
     AbsorbTail,
     AbsorbHead,
-    ShortenHeadGap,
     /// Move a gap's tail to the playhead (grow or shrink).
     GapTail,
-    /// Grow a gap's head leftward over the preceding segment.
+    /// Move a gap's head leftward (insert space / overwrite the left).
     GapHead,
     Delete,
     Noop,
@@ -697,15 +694,12 @@ fn resolve_armed(project: &Project, t: f64) -> Result<(Armed, f64), String> {
     let eps = 1e-6;
     // Pass 1: the segment STARTING at t wins — a clip's head (shared cuts
     // arm the right head), or, when the right segment is a gap, the gap's
-    // tail. So `e` at a clip|gap boundary extends the gap rather than the
-    // left clip into it. A leading gap is its own case (head pinned at 0).
+    // head. So `e` at a clip|gap boundary arms the gap, and at the very
+    // start it arms the leading gap's head (extendable past time 0).
     let mut acc = 0.0;
     for (i, seg) in track.segments.iter().enumerate() {
         if (acc - t).abs() < eps {
             match seg {
-                TimelineSegment::Gap(_) if i == 0 && t.abs() < eps => {
-                    return Ok((Armed::HeadGap, 0.0));
-                }
                 TimelineSegment::Clip(c) => {
                     return Ok((Armed::Clip { id: c.id, head: true }, acc));
                 }
@@ -888,17 +882,6 @@ fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPl
                 preview: ExtendPreviewSpec::Black { origin: 0.0 },
             })
         }
-        Armed::HeadGap => {
-            let gap_end = secs(&track.segments.first().map(|s| s.duration()).unwrap_or(Seconds::from_integer(0)));
-            Ok(ExtendPlan {
-                armed,
-                edge_pos: 0.0,
-                lo: 0.0,
-                hi: Some(gap_end),
-                mat: None,
-                preview: ExtendPreviewSpec::Black { origin: 0.0 },
-            })
-        }
     }
 }
 
@@ -962,7 +945,6 @@ fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Resu
         }
         Armed::GapTail { .. } => Ok(CommitKind::GapTail),
         Armed::GapHead { .. } => Ok(CommitKind::GapHead),
-        Armed::HeadGap => Ok(CommitKind::ShortenHeadGap),
     }
 }
 
@@ -1150,7 +1132,6 @@ fn armed_desc(armed: &Armed) -> String {
         Armed::Clip { id, head } => format!("{} of clip #{id}", if *head { "head" } else { "tail" }),
         Armed::GapTail { .. } => "gap end".to_string(),
         Armed::GapHead { .. } => "gap start".to_string(),
-        Armed::HeadGap => "timeline start".to_string(),
     }
 }
 
@@ -1314,13 +1295,6 @@ fn flip_target(project: &Project, armed: Armed, head: bool) -> Option<(Armed, f6
                 (Armed::GapTail { index }, e)
             }
         }),
-        Armed::HeadGap => gap_span(project, 0).map(|(s, e)| {
-            if head {
-                (Armed::HeadGap, s)
-            } else {
-                (Armed::GapTail { index: 0 }, e)
-            }
-        }),
     }
 }
 
@@ -1376,7 +1350,7 @@ fn commit_batch(
 ) -> Result<Batch, EditError> {
     let (id, head) = match armed {
         Armed::Clip { id, head } => (*id, *head),
-        Armed::GapTail { .. } | Armed::GapHead { .. } | Armed::HeadGap => (0, false),
+        Armed::GapTail { .. } | Armed::GapHead { .. } => (0, false),
     };
     match kind {
         CommitKind::TrimHead => {
@@ -1422,7 +1396,6 @@ fn commit_batch(
                 edit::absorb_outward(project, id, head, ph)
             }
         }
-        CommitKind::ShortenHeadGap => edit::trim_in(project, ph),
         CommitKind::GapTail => {
             let Armed::GapTail { index } = armed else {
                 return Err(EditError::NoGap);
@@ -1776,7 +1749,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         let label = match &app.mode {
             Mode::Extend(st) => match st.armed {
                 Armed::Clip { id, .. } => format!("clip #{id}"),
-                Armed::GapTail { .. } | Armed::GapHead { .. } | Armed::HeadGap => "gap".to_string(),
+                Armed::GapTail { .. } | Armed::GapHead { .. } => "gap".to_string(),
             },
             _ => String::new(),
         };
@@ -2094,9 +2067,6 @@ fn extend_status(app: &App, st: &ExtendState) -> String {
         Armed::GapHead { .. } => format!(
             "EXTEND gap start · range {range} · overwrites left{flag}"
         ),
-        Armed::HeadGap => format!(
-            "EXTEND timeline start · range {range}{flag}"
-        ),
     }
 }
 
@@ -2290,7 +2260,7 @@ mod tests {
             0,
             TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
         );
-        assert_eq!(resolve_armed(&s, 0.0), Ok((Armed::HeadGap, 0.0)));
+        assert_eq!(resolve_armed(&s, 0.0), Ok((Armed::GapHead { index: 0 }, 0.0)));
         // Empty timeline refuses.
         assert!(resolve_armed(&Project::new(), 0.0).is_err());
     }
@@ -2449,15 +2419,15 @@ mod tests {
         assert_eq!(plan.hi, None);
         assert_eq!(plan.mat, None);
         assert!(matches!(plan.preview, ExtendPreviewSpec::Black { origin } if origin == 7.0));
-        // Leading gap: bounded head range, black preview, no material line.
+        // Leading gap: unbounded head range, black preview, no material.
         let mut s = asset_project();
         s.timeline.video_track_mut().unwrap().segments.insert(
             0,
             TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
         );
         let plan = plan_extend(&s, 0.0, false).unwrap();
-        assert_eq!(plan.armed, Armed::HeadGap);
-        assert_eq!((plan.lo, plan.hi), (0.0, Some(2.0)));
+        assert_eq!(plan.armed, Armed::GapHead { index: 0 });
+        assert_eq!((plan.lo, plan.hi), (f64::NEG_INFINITY, Some(2.0)));
         assert_eq!(plan.mat, None);
     }
 
@@ -2998,7 +2968,7 @@ mod tests {
             TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
         );
         assert_eq!(
-            flip_target(&s, Armed::HeadGap, false),
+            flip_target(&s, Armed::GapHead { index: 0 }, false),
             Some((Armed::GapTail { index: 0 }, 2.0))
         );
     }
