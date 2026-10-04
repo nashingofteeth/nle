@@ -471,17 +471,14 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     }
 
     // Vim counts: digits build a multiplier; bare `0` jumps to the start.
-    match code {
-        KeyCode::Char(c @ '1'..='9') => {
-            let d = c.to_digit(10).unwrap_or(0);
-            app.count = Some(app.count.unwrap_or(0) * 10 + d);
-            return;
-        }
-        KeyCode::Char('0') if app.count.is_none() => {
+    if let KeyCode::Char(c @ '0'..='9') = code {
+        if c == '0' && app.count.is_none() {
             app.seek_to(player, 0.0);
             return;
         }
-        _ => {}
+        let d = c.to_digit(10).unwrap_or(0);
+        app.count = Some(app.count.unwrap_or(0) * 10 + d);
+        return;
     }
     let mult = app.count.take().unwrap_or(1);
     let eps = half_frame(&app.project);
