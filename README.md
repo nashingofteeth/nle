@@ -43,7 +43,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              p paste-over (replace what's underneath) · P ripple-insert
 #              u / Ctrl-r undo/redo (edits save automatically)
 #   extend:    e/E enter extend mode at a boundary (E = ripple) ·
-#              [ / ] enter already on the left / right clip of a cut
+#              [ / ] enter on the right / left clip of a cut
+#              (bracket opens toward its side) ·
 #              navigate to the target (mpv shows the armed material) ·
 #              e commit (replaces what it crosses) · E flip ripple ·
 #              [ ] switch side in-mode · Esc cancel

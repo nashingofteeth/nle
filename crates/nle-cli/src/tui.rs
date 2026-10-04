@@ -624,8 +624,8 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         },
         KeyCode::Char('e') => enter_extend(app, player, false),
         KeyCode::Char('E') => enter_extend(app, player, true),
-        KeyCode::Char('[') => enter_extend_side(app, player, Side::Left),
-        KeyCode::Char(']') => enter_extend_side(app, player, Side::Right),
+        KeyCode::Char('[') => enter_extend_side(app, player, Side::Right),
+        KeyCode::Char(']') => enter_extend_side(app, player, Side::Left),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.history.redo(&mut app.project) {
                 Ok(desc) => {
@@ -1101,14 +1101,15 @@ fn armed_on_side(project: &Project, t: f64, side: Side) -> Option<(Armed, f64)> 
 
 fn side_hint(side: Side) -> &'static str {
     match side {
-        Side::Left => "no clip ends here — [ works the clip on the left",
-        Side::Right => "no clip starts here — ] works the clip on the right",
+        Side::Left => "no clip ends here — ] works the clip on the left",
+        Side::Right => "no clip starts here — [ works the clip on the right",
     }
 }
 
-/// `[` / `]` at a cut: enter extend mode already armed on the clip
-/// ending (left) or starting (right) there. `e`/`E` keep the default
-/// (right at a shared cut).
+/// `[` / `]` at a cut: enter extend mode already armed on the clip on
+/// that side — `[` opens right, so it works the clip starting (right)
+/// there; `]` opens left, so the clip ending (left). `e`/`E` keep the
+/// default (right at a shared cut).
 fn enter_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
     let Some((armed, edge)) = armed_on_side(&app.project, app.playhead, side) else {
         app.set_message(side_hint(side));
@@ -1359,8 +1360,8 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('G') | KeyCode::Char('$') => seek_to_mode(app, player, &st, app.total()),
         KeyCode::Char('e') => commit_extend(app, player),
-        KeyCode::Char('[') => set_extend_side(app, player, Side::Left),
-        KeyCode::Char(']') => set_extend_side(app, player, Side::Right),
+        KeyCode::Char('[') => set_extend_side(app, player, Side::Right),
+        KeyCode::Char(']') => set_extend_side(app, player, Side::Left),
         KeyCode::Char('E') => {
             let ripple = match &mut app.mode {
                 Mode::Extend(inner) => {
