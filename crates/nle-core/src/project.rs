@@ -244,6 +244,7 @@ mod tests {
             2.0,
         )
         .unwrap();
+        println!("second batch: {batch:?}");
         h.apply(&mut p, batch).unwrap();
         p
     }
