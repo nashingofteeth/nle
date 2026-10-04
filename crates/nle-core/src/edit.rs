@@ -458,6 +458,16 @@ fn secs_f64(t: &Seconds) -> f64 {
     *t.numer() as f64 / *t.denom() as f64
 }
 
+/// Frame label for user-facing notices (`f19`) so messages read in frames
+/// rather than long decimals. Without a frame rate it falls back to
+/// seconds. (Not for ffmpeg arguments — those stay numeric seconds.)
+fn stamp(project: &Project, t: &Seconds) -> String {
+    match project.fps.as_ref() {
+        Some(fps) => format!("f{}", (secs_f64(t) * secs_f64(fps)).round() as i64),
+        None => format_seconds(t),
+    }
+}
+
 /// Result of a trim must leave at least one frame.
 fn at_least_a_frame(project: &Project, dur: &Seconds) -> Result<(), EditError> {
     let fps = project.fps.ok_or(EditError::NoFps)?;
@@ -581,7 +591,7 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         let seg_start = track.start_of(si);
         let delta = t - seg_start;
         if delta <= Seconds::from_integer(0) {
-            return Err(EditError::NothingToTrim(format_seconds(&t)));
+            return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let after = Clip {
             id: c.id,
@@ -609,7 +619,7 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
                 });
                 return Ok(Batch {
                     ops,
-                    desc: format!("trim in to {}", format_seconds(&t)),
+                    desc: format!("trim in to {}", stamp(project, &t)),
                 });
             }
         if let Some(g) = gap_piece(delta) {
@@ -617,7 +627,7 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         }
         return Ok(Batch {
             ops,
-            desc: format!("trim in to {}", format_seconds(&t)),
+            desc: format!("trim in to {}", stamp(project, &t)),
         });
     }
 
@@ -626,7 +636,7 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     let (ti, first, last, rs, _re) = gap_region_at(project, &t)?;
     let delta = t - rs;
     if delta <= Seconds::from_integer(0) {
-        return Err(EditError::NothingToTrim(format_seconds(&t)));
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     let mut ops = Vec::new();
 
@@ -646,8 +656,8 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         {
             return Err(EditError::BeyondAsset {
                 id: prev.id,
-                out: format_seconds(&after.asset_out),
-                duration: format_seconds(&d),
+                out: stamp(project, &after.asset_out),
+                duration: stamp(project, &d),
             });
         }
         ops.push(EditOp::Replace {
@@ -688,7 +698,7 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     }
     Ok(Batch {
         ops,
-        desc: format!("trim gap in to {}", format_seconds(&t)),
+        desc: format!("trim gap in to {}", stamp(project, &t)),
     })
 }
 
@@ -707,7 +717,7 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         let seg_start = track.start_of(si);
         let new_len = t - seg_start;
         if new_len <= Seconds::from_integer(0) {
-            return Err(EditError::NothingToTrim(format_seconds(&t)));
+            return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let after = Clip {
             id: c.id,
@@ -735,7 +745,7 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
                 });
                 return Ok(Batch {
                     ops,
-                    desc: format!("trim out to {}", format_seconds(&t)),
+                    desc: format!("trim out to {}", stamp(project, &t)),
                 });
             }
         if let Some(g) = gap_piece(trimmed) {
@@ -743,7 +753,7 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         }
         return Ok(Batch {
             ops,
-            desc: format!("trim out to {}", format_seconds(&t)),
+            desc: format!("trim out to {}", stamp(project, &t)),
         });
     }
 
@@ -751,7 +761,7 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     let (ti, first, last, _rs, re) = gap_region_at(project, &t)?;
     let delta = re - t;
     if delta <= Seconds::from_integer(0) {
-        return Err(EditError::NothingToTrim(format_seconds(&t)));
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     let mut ops = Vec::new();
 
@@ -766,8 +776,8 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         if after.asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: next.id,
-                needed: format_seconds(&delta),
-                ain: format_seconds(&next.asset_in),
+                needed: stamp(project, &delta),
+                ain: stamp(project, &next.asset_in),
             });
         }
         ops.push(EditOp::Replace {
@@ -803,7 +813,7 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     }
     Ok(Batch {
         ops,
-        desc: format!("trim gap out to {}", format_seconds(&t)),
+        desc: format!("trim gap out to {}", stamp(project, &t)),
     })
 }
 
@@ -853,7 +863,7 @@ pub fn split(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     let seg_start = project.timeline.tracks[ti].start_of(si);
     let left_len = t - seg_start;
     if left_len <= Seconds::from_integer(0) || left_len >= c.duration() {
-        return Err(EditError::NothingToTrim(format_seconds(&t)));
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     at_least_a_frame(project, &left_len)?;
     at_least_a_frame(project, &(c.duration() - left_len))?;
@@ -872,7 +882,7 @@ pub fn split(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     });
     Ok(Batch {
         ops: replace_with_many(ti, si, &Segment::Clip(c.clone()), vec![left, right]),
-        desc: format!("split clip #{} at {}", c.id, format_seconds(&t)),
+        desc: format!("split clip #{} at {}", c.id, stamp(project, &t)),
     })
 }
 
@@ -1067,7 +1077,7 @@ pub fn paste(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch,
         });
         return Ok(Batch {
             ops,
-            desc: format!("paste at {}", format_seconds(&t)),
+            desc: format!("paste at {}", stamp(project, &t)),
         });
     }
 
@@ -1160,7 +1170,7 @@ pub fn paste(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch,
     }
     ops.extend(replace_with_many(ti, si, &seg, pieces));
 
-    let mut desc = format!("paste at {}", format_seconds(&t));
+    let mut desc = format!("paste at {}", stamp(project, &t));
     if !notes.is_empty() {
         desc += &format!(" ({})", notes.join(", "));
     }
@@ -1205,7 +1215,7 @@ pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result
             ops,
             desc: format!(
                 "ripple paste at {} — clip #{} inserted",
-                format_seconds(&t),
+                stamp(project, &t),
                 project.next_clip_id()
             ),
         });
@@ -1274,7 +1284,7 @@ pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result
     };
     let desc = format!(
         "ripple paste at {} — clip #{} inserted",
-        format_seconds(&t),
+        stamp(project, &t),
         project.next_clip_id()
     );
     Ok(Batch {
@@ -1369,21 +1379,21 @@ pub fn extend_edge(project: &Project, clip_id: u32, head: bool, playhead: f64) -
     let edge = track.start_of(si) + if head { Seconds::from_integer(0) } else { c.duration() };
     let after = if head {
         if t >= edge {
-            return Err(EditError::NothingToTrim(format_seconds(&t)));
+            return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let delta = edge - t;
         let asset_in = c.asset_in - delta;
         if asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: c.id,
-                needed: format_seconds(&delta),
-                ain: format_seconds(&c.asset_in),
+                needed: stamp(project, &delta),
+                ain: stamp(project, &c.asset_in),
             });
         }
         Clip { asset_in, ..c }
     } else {
         if t <= edge {
-            return Err(EditError::NothingToTrim(format_seconds(&t)));
+            return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let asset_out = c.asset_out + (t - edge);
         let asset = project
@@ -1394,8 +1404,8 @@ pub fn extend_edge(project: &Project, clip_id: u32, head: bool, playhead: f64) -
         {
             return Err(EditError::BeyondAsset {
                 id: c.id,
-                out: format_seconds(&asset_out),
-                duration: format_seconds(&d),
+                out: stamp(project, &asset_out),
+                duration: stamp(project, &d),
             });
         }
         Clip { asset_out, ..c }
@@ -1408,7 +1418,7 @@ pub fn extend_edge(project: &Project, clip_id: u32, head: bool, playhead: f64) -
             before: Segment::Clip(c),
             after: Segment::Clip(after),
         }],
-        desc: format!("extend {side} of clip #{clip_id} to {}", format_seconds(&t)),
+        desc: format!("extend {side} of clip #{clip_id} to {}", stamp(project, &t)),
     })
 }
 
@@ -1425,7 +1435,7 @@ pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditErr
     };
     let gap_start = track.start_of(last);
     if t <= gap_start {
-        return Err(EditError::NothingToTrim(format_seconds(&t)));
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     Ok(Batch {
         ops: vec![EditOp::Replace {
@@ -1434,7 +1444,7 @@ pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditErr
             before: Segment::Gap(g),
             after: Segment::Gap(Gap { duration: t - gap_start }),
         }],
-        desc: format!("extend gap to {}", format_seconds(&t)),
+        desc: format!("extend gap to {}", stamp(project, &t)),
     })
 }
 
@@ -1462,7 +1472,7 @@ pub fn extend_gap_tail(
     };
     let gap_start = track.start_of(index);
     if t <= gap_start {
-        return Err(EditError::NothingToTrim(format_seconds(&t)));
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     let gap_end = gap_start + g.duration;
 
@@ -1476,7 +1486,7 @@ pub fn extend_gap_tail(
                 before: Segment::Gap(g),
                 after: Segment::Gap(Gap { duration: t - gap_start }),
             }],
-            desc: format!("extend gap to {}", format_seconds(&t)),
+            desc: format!("extend gap to {}", stamp(project, &t)),
         });
     }
 
@@ -1527,7 +1537,7 @@ pub fn extend_gap_tail(
             &mut absorbed,
         )?;
     }
-    let mut desc = format!("extend gap to {}", format_seconds(&t));
+    let mut desc = format!("extend gap to {}", stamp(project, &t));
     if !absorbed.is_empty() {
         desc += &format!(" (absorbed {})", absorbed.join(", "));
     }
@@ -1552,7 +1562,7 @@ pub fn extend_gap_head(project: &Project, index: usize, playhead: f64) -> Result
     let gap_start = track.start_of(index);
     let gap_end = gap_start + g.duration;
     if t >= gap_start {
-        return Err(EditError::NothingToTrim(format_seconds(&t)));
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     let mut ops = vec![EditOp::Replace {
         track: ti,
@@ -1597,7 +1607,7 @@ pub fn extend_gap_head(project: &Project, index: usize, playhead: f64) -> Result
             &mut absorbed,
         )?;
     }
-    let mut desc = format!("extend gap head to {}", format_seconds(&t));
+    let mut desc = format!("extend gap head to {}", stamp(project, &t));
     if !absorbed.is_empty() {
         desc += &format!(" (absorbed {})", absorbed.join(", "));
     }
@@ -1626,21 +1636,21 @@ pub fn absorb_outward(project: &Project, clip_id: u32, head: bool, playhead: f64
     // Extend the armed edge first (indices below stay valid throughout).
     let after = if head {
         if t >= edge {
-            return Err(EditError::NothingToTrim(format_seconds(&t)));
+            return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let delta = edge - t;
         let asset_in = c.asset_in - delta;
         if asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: c.id,
-                needed: format_seconds(&delta),
-                ain: format_seconds(&c.asset_in),
+                needed: stamp(project, &delta),
+                ain: stamp(project, &c.asset_in),
             });
         }
         Clip { asset_in, ..c.clone() }
     } else {
         if t <= edge {
-            return Err(EditError::NothingToTrim(format_seconds(&t)));
+            return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let asset_out = c.asset_out + (t - edge);
         let asset = project
@@ -1651,8 +1661,8 @@ pub fn absorb_outward(project: &Project, clip_id: u32, head: bool, playhead: f64
         {
             return Err(EditError::BeyondAsset {
                 id: c.id,
-                out: format_seconds(&asset_out),
-                duration: format_seconds(&d),
+                out: stamp(project, &asset_out),
+                duration: stamp(project, &d),
             });
         }
         Clip { asset_out, ..c.clone() }
@@ -1737,7 +1747,7 @@ pub fn absorb_outward(project: &Project, clip_id: u32, head: bool, playhead: f64
     }
 
     let side = if head { "head" } else { "tail" };
-    let mut desc = format!("extend {side} of clip #{clip_id} to {}", format_seconds(&t));
+    let mut desc = format!("extend {side} of clip #{clip_id} to {}", stamp(project, &t));
     if !absorbed.is_empty() {
         desc += &format!(" (absorbed {})", absorbed.join(", "));
     }
@@ -2587,6 +2597,17 @@ mod tests {
         // Not a gap / at/before its start both refuse.
         assert!(matches!(extend_gap_tail(&p, 0, 1.0, false), Err(EditError::NoGap)));
         assert!(matches!(extend_gap_tail(&p, 1, 0.0, true), Err(EditError::NothingToTrim(_))));
+    }
+
+    #[test]
+    fn notices_use_frame_stamps() {
+        let p = fixture(); // 30 fps
+        let b = split(&p, 1.0).unwrap();
+        assert!(b.desc.contains("at f30"), "{}", b.desc);
+        // Errors too: at the clip's edge there is nothing to trim.
+        let e = trim_in(&p, 0.0).unwrap_err();
+        assert!(e.to_string().contains("f0"), "{e}");
+        assert!(!e.to_string().contains("0.000000"), "{e}");
     }
 
     #[test]
