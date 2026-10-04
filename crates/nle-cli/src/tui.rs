@@ -1858,67 +1858,33 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
 
     let segs = preview::segments(&app.project).unwrap_or_default();
     // In extend mode the row rescales past the timeline end so the
-    // projected range stays visible while navigating outward. With a
-    // known material strip it rescales to the whole asset instead (the
-    // strip is the row).
+    // projected range stays visible while navigating outward. The row is
+    // always the project timeline; extend shows as an overlay (marker row).
     let in_extend = matches!(app.mode, Mode::Extend(_));
-    let strip: Option<(f64, f64, f64)> = match &app.mode {
-        Mode::Extend(st) => strip_geom(app, st),
-        _ => None,
-    };
-    let total = if let Some((dur, _, _)) = strip {
-        dur.max(0.001)
-    } else if in_extend {
+    let total = if in_extend {
         app.total().max(app.playhead).max(0.001)
     } else {
         app.total().max(0.001)
     };
     let w = inner.width as f64;
 
-    // Timeline position of source second 0 (strip mode): the preview
-    // offset. Playhead and edge map through it into strip seconds.
-    let strip_off = match &app.mode {
-        Mode::Extend(st) if strip.is_some() => st.preview_off,
-        _ => 0.0,
-    };
-
-    let parts: Vec<(f64, String, Style)> = if let Some((dur, ain, aout)) = strip {
-        // Source strip: unused material dimmed, current span highlighted.
-        let mut v = Vec::new();
-        if ain > 0.0 {
-            v.push((ain, String::new(), Style::default().bg(Color::DarkGray).fg(Color::Black)));
-        }
-        let label = match &app.mode {
-            Mode::Extend(st) => match st.armed {
-                Armed::Clip { id, .. } => format!("clip #{id}"),
-                Armed::GapTail { .. } | Armed::GapHead { .. } => "gap".to_string(),
-            },
-            _ => String::new(),
-        };
-        v.push((aout - ain, label, Style::default().bg(Color::Cyan).fg(Color::Black)));
-        if aout < dur {
-            v.push((dur - aout, String::new(), Style::default().bg(Color::DarkGray).fg(Color::Black)));
-        }
-        v
-    } else {
-        segs
-            .iter()
-            .map(|s| match s {
-                Segment::Clip { path, length, .. } => (
-                    secs(length),
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    Style::default().bg(Color::Cyan).fg(Color::Black),
-                ),
-                Segment::Gap { length } => (
-                    secs(length),
-                    "gap".to_string(),
-                    Style::default().bg(Color::DarkGray).fg(Color::Black),
-                ),
-            })
-            .collect()
-    };
+    let parts: Vec<(f64, String, Style)> = segs
+        .iter()
+        .map(|s| match s {
+            Segment::Clip { path, length, .. } => (
+                secs(length),
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                Style::default().bg(Color::Cyan).fg(Color::Black),
+            ),
+            Segment::Gap { length } => (
+                secs(length),
+                "gap".to_string(),
+                Style::default().bg(Color::DarkGray).fg(Color::Black),
+            ),
+        })
+        .collect();
 
     // Track row: segments with boundary dividers. The playhead doesn't
     // live here in normal mode (it renders on the marker row below); in
@@ -1945,80 +1911,33 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         x = end_x;
     }
     let mut spans: Vec<Span> = Vec::new();
-    // In strip mode the playhead and the span ends map through the
-    // preview offset into source seconds: the notch roams with the
-    // playhead, the two white ticks stay at the current span's ends
-    // (the armed edge and the far end — ain for a tail arm, aout for a
-    // head arm).
-    let (ph_pos, span_ends) = match &app.mode {
-        Mode::Extend(st) if strip.is_some() => {
-            let far = match st.armed {
-                Armed::Clip { head, .. } => {
-                    let (_, ain, aout) = strip.unwrap();
-                    if head { aout } else { ain }
-                }
-                _ => st.edge_pos - strip_off,
-            };
-            (app.playhead - strip_off, Some((st.edge_pos - strip_off, far)))
-        }
-        _ => (app.playhead, None),
-    };
     if in_extend {
         // Notch the playhead into the row: split the containing part's
         // text around a marker (same left-hugging convention as every
         // other timeline glyph). Yellow normally, white exactly at the
-        // armed edge. Static white ticks mark both span ends; when one
-        // lands on the playhead cell the notch wins (white there too).
-        let ph = marker_col(ph_pos, total, inner.width);
-        let at_edge = span_ends
-            .map(|(e, _)| (ph_pos - e).abs() < 1e-9)
-            .unwrap_or(false);
+        // armed edge.
+        let ph = marker_col(app.playhead, total, inner.width);
+        let edge = match &app.mode {
+            Mode::Extend(st) => st.edge_pos,
+            _ => app.playhead,
+        };
+        let at_edge = (app.playhead - edge).abs() < 1e-9;
         let notch = Style::default().fg(if at_edge { Color::White } else { Color::Yellow });
-        let edge_mark = Style::default().fg(Color::White);
-        let end_cols: Vec<u16> = span_ends
-            .map(|(e0, e1)| [e0, e1].map(|e| marker_col(e, total, inner.width)).to_vec())
-            .unwrap_or_default();
         for (x0, text, style) in &cells {
             let chars: Vec<char> = text.chars().collect();
-            // Marks in this part, playhead last so it wins ties.
-            let mut marks: Vec<(usize, Style)> = Vec::new();
-            for ec in &end_cols {
-                let off = (*ec as usize).saturating_sub(*x0 as usize);
-                if *ec >= *x0 && off < chars.len() && *ec != ph {
-                    marks.push((off, edge_mark));
-                }
-            }
             let off = (ph as usize).saturating_sub(*x0 as usize);
             if ph >= *x0 && off < chars.len() {
-                marks.push((off, notch));
-            }
-            if marks.is_empty() {
+                let before: String = chars[..off].iter().collect();
+                let after: String = chars[off + 1..].iter().collect();
+                if !before.is_empty() {
+                    spans.push(Span::styled(before, *style));
+                }
+                spans.push(Span::styled("▏".to_string(), notch));
+                if !after.is_empty() {
+                    spans.push(Span::styled(after, *style));
+                }
+            } else {
                 spans.push(Span::styled(text.clone(), *style));
-                continue;
-            }
-            // Offsets arrive in arbitrary order (the armed edge can be
-            // either span end), so sort ascending before walking them; a
-            // stable sort keeps the playhead last on ties so it wins.
-            marks.sort_by_key(|(o, _)| *o);
-            let mut cur = 0;
-            for (m, (o, ms)) in marks.iter().enumerate() {
-                let chunk: String = chars[cur..*o].iter().collect();
-                if !chunk.is_empty() {
-                    spans.push(Span::styled(chunk, *style));
-                }
-                if m + 1 < marks.len() && marks[m + 1].0 == *o {
-                    cur = *o;
-                    continue; // tie: the playhead paints this cell
-                }
-                // Both marks are vertical bars: the marker replaces the
-                // underlying glyph (which may be a divider or a label
-                // character) with a clear tick.
-                spans.push(Span::styled("▏".to_string(), *ms));
-                cur = o + 1;
-            }
-            let rest: String = chars[cur..].iter().collect();
-            if !rest.is_empty() {
-                spans.push(Span::styled(rest, *style));
             }
         }
     } else {
@@ -2038,40 +1957,19 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let at_end = app.eof;
     let mut marker_cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
     if let Mode::Extend(st) = &app.mode {
-        // In-mode white rule: only at the armed edge (project cuts are
-        // meaningless in source space).
+        // In-mode white rule: only at the armed edge.
         let white_here = (app.playhead - st.edge_pos).abs() < 1e-9;
         let color = if white_here { Color::White } else { Color::Yellow };
-        if let Some((_, ain, _)) = strip {
-            // Strip scale: the clamped range translated through the
-            // preview offset; no material run (it spans the strip).
-            let hi_edge = st.hi.unwrap_or(f64::INFINITY);
-            // A head's workable span stops at the segment's edge: the
-            // source before its in-point is material headroom, not part
-            // of the segment. (A tail's span runs on to the asset end,
-            // which is real forward timeline.)
-            let run_lo = match st.armed {
-                Armed::Clip { head: true, .. } => (st.lo - strip_off).max(ain),
-                _ => st.lo - strip_off,
-            };
-            paint_run(&mut marker_cells, total, inner.width, run_lo, hi_edge - strip_off, '─', Style::default().fg(Color::Yellow));
-            let sph = marker_col(app.playhead - strip_off, total, inner.width);
-            marker_cells[sph as usize] = (
-                if at_end { '▕' } else { '▏' },
-                Style::default().fg(color),
-            );
-        } else {
-            // Material extent first (dim, underneath), then the workable span.
-            if let Some((m0, m1)) = st.mat {
-                paint_run(&mut marker_cells, total, inner.width, m0, m1, '·', Style::default().fg(Color::DarkGray));
-            }
-            let hi_edge = st.hi.unwrap_or(f64::INFINITY);
-            paint_run(&mut marker_cells, total, inner.width, st.lo, hi_edge, '─', Style::default().fg(Color::Yellow));
-            marker_cells[ph as usize] = (
-                if at_end { '▕' } else { '▏' },
-                Style::default().fg(color),
-            );
+        // Material extent first (dim, underneath), then the workable span.
+        if let Some((m0, m1)) = st.mat {
+            paint_run(&mut marker_cells, total, inner.width, m0, m1, '·', Style::default().fg(Color::DarkGray));
         }
+        let hi_edge = st.hi.unwrap_or(f64::INFINITY);
+        paint_run(&mut marker_cells, total, inner.width, st.lo, hi_edge, '─', Style::default().fg(Color::Yellow));
+        marker_cells[ph as usize] = (
+            if at_end { '▕' } else { '▏' },
+            Style::default().fg(color),
+        );
     } else {
         let color = if on_boundary(&app.project, app.playhead) {
             Color::White
@@ -2100,26 +1998,6 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     }
     let playhead_row = Rect { y: inner.y + 1, height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(marker)), playhead_row);
-}
-
-/// Source-strip geometry for clip-armed extend mode: the asset's full
-/// duration as the row scale plus the clip's *current* source span.
-/// Timeline positions map to source seconds via the preview offset
-/// (`src = playhead - preview_off`). None when gap-armed or the asset
-/// duration is unknown (those keep the project row).
-fn strip_geom(app: &App, st: &ExtendState) -> Option<(f64, f64, f64)> {
-    let id = match st.armed {
-        Armed::Clip { id, .. } => id,
-        _ => return None,
-    };
-    let track = app.project.timeline.video_track()?;
-    let clip = track.segments.iter().filter_map(|seg| match seg {
-        TimelineSegment::Clip(c) if c.id == id => Some(c),
-        _ => None,
-    }).next()?;
-    let asset = app.project.asset(clip.asset)?;
-    let dur = secs(&asset.duration()?);
-    Some((dur, secs(&clip.asset_in), secs(&clip.asset_out)))
 }
 
 /// Paint `glyph` with `style` over the cells spanning `[a, b)` in
@@ -2588,38 +2466,6 @@ mod tests {
         assert_eq!(plan.armed, Armed::GapHead { index: 0 });
         assert_eq!((plan.lo, plan.hi), (f64::NEG_INFINITY, Some(2.0)));
         assert_eq!(plan.mat, None);
-    }
-
-    #[test]
-    fn strip_geom_maps_clip_span_to_source() {
-        let p = asset_project(); // C1 [0..3) src 1..4 of a 10s asset
-        let mut app = App::new(p, PathBuf::from("t.json"));
-        app.playhead = 3.0;
-        // Armed tail of #1: strip is the whole 10s asset, used span 1..4.
-        let plan = plan_for_armed(&app.project, Armed::Clip { id: 1, head: false }, 3.0).unwrap();
-        app.mode = Mode::Extend(ExtendState {
-            armed: plan.armed,
-            edge_pos: plan.edge_pos,
-            ripple: false,
-            lo: plan.lo,
-            hi: plan.hi,
-            mat: plan.mat,
-            preview_off: 2.0, // edge(3) - src_at_edge(1)
-        });
-        let st = match &app.mode {
-            Mode::Extend(st) => st.clone(),
-            _ => unreachable!(),
-        };
-        assert_eq!(strip_geom(&app, &st), Some((10.0, 1.0, 4.0)));
-        // Gap-armed: no strip.
-        let open = ExtendState { armed: Armed::GapTail { index: 1 }, ..st };
-        assert_eq!(strip_geom(&app, &open), None);
-        // Unknown duration: no strip.
-        let mut q = asset_project();
-        q.media[0].probe.format.duration = None;
-        let app2 = App::new(q, PathBuf::from("t.json"));
-        let st2 = ExtendState { armed: Armed::Clip { id: 1, head: false }, ..st };
-        assert_eq!(strip_geom(&app2, &st2), None);
     }
 
     #[test]
@@ -3524,44 +3370,22 @@ mod tests {
         assert_eq!(truncate_label("ab", 2), "ab");
     }
 
-    // Render test: extend mode on a shared cut (head of #2 armed) draws
-    // the source strip with the playhead notch (white on the armed
-    // edge), white ticks at BOTH span ends, and the yellow workable-run
-    // on the marker row translated into strip space.
+    // Render test: extend mode overlays the project timeline — the track
+    // row is the clips (not a source strip) with the playhead notched, and
+    // the marker row carries the dim material extent, the yellow workable
+    // span, and the playhead.
     #[test]
-    fn extend_strip_renders_span_and_ticks() {
+    fn extend_overlays_the_timeline() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let mut p = asset_project();
-        p.timeline = Timeline {
-            tracks: vec![Track {
-                kind: TrackKind::Video,
-                segments: vec![
-                    TimelineSegment::Clip(nle_core::Clip {
-                        id: 1,
-                        asset: 1,
-                        asset_in: Seconds::from_integer(1),
-                        asset_out: Seconds::from_integer(4),
-                    }),
-                    TimelineSegment::Clip(nle_core::Clip {
-                        id: 2,
-                        asset: 1,
-                        asset_in: Seconds::new(1, 2), // 0.5
-                        asset_out: Seconds::new(7, 2), // 3.5
-                    }),
-                ],
-            }],
-        };
-        // Asset is 10s; clip #2 spans [3..6) on the timeline from source
-        // [0.5..3.5). Playhead on the shared cut → head of #2 armed.
-        let plan = plan_extend(&p, 3.0, false).unwrap();
-        assert_eq!(plan.lo, 2.5); // head can pull back to source zero
-        assert_eq!(plan.hi, Some(6.0)); // or advance to the clip's end
-        assert_eq!(plan.mat, Some((2.5, 12.5)));
+        let p = asset_project(); // C1 [0..3) src1..4, gap [3..5), C2 [5..7) src0..2
+        let plan = plan_for_armed(&p, Armed::Clip { id: 1, head: false }, 3.0).unwrap();
+        assert_eq!((plan.lo, plan.hi), (0.0, Some(9.0)));
+        assert_eq!(plan.mat, Some((-1.0, 9.0)));
 
         let mut app = App::new(p, PathBuf::from("t.json"));
-        app.playhead = 3.0;
+        app.playhead = 1.0; // roamed off the armed edge (3.0)
         app.mode = Mode::Extend(ExtendState {
             armed: plan.armed,
             edge_pos: plan.edge_pos,
@@ -3569,11 +3393,9 @@ mod tests {
             lo: plan.lo,
             hi: plan.hi,
             mat: plan.mat,
-            preview_off: plan.edge_pos - 0.5, // edge 3.0 sits at src 0.5
+            preview_off: 2.0,
         });
 
-        // 60-wide block → 58 usable columns; strip scale is the 10s
-        // asset, so 5.8 columns per second.
         let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
         let area = Rect { x: 0, y: 0, width: 60, height: 4 };
         term.draw(|f| render_timeline(f, area, &app)).unwrap();
@@ -3583,108 +3405,23 @@ mod tests {
             (c.symbol().to_string(), c.fg, c.bg)
         };
 
-        // Track row: notch at source 0.5 (col 3, white — playhead is on
-        // the armed edge), far-end tick at source 3.5 (col 20), cyan
-        // span between them.
-        let (s, f, _) = sym(4, 1);
-        assert_eq!((s.as_str(), f), ("▏", Color::White));
-        let (s, f, _) = sym(21, 1);
-        assert_eq!((s.as_str(), f), ("▏", Color::White));
-        let (s, _, b) = sym(9, 1); // first label char of "clip #2"
-        assert_eq!((s.as_str(), b), ("c", Color::Cyan));
+        // Track row is the project timeline: cyan clip #1 (label) then the
+        // dim gap, with the roamed playhead notched in yellow.
+        let (_, _, b) = sym(3, 1);
+        assert_eq!(b, Color::Cyan, "clip cells");
+        let (_, _, b) = sym(31, 1);
+        assert_eq!(b, Color::DarkGray, "gap cells");
+        let (s, f, _) = sym(9, 1);
+        assert_eq!((s.as_str(), f), ("▏", Color::Yellow), "roaming notch");
 
-        // Marker row: for a head the run stops at the segment's edge (the
-        // in-point, source 0.5), so it starts at the playhead — no yellow
-        // over the material headroom.
-        let (s, f, _) = sym(2, 2);
-        assert_eq!((s.as_str(), f), (" ", Color::Reset), "no span over the headroom");
-        let (s, f, _) = sym(4, 2);
-        assert_eq!((s.as_str(), f), ("▏", Color::White));
-        let (s, f, _) = sym(5, 2);
-        assert_eq!((s.as_str(), f), ("─", Color::Yellow), "run starts at the edge");
-        let (s, f, _) = sym(20, 2);
-        assert_eq!((s.as_str(), f), ("─", Color::Yellow));
-        let (s, f, _) = sym(21, 2);
-        assert_eq!((s.as_str(), f), (" ", Color::Reset));
-    }
-
-    // Regression: with the playhead roamed off the armed edge, the two
-    // span-end ticks arrive out of order (the armed edge can be the right
-    // end for a tail arm), which used to slice chars[cur..o] backwards
-    // and panic.
-    #[test]
-    fn extend_strip_roaming_playhead_renders() {
-        use ratatui::backend::TestBackend;
-        use ratatui::Terminal;
-
-        let mut p = asset_project();
-        p.timeline = Timeline {
-            tracks: vec![Track {
-                kind: TrackKind::Video,
-                segments: vec![
-                    TimelineSegment::Clip(nle_core::Clip {
-                        id: 1,
-                        asset: 1,
-                        asset_in: Seconds::from_integer(1),
-                        asset_out: Seconds::from_integer(4),
-                    }),
-                    TimelineSegment::Clip(nle_core::Clip {
-                        id: 2,
-                        asset: 1,
-                        asset_in: Seconds::new(1, 2),
-                        asset_out: Seconds::new(7, 2),
-                    }),
-                ],
-            }],
-        };
-        let mut app = App::new(p, PathBuf::from("t.json"));
-        let area = Rect { x: 0, y: 0, width: 60, height: 4 };
-
-        // Tail of #1 (edge 3.0, src out 4.0): the armed edge maps to
-        // strip second 4.0 (col 23) while the far end (src in 1.0) is at
-        // col 6 — descending. Playhead roamed to 2.0 (strip col 17).
-        app.playhead = 2.0;
-        app.mode = Mode::Extend(ExtendState {
-            armed: Armed::Clip { id: 1, head: false },
-            edge_pos: 3.0,
-            ripple: false,
-            lo: 0.0,
-            hi: Some(9.0),
-            mat: None,
-            preview_off: -1.0,
-        });
-        let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
-        term.draw(|f| render_timeline(f, area, &app)).unwrap();
-        let buf = term.backend().buffer().clone();
-        let sym = |x: u16, y: u16| -> (String, Color) {
-            let c = &buf[(x, y)];
-            (c.symbol().to_string(), c.fg)
-        };
-        assert_eq!(sym(7, 1), ("▏".to_string(), Color::White), "far-end tick");
-        assert_eq!(sym(24, 1), ("▏".to_string(), Color::White), "armed-edge tick");
-        assert_eq!(sym(18, 1), ("▏".to_string(), Color::Yellow), "roaming notch");
-
-        // Head of #2 (edge 3.0, src in 0.5): ascending ticks, notch roamed
-        // past both to 5.0 (strip col 15).
-        app.playhead = 5.0;
-        app.mode = Mode::Extend(ExtendState {
-            armed: Armed::Clip { id: 2, head: true },
-            edge_pos: 3.0,
-            ripple: false,
-            lo: 2.5,
-            hi: Some(6.0),
-            mat: None,
-            preview_off: 2.5,
-        });
-        let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
-        term.draw(|f| render_timeline(f, area, &app)).unwrap();
-        let buf = term.backend().buffer().clone();
-        let sym = |x: u16, y: u16| -> (String, Color) {
-            let c = &buf[(x, y)];
-            (c.symbol().to_string(), c.fg)
-        };
-        assert_eq!(sym(4, 1), ("▏".to_string(), Color::White), "armed-edge tick");
-        assert_eq!(sym(21, 1), ("▏".to_string(), Color::White), "far-end tick");
-        assert_eq!(sym(16, 1), ("▏".to_string(), Color::Yellow), "roaming notch");
+        // Marker row: dim material extent under a yellow workable span
+        // (the span [0, 9] covers it, so yellow wins); playhead notch
+        // inside. The row rescales to fit the span past the timeline end.
+        let (s, f, _) = sym(1, 2);
+        assert_eq!((s.as_str(), f), ("─", Color::Yellow), "workable span");
+        let (s, f, _) = sym(9, 2);
+        assert_eq!((s.as_str(), f), ("▏", Color::Yellow), "playhead");
+        let (s, f, _) = sym(58, 2);
+        assert_eq!((s.as_str(), f), ("─", Color::Yellow), "span reaches the far end");
     }
 }
