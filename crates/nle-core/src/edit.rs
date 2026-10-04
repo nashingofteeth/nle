@@ -504,6 +504,38 @@ fn gap_region_at(project: &Project, t: &Seconds) -> Result<(usize, usize, usize,
     Ok((ti, first, last, start, end))
 }
 
+/// Merge two newly-adjacent segments into a seamless whole, if they
+/// form one: gaps always merge; clips merge iff same asset + contiguous
+/// source (prev.asset_out == next.asset_in, exact). The merged clip keeps
+/// the earlier segment's id (mirrors split, which keeps the original id
+/// on the left half).
+fn merge_pair(left: &Segment, right: &Segment) -> Option<Segment> {
+    match (left, right) {
+        (Segment::Gap(a), Segment::Gap(b)) => Some(Segment::Gap(Gap {
+            duration: a.duration + b.duration,
+        })),
+        (Segment::Clip(a), Segment::Clip(b))
+            if a.asset == b.asset && a.asset_out == b.asset_in =>
+        {
+            Some(Segment::Clip(Clip {
+                id: a.id,
+                asset: a.asset,
+                asset_in: a.asset_in,
+                asset_out: b.asset_out,
+            }))
+        }
+        _ => None,
+    }
+}
+
+/// Human note for a merge, appended to the batch description.
+fn merge_note(left: &Segment, right: &Segment) -> String {
+    match (left, right) {
+        (Segment::Clip(a), Segment::Clip(b)) => format!("merged clips #{}+#{}", a.id, b.id),
+        _ => "merged gaps".to_string(),
+    }
+}
+
 /// Build a Replace+Inserts batch that swaps the segment at `index` for a
 /// list of pieces (splits and inserts). The first piece rides the
 /// Replace, the rest are Inserted after it.
@@ -819,24 +851,84 @@ pub fn delete_under(project: &Project, playhead: f64) -> Result<Batch, EditError
     match seg {
         Segment::Clip(c) => {
             let dur = c.duration();
-            Ok(Batch {
-                ops: replace_with_many(
-                    ti,
-                    si,
-                    &Segment::Clip(c),
-                    vec![Segment::Gap(Gap { duration: dur })],
-                ),
-                desc: "delete clip (gap left behind)".to_string(),
-            })
+            let mut ops = replace_with_many(
+                ti,
+                si,
+                &Segment::Clip(c),
+                vec![Segment::Gap(Gap { duration: dur })],
+            );
+            let mut desc = "delete clip (gap left behind)".to_string();
+            // Fuse the new gap with neighboring gaps so deletes never
+            // fragment the track into adjacent gaps.
+            let segs = &project.timeline.tracks[ti].segments;
+            let left_gap = si > 0 && matches!(segs[si - 1], Segment::Gap(_));
+            let right_gap = si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
+            let new_gap = Segment::Gap(Gap { duration: dur });
+            match (left_gap, right_gap) {
+                (true, true) => {
+                    let total = segs[si - 1].duration() + new_gap.duration() + segs[si + 1].duration();
+                    ops.push(EditOp::Replace {
+                        track: ti,
+                        index: si - 1,
+                        before: segs[si - 1].clone(),
+                        after: Segment::Gap(Gap { duration: total }),
+                    });
+                    ops.push(EditOp::Remove { track: ti, index: si, segment: new_gap });
+                    ops.push(EditOp::Remove { track: ti, index: si, segment: segs[si + 1].clone() });
+                    desc += " (merged gaps)";
+                }
+                (true, false) => {
+                    let total = segs[si - 1].duration() + new_gap.duration();
+                    ops.push(EditOp::Replace {
+                        track: ti,
+                        index: si - 1,
+                        before: segs[si - 1].clone(),
+                        after: Segment::Gap(Gap { duration: total }),
+                    });
+                    ops.push(EditOp::Remove { track: ti, index: si, segment: new_gap });
+                    desc += " (merged gaps)";
+                }
+                (false, true) => {
+                    let total = new_gap.duration() + segs[si + 1].duration();
+                    ops.push(EditOp::Replace {
+                        track: ti,
+                        index: si,
+                        before: new_gap,
+                        after: Segment::Gap(Gap { duration: total }),
+                    });
+                    ops.push(EditOp::Remove { track: ti, index: si + 1, segment: segs[si + 1].clone() });
+                    desc += " (merged gaps)";
+                }
+                (false, false) => {}
+            }
+            Ok(Batch { ops, desc })
         }
-        Segment::Gap(g) => Ok(Batch {
-            ops: vec![EditOp::Remove {
+        Segment::Gap(g) => {
+            let mut ops = vec![EditOp::Remove {
                 track: ti,
                 index: si,
                 segment: Segment::Gap(g),
-            }],
-            desc: "delete gap".to_string(),
-        }),
+            }];
+            let mut desc = "delete gap".to_string();
+            // The removal joins si-1 and si+1: merge them when seamless.
+            let segs = &project.timeline.tracks[ti].segments;
+            if si > 0 && si + 1 < segs.len()
+                && let Some(merged) = merge_pair(&segs[si - 1], &segs[si + 1]) {
+                    desc += &format!(" ({})", merge_note(&segs[si - 1], &segs[si + 1]));
+                    ops.push(EditOp::Replace {
+                        track: ti,
+                        index: si - 1,
+                        before: segs[si - 1].clone(),
+                        after: merged,
+                    });
+                    ops.push(EditOp::Remove {
+                        track: ti,
+                        index: si,
+                        segment: segs[si + 1].clone(),
+                    });
+                }
+            Ok(Batch { ops, desc })
+        }
     }
 }
 
@@ -852,17 +944,33 @@ pub fn delete_ripple(project: &Project, playhead: f64) -> Result<Batch, EditErro
         (ti, si)
     };
     let seg = project.timeline.tracks[ti].segments[si].clone();
-    Ok(Batch {
-        ops: vec![EditOp::Remove {
-            track: ti,
-            index: si,
-            segment: seg.clone(),
-        }],
-        desc: match seg {
-            Segment::Clip(_) => "ripple delete".to_string(),
-            Segment::Gap(_) => "delete gap (ripple)".to_string(),
-        },
-    })
+    let mut ops = vec![EditOp::Remove {
+        track: ti,
+        index: si,
+        segment: seg.clone(),
+    }];
+    let mut desc = match seg {
+        Segment::Clip(_) => "ripple delete".to_string(),
+        Segment::Gap(_) => "delete gap (ripple)".to_string(),
+    };
+    // The removal joins si-1 and si+1: merge them when seamless.
+    let segs = &project.timeline.tracks[ti].segments;
+    if si > 0 && si + 1 < segs.len()
+        && let Some(merged) = merge_pair(&segs[si - 1], &segs[si + 1]) {
+            desc += &format!(" ({})", merge_note(&segs[si - 1], &segs[si + 1]));
+            ops.push(EditOp::Replace {
+                track: ti,
+                index: si - 1,
+                before: segs[si - 1].clone(),
+                after: merged,
+            });
+            ops.push(EditOp::Remove {
+                track: ti,
+                index: si,
+                segment: segs[si + 1].clone(),
+            });
+        }
+    Ok(Batch { ops, desc })
 }
 
 /// `p` — gentle paste: place the clipboard at the playhead only when it
@@ -1031,15 +1139,56 @@ pub fn delete_clip_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditE
     match seg {
         Segment::Clip(c) => {
             let dur = c.duration();
-            Ok(Batch {
-                ops: replace_with_many(
-                    ti,
-                    si,
-                    &Segment::Clip(c),
-                    vec![Segment::Gap(Gap { duration: dur })],
-                ),
-                desc: format!("delete clip #{clip_id} (gap left behind)"),
-            })
+            let mut ops = replace_with_many(
+                ti,
+                si,
+                &Segment::Clip(c),
+                vec![Segment::Gap(Gap { duration: dur })],
+            );
+            let mut desc = format!("delete clip #{clip_id} (gap left behind)");
+            // Fuse the new gap with neighboring gaps (dd semantics).
+            let segs = &project.timeline.tracks[ti].segments;
+            let left_gap = si > 0 && matches!(segs[si - 1], Segment::Gap(_));
+            let right_gap = si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
+            let new_gap = Segment::Gap(Gap { duration: dur });
+            match (left_gap, right_gap) {
+                (true, true) => {
+                    let total = segs[si - 1].duration() + new_gap.duration() + segs[si + 1].duration();
+                    ops.push(EditOp::Replace {
+                        track: ti,
+                        index: si - 1,
+                        before: segs[si - 1].clone(),
+                        after: Segment::Gap(Gap { duration: total }),
+                    });
+                    ops.push(EditOp::Remove { track: ti, index: si, segment: new_gap });
+                    ops.push(EditOp::Remove { track: ti, index: si, segment: segs[si + 1].clone() });
+                    desc += " (merged gaps)";
+                }
+                (true, false) => {
+                    let total = segs[si - 1].duration() + new_gap.duration();
+                    ops.push(EditOp::Replace {
+                        track: ti,
+                        index: si - 1,
+                        before: segs[si - 1].clone(),
+                        after: Segment::Gap(Gap { duration: total }),
+                    });
+                    ops.push(EditOp::Remove { track: ti, index: si, segment: new_gap });
+                    desc += " (merged gaps)";
+                }
+                (false, true) => {
+                    let total = new_gap.duration() + segs[si + 1].duration();
+                    ops.push(EditOp::Replace {
+                        track: ti,
+                        index: si,
+                        before: new_gap,
+                        after: Segment::Gap(Gap { duration: total }),
+                    });
+                    ops.push(EditOp::Remove { track: ti, index: si + 1, segment: segs[si + 1].clone() });
+                    desc += " (merged gaps)";
+                }
+                (false, false) => {}
+            }
+            Ok(Batch { ops, desc })
         }
         Segment::Gap(_) => Err(EditError::ClipNotFound(clip_id)),
     }
@@ -1283,14 +1432,18 @@ mod tests {
     fn dd_replaces_clip_with_gap_d_removes() {
         let mut p = fixture();
         let mut h = History::default();
-        // dd the first clip: a gap replaces it — end preserved
+        // dd the first clip: a gap replaces it, fusing with the
+        // neighboring gap into one — end preserved
         let batch = delete_under(&p, 1.0).unwrap();
+        assert!(batch.desc.contains("merged gaps"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         let track = p.timeline.video_track().unwrap();
-        assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        assert_eq!(track.segments.len(), 2);
+        assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
         assert_eq!(p.timeline.end(), Seconds::from_integer(5), "end preserved");
         h.undo(&mut p).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 2]);
+        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3);
 
         // D the clip: removed, timeline shrinks by 2
         let batch = delete_ripple(&p, 1.0).unwrap();
@@ -1320,6 +1473,112 @@ mod tests {
         assert_eq!(p.timeline.end(), Seconds::from_integer(5), "tail gone");
         h.undo(&mut p).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+    }
+
+    #[test]
+    fn d_on_gap_between_matching_clips_rejoins_them() {
+        // [Clip #1 [0..2) src 1..3] [Gap 1] [Clip #5 [3..5) src 3..5]:
+        // contiguous halves of one source range.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            Segment::Clip(Clip {
+                id: 1,
+                asset: a,
+                asset_in: Seconds::from_integer(1),
+                asset_out: Seconds::from_integer(3),
+            }),
+            Segment::Gap(Gap { duration: Seconds::from_integer(1) }),
+            Segment::Clip(Clip {
+                id: 5,
+                asset: a,
+                asset_in: Seconds::from_integer(3),
+                asset_out: Seconds::from_integer(5),
+            }),
+        ];
+        let mut h = History::default();
+        let batch = delete_ripple(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("merged clips #1+#5"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        // one clip, earlier id, whole source range
+        assert_eq!(clip_ids(&p), vec![1]);
+        let c = clip_by_id(&p, 1);
+        assert_eq!(c.asset_in, Seconds::from_integer(1));
+        assert_eq!(c.asset_out, Seconds::from_integer(5));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(4));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 5]);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+    }
+
+    #[test]
+    fn d_on_gap_between_unrelated_clips_leaves_both() {
+        let mut p = fixture(); // clip #1 src 1..3, clip #2 src 0..2: not contiguous
+        let mut h = History::default();
+        let batch = delete_ripple(&p, 2.5).unwrap();
+        assert!(!batch.desc.contains("merged"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(4));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+    }
+
+    #[test]
+    fn dd_clip_between_gaps_merges_into_one() {
+        // [Gap 2] [Clip #1 dur 2] [Gap 3]: dd the clip.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            Segment::Gap(Gap { duration: Seconds::from_integer(2) }),
+            Segment::Clip(Clip {
+                id: 1,
+                asset: a,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+            }),
+            Segment::Gap(Gap { duration: Seconds::from_integer(3) }),
+        ];
+        let mut h = History::default();
+        let batch = delete_under(&p, 3.0).unwrap();
+        assert!(batch.desc.contains("merged gaps"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert_eq!(track.segments.len(), 1);
+        assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(7)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(7), "end preserved");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3);
+        assert_eq!(clip_ids(&p), vec![1]);
+    }
+
+    #[test]
+    fn d_on_clip_between_gaps_merges_the_gaps() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            Segment::Gap(Gap { duration: Seconds::from_integer(1) }),
+            Segment::Clip(Clip {
+                id: 1,
+                asset: a,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+            }),
+            Segment::Gap(Gap { duration: Seconds::from_integer(1) }),
+        ];
+        let mut h = History::default();
+        let batch = delete_ripple(&p, 2.0).unwrap();
+        assert!(batch.desc.contains("merged gaps"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert_eq!(track.segments.len(), 1);
+        assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(2), "shrunk by the clip");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1]);
     }
 
     #[test]
