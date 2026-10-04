@@ -1006,6 +1006,29 @@ fn clamp_extend(st: &ExtendState, t: f64) -> f64 {
     t.clamp(st.lo, st.hi.unwrap_or(f64::INFINITY))
 }
 
+/// Clamp `t` into the extend range AND land it on the project's frame
+/// grid. The material-end bound is off-grid (it derives from the asset's
+/// duration), but the commit ops snap to frames internally — leaving the
+/// playhead unsnapped would park it a sub-frame away from the cut the
+/// commit actually creates (red indicator, "no clip ends here"). Snapping
+/// can step just outside the range, so pull back to the nearest in-range
+/// frame.
+fn snap_extend_target(fps: Option<&Seconds>, st: &ExtendState, t: f64) -> f64 {
+    let clamped = clamp_extend(st, t).max(0.0);
+    let Some(fps) = fps else { return clamped };
+    let f = secs(fps);
+    let mut target = (clamped * f).round() / f;
+    if let Some(hi) = st.hi
+        && target > hi
+    {
+        target = (hi * f).floor() / f;
+    }
+    if target < st.lo {
+        target = (st.lo * f).ceil() / f;
+    }
+    target.max(0.0)
+}
+
 fn armed_desc(armed: &Armed) -> String {
     match armed {
         Armed::Clip { id, head } => format!("{} of clip #{id}", if *head { "head" } else { "tail" }),
@@ -1258,7 +1281,7 @@ fn seek_to_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, t: f64) {
     if !app.guard_loaded() {
         return;
     }
-    let target = clamp_extend(st, t).max(0.0);
+    let target = snap_extend_target(app.project.fps.as_ref(), st, t);
     app.playhead = target;
     player.seek_absolute(target - st.preview_off + 0.004);
 }
@@ -2136,6 +2159,82 @@ mod tests {
         assert_eq!(clamp_extend(&st, 99.0), 9.0);
         let open = ExtendState { hi: None, ..st.clone() };
         assert_eq!(clamp_extend(&open, 1e9), 1e9);
+    }
+
+    // Extending a tail to the asset's end leaves the material bound
+    // off-grid (blue.mp4's 6.006s). seek_to_mode used to park the playhead
+    // there unsnapped while the commit snapped the cut to a frame, so the
+    // playhead read red and `]` reported no clip ending there.
+    #[test]
+    fn extend_to_material_end_lands_on_grid() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let probe = RawProbe {
+            streams: vec![RawStream {
+                index: 0,
+                codec_type: Some("video".into()),
+                codec_name: Some("h264".into()),
+                width: Some(320),
+                height: Some(240),
+                r_frame_rate: Some("30/1".into()),
+                ..Default::default()
+            }],
+            format: RawFormat {
+                format_name: "mp4".into(),
+                duration: Some("6.006".into()),
+                ..Default::default()
+            },
+        };
+        let (a, _) = p.add_asset("/media/blue.mp4".into(), probe);
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            TimelineSegment::Clip(nle_core::Clip {
+                id: 1,
+                asset: a,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(3),
+            }),
+            TimelineSegment::Clip(nle_core::Clip {
+                id: 2,
+                asset: a,
+                asset_in: Seconds::new(1, 2),
+                asset_out: Seconds::new(7, 2),
+            }),
+        ];
+        let (armed, edge) = resolve_armed(&p, 6.0).unwrap();
+        assert_eq!(armed, Armed::Clip { id: 2, head: false });
+        let plan = plan_extend(&p, 6.0, false).unwrap();
+        let hi = plan.hi.unwrap();
+        assert!((hi - 8.506).abs() < 1e-6, "material end off-grid: {hi}");
+        let st = ExtendState {
+            armed: plan.armed,
+            edge_pos: plan.edge_pos,
+            ripple: false,
+            lo: plan.lo,
+            hi: plan.hi,
+            mat: plan.mat,
+            preview_off: edge - 3.5,
+        };
+        // Navigating past the end clamps to the material bound and snaps
+        // to the frame grid, staying within the reachable range.
+        let fps = p.fps;
+        let target = snap_extend_target(fps.as_ref(), &st, hi + 1.0);
+        assert_eq!(target, 8.5);
+        assert!(target <= hi + 1e-9);
+
+        // Commit there: the new cut is exactly at the snapped playhead.
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = target;
+        let kind = plan_commit(&app.project, &armed, edge, target).unwrap();
+        let batch = run_commit_action(&app, &armed, kind, false).unwrap();
+        let mut h = History::default();
+        h.apply(&mut app.project, batch).unwrap();
+        assert!(on_boundary(&app.project, target), "cut recognised on-grid");
+        assert_eq!(
+            armed_on_side(&app.project, target, Side::Left),
+            Some((Armed::Clip { id: 2, head: false }, target)),
+            "] finds the clip ending at the new cut"
+        );
+        assert!(!on_boundary(&app.project, hi), "the raw off-grid bound is not a cut");
     }
 
     #[test]
