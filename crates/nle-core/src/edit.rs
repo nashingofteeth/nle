@@ -23,7 +23,7 @@ use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
 pub const MAX_HISTORY: usize = 100;
 /// Sidecar file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old sidecars start fresh.
-pub const HISTORY_VERSION: u32 = 3;
+pub const HISTORY_VERSION: u32 = 4;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -163,7 +163,9 @@ pub struct History {
 }
 
 impl History {
-    pub fn apply(&mut self, project: &mut Project, batch: Batch) -> Result<(), EditError> {
+    /// Apply `batch` (records `playhead` — the timeline frame the edit was
+    /// made from — so undo/redo can return there).
+    pub fn apply(&mut self, project: &mut Project, batch: Batch, playhead: i64) -> Result<(), EditError> {
         if batch.ops.is_empty() {
             project.validate()?;
             return Ok(());
@@ -183,6 +185,7 @@ impl History {
             before,
             after,
             desc: batch.desc,
+            playhead,
         });
         self.undone.clear();
         if self.done.len() > MAX_HISTORY {
@@ -192,14 +195,14 @@ impl History {
         Ok(())
     }
 
-    pub fn undo(&mut self, project: &mut Project) -> Result<String, EditError> {
+    pub fn undo(&mut self, project: &mut Project) -> Result<UndoOutcome, EditError> {
         let change = self.done.last().ok_or(EditError::NothingToUndo)?.clone();
         let saved = project
             .timeline
             .tracks
             .get(change.track)
             .map(|t| t.segments.clone());
-        let desc = change.desc.clone();
+        let outcome = UndoOutcome { desc: change.desc.clone(), playhead: change.playhead };
         if let Err(e) =
             substitute_topology(project, &change, false).and_then(|_| project.validate().map_err(EditError::from))
         {
@@ -211,17 +214,17 @@ impl History {
         }
         self.done.pop();
         self.undone.push(change);
-        Ok(desc)
+        Ok(outcome)
     }
 
-    pub fn redo(&mut self, project: &mut Project) -> Result<String, EditError> {
+    pub fn redo(&mut self, project: &mut Project) -> Result<UndoOutcome, EditError> {
         let change = self.undone.last().ok_or(EditError::NothingToRedo)?.clone();
         let saved = project
             .timeline
             .tracks
             .get(change.track)
             .map(|t| t.segments.clone());
-        let desc = change.desc.clone();
+        let outcome = UndoOutcome { desc: change.desc.clone(), playhead: change.playhead };
         if let Err(e) =
             substitute_topology(project, &change, true).and_then(|_| project.validate().map_err(EditError::from))
         {
@@ -233,7 +236,7 @@ impl History {
         }
         self.undone.pop();
         self.done.push(change);
-        Ok(desc)
+        Ok(outcome)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -323,7 +326,8 @@ pub enum Atom {
 /// One undoable user action as topologies: the affected track's
 /// segments before and after, in frames. Undo substitutes `before` for
 /// `after`; redo does the reverse. `start_frame` is reserved (whole-track
-/// snapshots start at 0) for future region-scoped entries.
+/// snapshots start at 0) for future region-scoped entries. `playhead` is
+/// the timeline frame the edit was made from, restored on undo/redo.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Change {
     pub track: usize,
@@ -331,6 +335,14 @@ pub struct Change {
     pub before: Vec<Atom>,
     pub after: Vec<Atom>,
     pub desc: String,
+    pub playhead: i64,
+}
+
+/// What an undo/redo restored: the description and the playhead frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UndoOutcome {
+    pub desc: String,
+    pub playhead: i64,
 }
 
 fn history_fps(project: &Project) -> Seconds {
@@ -2131,7 +2143,7 @@ mod tests {
         let mut h = History::default();
         let batch = trim_in(&p, 1.0).unwrap();
         assert!(batch.desc.contains("trim in"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         // [Gap 1 @0..1] [Clip #1 [1..2) src 2..3] [Gap 1 @2..3] [Clip #2]
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
@@ -2151,7 +2163,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = trim_out(&p, 4.0).unwrap(); // mid clip #2 [3..5)
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let c = clip_by_id(&p, 2);
         assert_eq!(c.asset_out, Seconds::from_integer(1), "src 0..1");
         assert_eq!(c.duration(), Seconds::from_integer(1));
@@ -2168,7 +2180,7 @@ mod tests {
         let mut p = fixture(); // [Clip #1] [Gap 1] [Clip #2 [3..5)]
         let mut h = History::default();
         let batch = trim_in(&p, 4.0).unwrap(); // 1s off clip #2's head
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         // no new segment: the existing gap absorbed the trimmed second
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 3);
@@ -2188,7 +2200,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = trim_out(&p, 1.0).unwrap(); // 1s off clip #1's tail
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 3);
         assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
@@ -2204,7 +2216,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = trim_in_ripple(&p, 4.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         // only the clip shortened: the neighboring gap is untouched
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 3);
@@ -2220,7 +2232,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = trim_out_ripple(&p, 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 3);
         assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
@@ -2237,7 +2249,7 @@ mod tests {
         p.timeline.video_track_mut().unwrap().segments.remove(1);
         let mut h = History::default();
         let batch = trim_in(&p, 3.5).unwrap(); // 1.5 off clip #2's head
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 3);
         assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::new(3, 2)));
@@ -2250,7 +2262,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = trim_in_ripple(&p, 1.5).unwrap(); // mid clip #1
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::new(1, 2), "head trimmed 1.5");
         assert_eq!(clip_by_id(&p, 2).duration(), Seconds::from_integer(2), "source kept");
         assert_eq!(p.timeline.end(), Seconds::new(7, 2), "shrunk by 1.5");
@@ -2263,7 +2275,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = trim_out_ripple(&p, 4.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_by_id(&p, 2).duration(), Seconds::from_integer(1));
         assert_eq!(p.timeline.end(), Seconds::from_integer(4), "shrunk by 1");
         h.undo(&mut p).unwrap();
@@ -2275,7 +2287,7 @@ mod tests {
         let mut p = fixture(); // gap [2..3)
         let mut h = History::default();
         let batch = trim_in(&p, 2.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let c = clip_by_id(&p, 1);
         assert_eq!(c.asset_out, Seconds::new(7, 2), "tail grew 0.5 into the gap");
         // the region's remaining half stays a gap
@@ -2297,7 +2309,7 @@ mod tests {
         });
         let mut h = History::default();
         let batch = trim_out(&p, 2.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let c = clip_by_id(&p, 2);
         assert_eq!(c.asset_in, Seconds::new(1, 2), "head grew 0.5 earlier");
         assert_eq!(c.duration(), Seconds::new(5, 2));
@@ -2319,7 +2331,7 @@ mod tests {
         })); // trailing [5..8)
         let mut h = History::default();
         let batch = trim_out(&p, 6.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::new(3, 2)));
         assert_eq!(p.timeline.end(), Seconds::new(13, 2), "6.5");
@@ -2343,7 +2355,7 @@ mod tests {
         ];
         let mut h = History::default();
         let batch = trim_in(&p, 1.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
         assert_eq!(p.timeline.end(), Seconds::new(5, 2), "everything slid left 1.5");
@@ -2356,7 +2368,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = split(&p, 4.0).unwrap(); // mid clip #2 [3..5)
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 2, 3]);
         assert_eq!(clip_by_id(&p, 2).duration(), Seconds::from_integer(1));
         assert_eq!(clip_by_id(&p, 3).duration(), Seconds::from_integer(1));
@@ -2372,7 +2384,7 @@ mod tests {
         // neighboring gap into one — end preserved
         let batch = delete_under(&p, 1.0).unwrap();
         assert!(batch.desc.contains("merged gaps"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 2);
         assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
@@ -2383,7 +2395,7 @@ mod tests {
 
         // D the clip: removed, timeline shrinks by 2
         let batch = delete_ripple(&p, 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![2]);
         // the trailing gap survives (tail size preserved): end = 1(gap) + 2(clip)
         assert_eq!(p.timeline.end(), Seconds::from_integer(3), "shrunk by the clip only");
@@ -2392,7 +2404,7 @@ mod tests {
         // shrinks the timeline by the gap's length
         let mut p2 = fixture();
         let batch = delete_ripple(&p2, 2.5).unwrap(); // the 1s gap
-        h.apply(&mut p2, batch).unwrap();
+        h.apply(&mut p2, batch, 0).unwrap();
         assert_eq!(clip_by_id(&p2, 2).duration(), Seconds::from_integer(2), "spans intact");
         assert_eq!(p2.timeline.end(), Seconds::from_integer(4), "shrunk by 1");
     }
@@ -2405,7 +2417,7 @@ mod tests {
         })); // trailing [5..8)
         let mut h = History::default();
         let batch = delete_under(&p, 6.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(5), "tail gone");
         h.undo(&mut p).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(8));
@@ -2436,7 +2448,7 @@ mod tests {
         let mut h = History::default();
         let batch = delete_ripple(&p, 2.5).unwrap();
         assert!(batch.desc.contains("merged clips #1+#5"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         // one clip, earlier id, whole source range
         assert_eq!(clip_ids(&p), vec![1]);
         let c = clip_by_id(&p, 1);
@@ -2454,7 +2466,7 @@ mod tests {
         let mut h = History::default();
         let batch = delete_ripple(&p, 2.5).unwrap();
         assert!(!batch.desc.contains("merged"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 2]);
         assert_eq!(p.timeline.end(), Seconds::from_integer(4));
         h.undo(&mut p).unwrap();
@@ -2480,7 +2492,7 @@ mod tests {
         let mut h = History::default();
         let batch = delete_under(&p, 3.0).unwrap();
         assert!(batch.desc.contains("merged gaps"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 1);
         assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(7)));
@@ -2508,7 +2520,7 @@ mod tests {
         let mut h = History::default();
         let batch = delete_ripple(&p, 2.0).unwrap();
         assert!(batch.desc.contains("merged gaps"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert_eq!(track.segments.len(), 1);
         assert!(matches!(&track.segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
@@ -2528,7 +2540,7 @@ mod tests {
         // replaced up to the paste, #2 is trimmed at its near edge.
         let batch = paste(&p, &Segment::Clip(snapshot.clone()), 2.5).unwrap();
         assert!(batch.desc.contains("trimmed clip #2"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let segs = p.timeline.video_track().unwrap().segments.clone();
         assert_eq!(clip_ids(&p), vec![1, 3, 2]);
         assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
@@ -2551,7 +2563,7 @@ mod tests {
         };
         let batch = paste(&p, &Segment::Clip(three.clone()), 2.0).unwrap();
         assert!(batch.desc.contains("replaced clip #2"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 3]);
         assert_eq!(p.timeline.end(), Seconds::from_integer(5), "length unchanged");
         h.undo(&mut p).unwrap();
@@ -2566,7 +2578,7 @@ mod tests {
             asset_out: Seconds::new(1, 2),
         };
         let batch = paste(&p, &Segment::Clip(half.clone()), 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 3, 4, 2]);
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1), "head half");
         assert_eq!(
@@ -2581,7 +2593,7 @@ mod tests {
         // Past the end: the void becomes a gap, then the clip; the
         // timeline grows.
         let batch = paste(&p, &Segment::Clip(snapshot.clone()), 6.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
         assert_eq!(clip_ids(&p), vec![1, 2, 3]);
@@ -2604,7 +2616,7 @@ mod tests {
 
         // mid-clip: split + insert between
         let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 3, 4, 2]);
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1), "left half");
         assert_eq!(clip_by_id(&p, 2).duration(), Seconds::from_integer(2), "source kept");
@@ -2615,14 +2627,14 @@ mod tests {
 
         // in a gap: the gap splits, followers slide, timeline grows
         let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 2.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(7), "grew by 2");
         h.undo(&mut p).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
 
         // past the end: the void becomes a gap, then the clip
         let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 7.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
         assert_eq!(p.timeline.end(), Seconds::from_integer(9));
@@ -2633,7 +2645,7 @@ mod tests {
         let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 3.0).unwrap();
         eprintln!("at-cut batch: {batch:?}");
         eprintln!("before: ids={:?} end={}", clip_ids(&p), p.timeline.end());
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         eprintln!("after: ids={:?}", clip_ids(&p));
         assert_eq!(clip_by_id(&p, 2).duration(), Seconds::from_integer(2), "source kept");
         assert_eq!(clip_by_id(&p, 3).duration(), Seconds::from_integer(2), "pasted");
@@ -2648,7 +2660,7 @@ mod tests {
         // followers shift right, timeline grows by 0.5
         let batch = extend_edge(&p, 1, false, 2.5).unwrap();
         assert!(batch.desc.contains("extend tail of clip #1"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let c = clip_by_id(&p, 1);
         assert_eq!(c.asset_out, Seconds::new(7, 2));
         let track = p.timeline.video_track().unwrap();
@@ -2666,7 +2678,7 @@ mod tests {
         p.timeline.video_track_mut().unwrap().segments.pop(); // drop the gap: [#1 [0..2)]
         let mut h = History::default();
         let batch = extend_edge(&p, 1, false, 4.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(5));
         assert_eq!(p.timeline.end(), Seconds::from_integer(4));
         h.undo(&mut p).unwrap();
@@ -2700,7 +2712,7 @@ mod tests {
         let mut h = History::default();
         let batch = extend_edge(&p, 2, true, 2.5).unwrap();
         assert!(batch.desc.contains("extend head of clip #2"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let c = clip_by_id(&p, 2);
         assert_eq!(c.asset_in, Seconds::new(1, 2));
         assert_eq!(p.timeline.end(), Seconds::new(11, 2));
@@ -2730,7 +2742,7 @@ mod tests {
         })); // trailing [5..8)
         let mut h = History::default();
         let batch = extend_gap_end(&p, 10.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::from_integer(5)));
         assert_eq!(p.timeline.end(), Seconds::from_integer(10));
@@ -2748,7 +2760,7 @@ mod tests {
         let mut h = History::default();
         // Ripple (E): grow to [2..4), clip #2 shifts right, timeline grows.
         let batch = extend_gap_tail(&p, 1, 4.0, true).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
         assert_eq!(p.timeline.end(), Seconds::from_integer(6));
@@ -2760,7 +2772,7 @@ mod tests {
         // trimmed, not shifted, and the timeline length is preserved.
         let batch = extend_gap_tail(&p, 1, 4.5, false).unwrap();
         assert!(batch.desc.contains("trimmed clip #2"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert!(matches!(&p.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::new(5, 2)));
         assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::new(3, 2));
         assert_eq!(clip_by_id(&p, 2).duration(), Seconds::new(1, 2));
@@ -2769,7 +2781,7 @@ mod tests {
 
         // Shrink to [2..2.5): clip #2 slides left either way.
         let batch = extend_gap_tail(&p, 1, 2.5, false).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(p.timeline.end(), Seconds::new(9, 2));
         // Not a gap / at/before its start both refuse.
         assert!(matches!(extend_gap_tail(&p, 0, 1.0, false), Err(EditError::NoGap)));
@@ -2794,7 +2806,7 @@ mod tests {
         // Grow the gap's head to 1.0: clip #1 is trimmed to [0..1).
         let batch = extend_gap_head(&p, 1, 1.0, false).unwrap();
         assert!(batch.desc.contains("trimmed clip #1"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let segs = &p.timeline.video_track().unwrap().segments;
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1));
         assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
@@ -2802,7 +2814,7 @@ mod tests {
         h.undo(&mut p).unwrap();
         // Grow to 0.0: clip #1 is absorbed whole.
         let batch = extend_gap_head(&p, 1, 0.0, false).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert!(matches!(&p.timeline.video_track().unwrap().segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
         // Rightward (at/past the start) refuses; a clip is not a gap.
@@ -2817,7 +2829,7 @@ mod tests {
         let mut h2 = History::default();
         let batch = extend_gap_head(&q, 1, 1.0, true).unwrap();
         assert!(batch.desc.contains("insert gap"), "{}", batch.desc);
-        h2.apply(&mut q, batch).unwrap();
+        h2.apply(&mut q, batch, 0).unwrap();
         assert_eq!(clip_by_id(&q, 1).duration(), Seconds::from_integer(2), "clip #1 kept");
         assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
         assert_eq!(q.timeline.end(), Seconds::from_integer(6), "grew by 1");
@@ -2828,7 +2840,7 @@ mod tests {
         let mut h3 = History::default();
         let batch = extend_gap_head(&r, 1, 2.5, false).unwrap();
         assert!(batch.desc.contains("ripple trim gap in"), "{}", batch.desc);
-        h3.apply(&mut r, batch).unwrap();
+        h3.apply(&mut r, batch, 0).unwrap();
         assert_eq!(clip_by_id(&r, 1).duration(), Seconds::from_integer(2), "clip #1 kept");
         assert_eq!(r.timeline.end(), Seconds::new(9, 2));
     }
@@ -2840,7 +2852,7 @@ mod tests {
         let mut h = History::default();
         // In-edge at 2.5: remove 0.5 from the gap; clip #1 is untouched.
         let batch = ripple_gap_in(&p, 2.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(2), "clip #1 intact");
         assert!(matches!(&p.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
         assert_eq!(p.timeline.end(), Seconds::new(9, 2), "shrunk by 0.5");
@@ -2848,7 +2860,7 @@ mod tests {
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
         // Out-edge at 2.5: same net shrink, from the back.
         let batch = ripple_gap_out(&p, 2.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(2));
         assert_eq!(p.timeline.end(), Seconds::new(9, 2));
         // Not on a gap → NoGap; at the gap's start → nothing to remove.
@@ -2877,12 +2889,12 @@ mod tests {
         let mut q = fixture();
         let mut h = History::default();
         let batch = delete_segment(&q, 0, false).unwrap();
-        h.apply(&mut q, batch).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
         assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
         assert!(matches!(&q.timeline.video_track().unwrap().segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
         h.undo(&mut q).unwrap();
         let batch = delete_segment(&q, 0, true).unwrap();
-        h.apply(&mut q, batch).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
         assert_eq!(q.timeline.end(), Seconds::from_integer(3), "shrunk by clip #1");
         assert!(matches!(&q.timeline.video_track().unwrap().segments[0], Segment::Gap(_)));
     }
@@ -2898,7 +2910,7 @@ mod tests {
         let mut h = History::default();
         let batch = paste_ripple(&q, &payload, 1.0).unwrap();
         assert!(batch.desc.contains("gap inserted"), "{}", batch.desc);
-        h.apply(&mut q, batch).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
         assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
         assert_eq!(q.timeline.end(), Seconds::from_integer(6), "grew by the gap");
 
@@ -2906,7 +2918,7 @@ mod tests {
         let mut q = p.clone();
         let mut h = History::default();
         let batch = paste_ripple(&q, &payload, 2.5).unwrap();
-        h.apply(&mut q, batch).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
         assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
         assert_eq!(q.timeline.end(), Seconds::from_integer(6));
 
@@ -2915,7 +2927,7 @@ mod tests {
         let mut q = p.clone();
         let mut h = History::default();
         let batch = paste(&q, &payload, 1.0).unwrap();
-        h.apply(&mut q, batch).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
         assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)), "coalesced");
         assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
 
@@ -2925,7 +2937,7 @@ mod tests {
         let mut q = p.clone();
         let mut h = History::default();
         let batch = paste_ripple(&q, &two, 3.0).unwrap();
-        h.apply(&mut q, batch).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
         let segs = q.timeline.video_track().unwrap().segments.clone();
         assert_eq!(segs.len(), 3, "no extra gap segment");
         assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(3)), "gap extended");
@@ -2936,7 +2948,7 @@ mod tests {
         let mut q = p.clone();
         let mut h = History::default();
         let batch = paste(&q, &two, 3.0).unwrap();
-        h.apply(&mut q, batch).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
         let segs = q.timeline.video_track().unwrap().segments.clone();
         assert_eq!(segs.len(), 2, "clip #2 overwritten, no extra gap");
         assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
@@ -2952,7 +2964,7 @@ mod tests {
         let batch = absorb_outward(&p, 1, false, 4.0).unwrap();
         assert!(batch.desc.contains("absorbed"), "{}", batch.desc);
         assert!(batch.desc.contains("trimmed clip #2"), "{}", batch.desc);
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         // #1 spans [0..4), the gap is gone, #2 keeps [4..5) src 1..2.
         assert_eq!(clip_ids(&p), vec![1, 2]);
         assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(5));
@@ -2984,7 +2996,7 @@ mod tests {
         }
         let mut h = History::default();
         let batch = absorb_outward(&p, 1, false, 6.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 3]);
         assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::new(15, 2));
         assert_eq!(clip_by_id(&p, 3).asset_in, Seconds::new(1, 2));
@@ -3010,7 +3022,7 @@ mod tests {
         });
         let mut h = History::default();
         let batch = absorb_outward(&p, 2, true, 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(0));
         let c1 = clip_by_id(&p, 1);
         assert_eq!(c1.asset_out, Seconds::from_integer(2), "trimmed tail");
@@ -3036,7 +3048,7 @@ mod tests {
         // 4.97 snaps to frame 149 (4.9667), leaving a 0.013s stump:
         // under half a 30fps frame, so #2 is absorbed whole.
         let batch = absorb_outward(&p, 1, false, 4.97).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert_eq!(clip_ids(&p), vec![1]);
         assert_eq!(p.timeline.end(), Seconds::new(149, 30));
         h.undo(&mut p).unwrap();
@@ -3072,16 +3084,16 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = split(&p, 4.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let batch = trim_in(&p, 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         h.undo(&mut p).unwrap(); // done=[split], undone=[trim] (dies on save)
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.history.json");
         h.save(&path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\": 3"), "{text}");
+        assert!(text.contains("\"version\": 4"), "{text}");
         assert!(!text.contains("undone"), "{text}");
         assert!(!text.contains("30/1"), "{text}");
 
@@ -3096,16 +3108,34 @@ mod tests {
     }
 
     #[test]
+    fn history_stores_and_returns_the_playhead_frame() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = split(&p, 4.0).unwrap();
+        h.apply(&mut p, batch, 42).unwrap();
+        // trim the tail of clip #1 at 1.0 (it spans [0..2)).
+        let batch = trim_out(&p, 1.0).unwrap();
+        h.apply(&mut p, batch, 90).unwrap();
+        // undo returns the frame its edit was made from
+        assert_eq!(h.undo(&mut p).unwrap().playhead, 90);
+        assert_eq!(h.undo(&mut p).unwrap().playhead, 42);
+        // redo returns the same frame (re-applies that edit)
+        assert_eq!(h.redo(&mut p).unwrap().playhead, 42);
+        // out-of-range frames can't occur (stored verbatim)
+        assert_eq!(h.undo(&mut p).unwrap().playhead, 42);
+    }
+
+    #[test]
     fn persisted_edits_undo_by_topology_after_reload() {
         let mut p = fixture();
         let mut h = History::default();
         let batch = split(&p, 4.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let batch = trim_in(&p, 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let snapshot = clip_by_id(&p, 1);
         let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 2.5).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.history.json");
         h.save(&path).unwrap();
@@ -3118,8 +3148,8 @@ mod tests {
         let mut h2 = History::load(&path).unwrap();
         h2.undo(&mut p2).unwrap(); // paste_ripple
         h2.undo(&mut p2).unwrap(); // trim_in
-        let desc = h2.undo(&mut p2).unwrap(); // split
-        assert!(desc.contains("split"), "{desc}");
+        let outcome = h2.undo(&mut p2).unwrap(); // split
+        assert!(outcome.desc.contains("split"), "{}", outcome.desc);
         assert_eq!(clip_ids(&p2), vec![1, 2]);
         assert_eq!(clip_by_id(&p2, 2).asset_out, Seconds::from_integer(2));
         assert_eq!(p2.timeline.end(), Seconds::from_integer(5));
@@ -3134,7 +3164,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = split(&p, 4.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.history.json");
         h.save(&path).unwrap();
@@ -3160,7 +3190,7 @@ mod tests {
         let mut p30 = fixture();
         let mut h30 = History::default();
         let batch = trim_in(&p30, 1.0).unwrap();
-        h30.apply(&mut p30, batch).unwrap();
+        h30.apply(&mut p30, batch, 0).unwrap();
         let first_gap = |h: &History| {
             h.state().done[0]
                 .after
@@ -3177,7 +3207,7 @@ mod tests {
         p60.fps = Some(Seconds::new(60, 1));
         let mut h60 = History::default();
         let batch = trim_in(&p60, 1.0).unwrap();
-        h60.apply(&mut p60, batch).unwrap();
+        h60.apply(&mut p60, batch, 0).unwrap();
         assert_eq!(first_gap(&h60), 60);
 
         // Reinterpreting the project at another fps invalidates loudly:
@@ -3199,7 +3229,7 @@ mod tests {
             let end = p.timeline.end();
             let end_f = *end.numer() as f64 / *end.denom() as f64;
             let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), end_f + 10.0).unwrap();
-            h.apply(&mut p, batch).unwrap();
+            h.apply(&mut p, batch, 0).unwrap();
         }
         assert_eq!(h.depth(), MAX_HISTORY);
         // cap survives a save/load round trip
@@ -3214,7 +3244,7 @@ mod tests {
         let end = p.timeline.end();
         let end_f = *end.numer() as f64 / *end.denom() as f64;
         let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), end_f + 10.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         assert!(!h.can_redo());
     }
 
@@ -3255,7 +3285,7 @@ mod tests {
             }],
             desc: "bad edit".into(),
         };
-        assert!(h.apply(&mut p, batch).is_err());
+        assert!(h.apply(&mut p, batch, 0).is_err());
         assert_eq!(p, before, "project untouched");
         assert_eq!(h.depth(), 0, "nothing pushed");
     }
@@ -3265,7 +3295,7 @@ mod tests {
         let mut p = fixture();
         let mut h = History::default();
         let batch = split(&p, 1.0).unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let expected = p.clone();
         // External mutation: undo must refuse and keep its entry.
         p.timeline.video_track_mut().unwrap().segments.pop();

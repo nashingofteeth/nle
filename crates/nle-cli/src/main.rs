@@ -339,7 +339,7 @@ fn cmd_add(
     });
     let mut history = edit::History::default();
     let batch = edit::paste_ripple(&project, &scratch, secs_f64(&append_at))?;
-    history.apply(&mut project, batch)?;
+    history.apply(&mut project, batch, 0)?;
     project.save(project_path)?;
     Ok(())
 }
@@ -352,7 +352,7 @@ fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
     let mut project = Project::load(project_path)?;
     let batch = edit::delete_clip_by_id(&project, id)?;
     let mut history = edit::History::default();
-    history.apply(&mut project, batch)?;
+    history.apply(&mut project, batch, 0)?;
     project.save(project_path)?;
     println!("✓ removed clip #{id}");
     Ok(())

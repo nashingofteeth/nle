@@ -240,7 +240,7 @@ mod tests {
             0.0,
         )
         .unwrap();
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         let batch = edit::paste_ripple(
             &p,
             &Segment::Clip(Clip { id: 0, asset: a1, asset_in: Seconds::from_integer(2), asset_out: Seconds::from_integer(5) }),
@@ -248,7 +248,7 @@ mod tests {
         )
         .unwrap();
         println!("second batch: {batch:?}");
-        h.apply(&mut p, batch).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
         p
     }
 

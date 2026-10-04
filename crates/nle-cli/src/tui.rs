@@ -624,8 +624,9 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             run_edit(app, player, edit::paste_ripple(&app.project, &clipboard, app.playhead));
         }
         KeyCode::Char('u') => match app.history.undo(&mut app.project) {
-            Ok(desc) => {
-                app.set_message(&format!("undo: {desc}"));
+            Ok(outcome) => {
+                app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
+                app.set_message(&format!("undo: {}", outcome.desc));
                 persist_and_rebuild(app, player);
             }
             Err(e) => app.set_message(&e.to_string()),
@@ -638,8 +639,9 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('>') | KeyCode::Char('.') => seek_clip_end(app, player, false),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.history.redo(&mut app.project) {
-                Ok(desc) => {
-                    app.set_message(&format!("redo: {desc}"));
+                Ok(outcome) => {
+                    app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
+                    app.set_message(&format!("redo: {}", outcome.desc));
                     persist_and_rebuild(app, player);
                 }
                 Err(e) => app.set_message(&e.to_string()),
@@ -1147,7 +1149,8 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
     // Keep the playhead on the frame it was showing, not the same
     // timecode (a trim can move material under it).
     let anchor = edit_anchor(&app.project, app.playhead);
-    match app.history.apply(&mut app.project, batch) {
+    let at_frame = frame_of(app.project.fps.as_ref(), app.playhead);
+    match app.history.apply(&mut app.project, batch, at_frame) {
         Ok(()) => {
             reanchor_playhead(app, anchor);
             app.set_message(&desc);
@@ -1232,6 +1235,22 @@ fn clamp_extend(st: &ExtendState, t: f64) -> f64 {
 /// commit actually creates (red indicator, "no clip ends here"). Snapping
 /// can step just outside the range, so pull back to the nearest in-range
 /// frame.
+/// Timeline frame index for a position (the grid `snap`/history use).
+fn frame_of(fps: Option<&Seconds>, t: f64) -> i64 {
+    match fps {
+        Some(f) => (t * secs(f)).round() as i64,
+        None => t.round() as i64,
+    }
+}
+
+/// A history frame index back to timeline seconds.
+fn frame_to_secs(fps: Option<&Seconds>, frame: i64) -> f64 {
+    match fps {
+        Some(f) => frame as f64 / secs(f),
+        None => frame as f64,
+    }
+}
+
 fn snap_extend_target(fps: Option<&Seconds>, st: &ExtendState, t: f64) -> f64 {
     // No floor at 0: a timeline-start segment can extend left of it
     // (material prepended), so `st.lo` may be negative.
@@ -2463,7 +2482,7 @@ mod tests {
             app.playhead = -1.0;
             let batch = run_commit_action(&app, &head1, CommitKind::AbsorbHead, ripple).unwrap();
             let mut h = History::default();
-            h.apply(&mut app.project, batch).unwrap();
+            h.apply(&mut app.project, batch, 0).unwrap();
             let c1 = clip_by_id(&app.project, 1);
             assert_eq!(c1.asset_in, Seconds::from_integer(0), "head material used");
             assert_eq!(c1.duration(), Seconds::from_integer(4));
@@ -2514,7 +2533,7 @@ mod tests {
             app.playhead = -1.0;
             let batch = run_commit_action(&app, &head0, CommitKind::GapHead, ripple).unwrap();
             let mut h = History::default();
-            h.apply(&mut app.project, batch).unwrap();
+            h.apply(&mut app.project, batch, 0).unwrap();
             let segs = app.project.timeline.video_track().unwrap().segments.clone();
             assert!(matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(3)));
             assert_eq!(app.project.timeline.end(), Seconds::from_integer(10), "grew at the front");
@@ -2706,7 +2725,7 @@ mod tests {
         let kind = plan_commit(&app.project, &armed, edge, target).unwrap();
         let batch = run_commit_action(&app, &armed, kind, false).unwrap();
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         assert!(on_boundary(&app.project, target), "cut recognised on-grid");
         assert_eq!(
             armed_on_side(&app.project, target, Side::Left),
@@ -2829,7 +2848,7 @@ mod tests {
         let batch = run_commit_action(&app, &Armed::GapHead { index: 1 }, CommitKind::GapHead, false).unwrap();
         assert!(batch.desc.contains("trimmed clip #1"), "{}", batch.desc);
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
         assert!(matches!(&segs[0], TimelineSegment::Clip(c) if c.id == 1));
         assert_eq!(clip_by_id(&app.project, 1).duration(), Seconds::from_integer(1));
@@ -2841,7 +2860,7 @@ mod tests {
         app.playhead = 0.0;
         let batch = run_commit_action(&app, &Armed::GapHead { index: 1 }, CommitKind::GapHead, false).unwrap();
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
         assert!(matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(5)));
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(7));
@@ -2852,7 +2871,7 @@ mod tests {
         app.playhead = 7.0;
         let batch = run_commit_action(&app, &armed, CommitKind::GapTail, true).unwrap();
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
         assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(9));
@@ -2864,7 +2883,7 @@ mod tests {
         let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
         assert!(batch.desc.contains("absorbed"), "{}", batch.desc);
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
         assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(7), "length held");
@@ -2875,7 +2894,7 @@ mod tests {
         app.playhead = 4.0;
         let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
         assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(1)));
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
@@ -2977,7 +2996,7 @@ mod tests {
             }))
         );
         let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
-        app.history.apply(&mut app.project, batch).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
         reanchor_playhead(&mut app, anchor);
         assert_eq!(app.playhead, 0.0, "moved back by the trimmed second");
 
@@ -2987,7 +3006,7 @@ mod tests {
         app.playhead = 1.0;
         let anchor = edit_anchor(&app.project, app.playhead);
         let batch = edit::trim_in(&app.project, app.playhead).unwrap();
-        app.history.apply(&mut app.project, batch).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
         reanchor_playhead(&mut app, anchor);
         assert_eq!(app.playhead, 1.0, "frame unchanged");
 
@@ -2996,7 +3015,7 @@ mod tests {
         app.playhead = 1.0;
         let anchor = edit_anchor(&app.project, app.playhead);
         let batch = edit::trim_out(&app.project, app.playhead).unwrap();
-        app.history.apply(&mut app.project, batch).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
         reanchor_playhead(&mut app, anchor);
         assert_eq!(app.playhead, 1.0, "frame unchanged");
 
@@ -3006,7 +3025,7 @@ mod tests {
         app.playhead = 1.0;
         let anchor = edit_anchor(&app.project, app.playhead);
         let batch = edit::delete_under(&app.project, app.playhead).unwrap();
-        app.history.apply(&mut app.project, batch).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
         reanchor_playhead(&mut app, anchor);
         assert_eq!(app.playhead, 1.0, "same position in the resulting gap");
 
@@ -3038,7 +3057,7 @@ mod tests {
         let anchor = clip_anchor(&app.project, app.playhead).unwrap();
         assert_eq!(anchor.start, 2.0);
         let batch = edit::delete_ripple(&app.project, app.playhead).unwrap();
-        app.history.apply(&mut app.project, batch).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
         reanchor_playhead(&mut app, Some(Anchor::Media(anchor)));
         assert_eq!(app.playhead, 2.0, "cut between the neighbours");
 
@@ -3049,7 +3068,7 @@ mod tests {
         let anchor = edit_anchor(&app.project, app.playhead);
         assert_eq!(anchor, Some(Anchor::Gap(GapAnchor { start: 3.0 })));
         let batch = edit::delete_under(&app.project, app.playhead).unwrap();
-        app.history.apply(&mut app.project, batch).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
         reanchor_playhead(&mut app, anchor);
         assert_eq!(app.playhead, 3.0, "cut between the clips");
 
@@ -3057,6 +3076,22 @@ mod tests {
         let app = App::new(asset_project(), PathBuf::from("t.json"));
         assert_eq!(clip_anchor(&app.project, 4.0), None);
         assert!(matches!(edit_anchor(&app.project, 4.0), Some(Anchor::Gap(_))));
+    }
+
+    // Undo restores the playhead to the frame the edit was made from.
+    #[test]
+    fn undo_restores_the_playhead() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let fps = app.project.fps;
+        app.playhead = 1.0;
+        let at_frame = frame_of(fps.as_ref(), app.playhead);
+        let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
+        app.history.apply(&mut app.project, batch, at_frame).unwrap();
+        // move away, as the user would after editing
+        app.playhead = 6.0;
+        let outcome = app.history.undo(&mut app.project).unwrap();
+        app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
+        assert_eq!(app.playhead, 1.0, "playhead returns to where the edit was");
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {
@@ -3094,7 +3129,7 @@ mod tests {
         app.playhead = 5.0;
         let batch = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, false).unwrap();
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         assert_eq!(clip_by_id(&app.project, 1).asset_out, Seconds::from_integer(6));
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(7));
         assert_eq!(
@@ -3127,7 +3162,7 @@ mod tests {
         app.playhead = 3.0;
         let batch = run_commit_action(&app, &head2, CommitKind::AbsorbHead, false).unwrap();
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         assert_eq!(clip_by_id(&app.project, 2).asset_in, Seconds::from_integer(0));
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
         assert_eq!(app.project.timeline.video_track().unwrap().segments.len(), 2);
@@ -3258,7 +3293,7 @@ mod tests {
         app.playhead = 7.0;
         let batch = run_commit_action(&app, &head2, CommitKind::Delete, false).unwrap();
         let mut h = History::default();
-        h.apply(&mut app.project, batch).unwrap();
+        h.apply(&mut app.project, batch, 0).unwrap();
         let ids: Vec<u32> = app
             .project
             .timeline
@@ -3279,7 +3314,7 @@ mod tests {
         app2.playhead = 7.0;
         let batch = run_commit_action(&app2, &head2, CommitKind::Delete, true).unwrap();
         let mut h2 = History::default();
-        h2.apply(&mut app2.project, batch).unwrap();
+        h2.apply(&mut app2.project, batch, 0).unwrap();
         let end = app2.project.timeline.end();
         assert!(end < Seconds::from_integer(7), "shrank: {end}");
     }
