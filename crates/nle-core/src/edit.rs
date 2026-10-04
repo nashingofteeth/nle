@@ -977,13 +977,25 @@ pub fn delete_under(project: &Project, playhead: f64) -> Result<Batch, EditError
 /// Followers slide left; the timeline shrinks by its duration.
 pub fn delete_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let (ti, si) = {
-        let ti = video_track_index(project)?;
-        let si = project.timeline.tracks[ti]
-            .index_at(t)
-            .ok_or(EditError::NoSegment)?;
-        (ti, si)
-    };
+    let ti = video_track_index(project)?;
+    let si = project.timeline.tracks[ti]
+        .index_at(t)
+        .ok_or(EditError::NoSegment)?;
+    delete_segment_ripple(project, ti, si)
+}
+
+/// Ripple-delete clip `clip_id` by id. Extend mode commits at a consumed
+/// edge against the armed clip, not whatever the playhead's boundary
+/// resolves to.
+pub fn delete_clip_ripple_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
+    let ti = video_track_index(project)?;
+    let si = project.timeline.tracks[ti]
+        .clip_index(clip_id)
+        .ok_or(EditError::ClipNotFound(clip_id))?;
+    delete_segment_ripple(project, ti, si)
+}
+
+fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batch, EditError> {
     let seg = project.timeline.tracks[ti].segments[si].clone();
     let mut ops = vec![EditOp::Remove {
         track: ti,

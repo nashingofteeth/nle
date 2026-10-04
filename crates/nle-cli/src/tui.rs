@@ -1121,10 +1121,14 @@ fn run_commit_action(app: &App, armed: &Armed, kind: CommitKind, ripple: bool) -
         }
         CommitKind::GrowTailGap => edit::extend_gap_end(project, ph),
         CommitKind::Delete => {
+            // The playhead reached the armed clip's opposite end, so the
+            // clip is fully consumed: delete IT, not whatever segment the
+            // boundary resolves to (that would hit the follower, or error
+            // at the track end).
             if ripple {
-                edit::delete_ripple(project, ph)
+                edit::delete_clip_ripple_by_id(project, id)
             } else {
-                edit::delete_under(project, ph)
+                edit::delete_clip_by_id(project, id)
             }
         }
         CommitKind::Noop => Err(EditError::NothingToTrim(format!("edge already at {}", ph))),
@@ -2088,16 +2092,69 @@ mod tests {
         assert!(b.desc.contains("trim gap in"), "{}", b.desc);
         let b = run_commit_action(&app, &tail1, CommitKind::GrowTailIntoGap, true).unwrap();
         assert!(b.desc.contains("extend tail"), "{}", b.desc);
+        // Opposite-end commit deletes the ARMED clip (tail1 = #1), not the
+        // segment the playhead's boundary resolves to.
         let b = run_commit_action(&app, &tail1, CommitKind::Delete, true).unwrap();
-        assert!(b.desc.contains("ripple"), "{}", b.desc);
+        assert!(b.desc.contains("ripple delete"), "{}", b.desc);
         let b = run_commit_action(&app, &tail1, CommitKind::Delete, false).unwrap();
-        assert_eq!(b.desc, "delete gap");
+        assert!(b.desc.starts_with("delete clip #1"), "{}", b.desc);
         // Absorb splits by flag: e replaces covered content, E pushes it.
         app.playhead = 6.0; // past the gap, inside clip #2
         let b = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, false).unwrap();
         assert!(b.desc.contains("absorbed"), "{}", b.desc);
         let b = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, true).unwrap();
         assert!(b.desc.contains("extend tail"), "{}", b.desc);
+    }
+
+    #[test]
+    fn commit_at_opposite_end_deletes_armed_clip() {
+        // [C1 [0..3)] [gap [3..5)] [C2 [5..7)] [C3 [7..9)]: arm the head of
+        // #2 at 5.0, walk to its far end (7.0), commit. #2 is consumed, so
+        // #2 goes and the follower #3 survives — not the other way round.
+        let mut p = asset_project();
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(TimelineSegment::Clip(nle_core::Clip {
+                id: 3,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+            }));
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        let head2 = Armed::Clip { id: 2, head: true };
+        assert_eq!(
+            plan_commit(&app.project, &head2, 5.0, 7.0),
+            Ok(CommitKind::Delete)
+        );
+        app.playhead = 7.0;
+        let batch = run_commit_action(&app, &head2, CommitKind::Delete, false).unwrap();
+        let mut h = History::default();
+        h.apply(&mut app.project, batch).unwrap();
+        let ids: Vec<u32> = app
+            .project
+            .timeline
+            .video_track()
+            .unwrap()
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                TimelineSegment::Clip(c) => Some(c.id),
+                TimelineSegment::Gap(_) => None,
+            })
+            .collect();
+        assert_eq!(ids, vec![1, 3], "armed #2 removed, follower #3 kept");
+        assert_eq!(app.project.timeline.end(), Seconds::from_integer(9));
+
+        // Ripple flag closes the removed clip instead of leaving a gap.
+        let mut app2 = App::new(asset_project(), PathBuf::from("t.json"));
+        app2.playhead = 7.0;
+        let batch = run_commit_action(&app2, &head2, CommitKind::Delete, true).unwrap();
+        let mut h2 = History::default();
+        h2.apply(&mut app2.project, batch).unwrap();
+        let end = app2.project.timeline.end();
+        assert!(end < Seconds::from_integer(7), "shrank: {end}");
     }
 
     fn seg_clip(id: u32, dur: i64) -> TimelineSegment {
