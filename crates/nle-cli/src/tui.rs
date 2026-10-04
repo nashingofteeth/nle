@@ -990,7 +990,16 @@ fn seek_clip_end(app: &mut App, player: &MpvPlayer, head: bool) {
 
 /// The clip and source frame under the playhead — the media anchor an
 /// edit should preserve. `None` over a gap (or past the end).
-fn clip_anchor(project: &Project, playhead: f64) -> Option<(u32, Seconds)> {
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MediaAnchor {
+    id: u32,
+    source: Seconds,
+    /// The clip's timeline start before the edit — where a delete leaves
+    /// the seam between its neighbours.
+    start: f64,
+}
+
+fn clip_anchor(project: &Project, playhead: f64) -> Option<MediaAnchor> {
     let track = project.timeline.video_track()?;
     let t = grid_time(project, playhead);
     let idx = track.index_at(t)?;
@@ -998,7 +1007,11 @@ fn clip_anchor(project: &Project, playhead: f64) -> Option<(u32, Seconds)> {
         TimelineSegment::Clip(c) => c,
         TimelineSegment::Gap(_) => return None,
     };
-    Some((c.id, c.asset_in + (t - track.start_of(idx))))
+    Some(MediaAnchor {
+        id: c.id,
+        source: c.asset_in + (t - track.start_of(idx)),
+        start: secs(&track.start_of(idx)),
+    })
 }
 
 /// The timeline position of `source` in clip `id`, clamped to the clip's
@@ -1026,14 +1039,12 @@ fn resolve_anchor(project: &Project, id: u32, source: Seconds) -> Option<f64> {
 
 /// After an edit, put the playhead back on the media frame it was on
 /// (`anchor`), so a trim that moves material under it keeps the same
-/// frame rather than the same timecode. No-op over a gap or a deleted
-/// clip.
-fn reanchor_playhead(app: &mut App, anchor: Option<(u32, Seconds)>) {
-    if let Some((id, source)) = anchor
-        && let Some(pos) = resolve_anchor(&app.project, id, source)
-    {
-        app.playhead = pos;
-    }
+/// frame rather than the same timecode. If the clip is gone (a delete)
+/// the playhead lands at its old start — the cut between its neighbours.
+fn reanchor_playhead(app: &mut App, anchor: Option<MediaAnchor>) {
+    let Some(a) = anchor else { return };
+    let pos = resolve_anchor(&app.project, a.id, a.source).unwrap_or(a.start);
+    app.playhead = pos.clamp(0.0, app.total());
 }
 
 /// The playhead's position on the project's frame grid, as Seconds.
@@ -2909,7 +2920,14 @@ mod tests {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 1.0; // C1 [0..3) src 1..4 → source 2
         let anchor = clip_anchor(&app.project, app.playhead);
-        assert_eq!(anchor, Some((1, Seconds::from_integer(2))));
+        assert_eq!(
+            anchor,
+            Some(MediaAnchor {
+                id: 1,
+                source: Seconds::from_integer(2),
+                start: 0.0
+            })
+        );
         let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
         app.history.apply(&mut app.project, batch).unwrap();
         reanchor_playhead(&mut app, anchor);
@@ -2935,14 +2953,46 @@ mod tests {
         assert_eq!(app.playhead, 1.0, "frame unchanged");
 
         // Delete of the clip under the playhead: the anchor is gone, so
-        // the playhead falls back to its timecode.
+        // the playhead lands at the deleted clip's old start.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 1.0;
         let anchor = clip_anchor(&app.project, app.playhead);
         let batch = edit::delete_under(&app.project, app.playhead).unwrap();
         app.history.apply(&mut app.project, batch).unwrap();
         reanchor_playhead(&mut app, anchor);
-        assert_eq!(app.playhead, 1.0, "fallback when the clip is gone");
+        assert_eq!(app.playhead, 0.0, "falls back to the old start");
+
+        // Ripple delete between two clips: the playhead lands on the cut
+        // the neighbours now share.
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            TimelineSegment::Clip(nle_core::Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+            }),
+            TimelineSegment::Clip(nle_core::Clip {
+                id: 2,
+                asset: 1,
+                asset_in: Seconds::from_integer(4),
+                asset_out: Seconds::from_integer(6),
+            }),
+            TimelineSegment::Clip(nle_core::Clip {
+                id: 3,
+                asset: 1,
+                asset_in: Seconds::from_integer(8),
+                asset_out: Seconds::from_integer(10),
+            }),
+        ];
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 3.0; // inside clip #2 [2..4)
+        let anchor = clip_anchor(&app.project, app.playhead).unwrap();
+        assert_eq!(anchor.start, 2.0);
+        let batch = edit::delete_ripple(&app.project, app.playhead).unwrap();
+        app.history.apply(&mut app.project, batch).unwrap();
+        reanchor_playhead(&mut app, Some(anchor));
+        assert_eq!(app.playhead, 2.0, "cut between the neighbours");
 
         // Over a gap there's no anchor.
         let app = App::new(asset_project(), PathBuf::from("t.json"));
