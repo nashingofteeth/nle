@@ -598,6 +598,22 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
             before: Segment::Clip(c.clone()),
             after: Segment::Clip(after),
         }];
+        // The trimmed head becomes gap: grow the neighboring gap when
+        // there is one instead of fragmenting the track with an adjacent
+        // second gap.
+        if si > 0
+            && let Segment::Gap(g) = &track.segments[si - 1] {
+                ops.push(EditOp::Replace {
+                    track: ti,
+                    index: si - 1,
+                    before: Segment::Gap(g.clone()),
+                    after: Segment::Gap(Gap { duration: g.duration + delta }),
+                });
+                return Ok(Batch {
+                    ops,
+                    desc: format!("trim in to {}", format_seconds(&t)),
+                });
+            }
         if let Some(g) = gap_piece(delta) {
             ops.push(EditOp::Insert { track: ti, index: si, segment: g });
         }
@@ -702,13 +718,29 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
             asset_out: c.asset_in + new_len,
         };
         at_least_a_frame(project, &after.duration())?;
+        let trimmed = seg_start + c.duration() - t;
         let mut ops = vec![EditOp::Replace {
             track: ti,
             index: si,
             before: Segment::Clip(c.clone()),
             after: Segment::Clip(after),
         }];
-        if let Some(g) = gap_piece(seg_start + c.duration() - t) {
+        // The trimmed tail becomes gap: grow the neighboring gap when
+        // there is one instead of fragmenting the track.
+        if si + 1 < track.segments.len()
+            && let Segment::Gap(g) = &track.segments[si + 1] {
+                ops.push(EditOp::Replace {
+                    track: ti,
+                    index: si + 1,
+                    before: Segment::Gap(g.clone()),
+                    after: Segment::Gap(Gap { duration: g.duration + trimmed }),
+                });
+                return Ok(Batch {
+                    ops,
+                    desc: format!("trim out to {}", format_seconds(&t)),
+                });
+            }
+        if let Some(g) = gap_piece(trimmed) {
             ops.push(EditOp::Insert { track: ti, index: si + 1, segment: g });
         }
         return Ok(Batch {
@@ -781,10 +813,16 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
 /// followers slide left (no gap is left behind). On a gap, identical to
 /// `i` (gap trims are inherently ripple).
 pub fn trim_in_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    // Ripple strips the leftover-gap ops, but only when the playhead is
+    // on a clip (gap-region trims are inherently ripple and keep theirs).
+    let on_clip = clip_at(project, &snap(project, playhead)?).is_ok();
     match trim_in(project, playhead) {
-        // strip the gap-insert op from the clip case to make it ripple
         Ok(mut batch) => {
-            batch.ops.retain(|op| !matches!(op, EditOp::Insert { segment: Segment::Gap(_), .. }));
+            if on_clip {
+                batch.ops.retain(|op| !matches!(op,
+                    EditOp::Insert { segment: Segment::Gap(_), .. }
+                    | EditOp::Replace { before: Segment::Gap(_), .. }));
+            }
             Ok(batch)
         }
         Err(e) => Err(e),
@@ -794,11 +832,16 @@ pub fn trim_in_ripple(project: &Project, playhead: f64) -> Result<Batch, EditErr
 /// `O` — ripple trim-out: the clip's tail is cut at the playhead and the
 /// followers slide left (no gap left behind). On a gap, identical to `o`.
 pub fn trim_out_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let on_clip = clip_at(project, &snap(project, playhead)?).is_ok();
     match trim_out(project, playhead) {
         Ok(mut batch) => {
-            batch
-                .ops
-                .retain(|op| !matches!(op, EditOp::Insert { segment: Segment::Gap(_), .. }));
+            if on_clip {
+                batch
+                    .ops
+                    .retain(|op| !matches!(op,
+                        EditOp::Insert { segment: Segment::Gap(_), .. }
+                        | EditOp::Replace { before: Segment::Gap(_), .. }));
+            }
             Ok(batch)
         }
         Err(e) => Err(e),
@@ -1307,6 +1350,88 @@ mod tests {
         assert_eq!(p.timeline.end(), Seconds::from_integer(5), "end preserved");
         h.undo(&mut p).unwrap();
         assert_eq!(clip_by_id(&p, 2).asset_out, Seconds::from_integer(2));
+    }
+
+    #[test]
+    fn i_against_gap_grows_it_instead_of_splitting() {
+        let mut p = fixture(); // [Clip #1] [Gap 1] [Clip #2 [3..5)]
+        let mut h = History::default();
+        let batch = trim_in(&p, 4.0).unwrap(); // 1s off clip #2's head
+        h.apply(&mut p, batch).unwrap();
+        // no new segment: the existing gap absorbed the trimmed second
+        let track = p.timeline.video_track().unwrap();
+        assert_eq!(track.segments.len(), 3);
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        let c = clip_by_id(&p, 2);
+        assert_eq!(c.asset_in, Seconds::from_integer(1));
+        assert_eq!(c.duration(), Seconds::from_integer(1));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "end preserved");
+        h.undo(&mut p).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(0));
+    }
+
+    #[test]
+    fn o_against_gap_grows_it_instead_of_splitting() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = trim_out(&p, 1.0).unwrap(); // 1s off clip #1's tail
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert_eq!(track.segments.len(), 3);
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        let c = clip_by_id(&p, 1);
+        assert_eq!(c.asset_out, Seconds::from_integer(2));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "end preserved");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(3));
+    }
+
+    #[test]
+    fn i_ripple_against_gap_leaves_no_gap_trace() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = trim_in_ripple(&p, 4.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        // only the clip shortened: the neighboring gap is untouched
+        let track = p.timeline.video_track().unwrap();
+        assert_eq!(track.segments.len(), 3);
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert_eq!(clip_by_id(&p, 2).duration(), Seconds::from_integer(1));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(4), "shrunk by 1");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+    }
+
+    #[test]
+    fn o_ripple_against_gap_leaves_no_gap_trace() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = trim_out_ripple(&p, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert_eq!(track.segments.len(), 3);
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(4), "shrunk by 1");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+    }
+
+    #[test]
+    fn i_against_clip_still_inserts_a_gap() {
+        // [Clip #1] [Clip #2], no gap between: trimming still splits.
+        let mut p = fixture();
+        p.timeline.video_track_mut().unwrap().segments.remove(1);
+        let mut h = History::default();
+        let batch = trim_in(&p, 3.5).unwrap(); // 1.5 off clip #2's head
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert_eq!(track.segments.len(), 3);
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::new(3, 2)));
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 2);
     }
 
     #[test]
