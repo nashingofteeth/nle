@@ -1439,10 +1439,20 @@ pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditErr
 }
 
 /// Move a gap's tail (right edge) to `playhead`, for ANY gap — not just
-/// the trailing one. Growing inserts empty space and shifts the following
-/// segments right; shrinking pulls them left. Gaps have no source
-/// material, so there is no upper bound.
-pub fn extend_gap_tail(project: &Project, index: usize, playhead: f64) -> Result<Batch, EditError> {
+/// the trailing one.
+///
+/// Shrinking always just reduces the gap (followers follow the prefix
+/// sum). Growing splits by `ripple`: `E` (`ripple`) inserts empty space
+/// and shifts the following segments right; `e` (replace) overwrites the
+/// covered span — gaps merge away and clips are trimmed or removed, the
+/// timeline length staying put. Gaps have no source material, so there is
+/// no upper bound.
+pub fn extend_gap_tail(
+    project: &Project,
+    index: usize,
+    playhead: f64,
+    ripple: bool,
+) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
@@ -1454,15 +1464,144 @@ pub fn extend_gap_tail(project: &Project, index: usize, playhead: f64) -> Result
     if t <= gap_start {
         return Err(EditError::NothingToTrim(format_seconds(&t)));
     }
-    Ok(Batch {
-        ops: vec![EditOp::Replace {
+    let gap_end = gap_start + g.duration;
+
+    // Shrinking, or ripple-growth: just resize the gap. Followers (prefix
+    // sum) shift on their own.
+    if t <= gap_end || ripple {
+        return Ok(Batch {
+            ops: vec![EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Gap(g),
+                after: Segment::Gap(Gap { duration: t - gap_start }),
+            }],
+            desc: format!("extend gap to {}", format_seconds(&t)),
+        });
+    }
+
+    // Replace-growth: the gap overwrites everything up to `t`. Split the
+    // duration, then remove wholly-covered followers (descending) and
+    // reconcile a straddled one — the same shape as absorb_outward, but
+    // the grower is a gap with no material bound.
+    let mut ops = vec![EditOp::Replace {
+        track: ti,
+        index,
+        before: Segment::Gap(g),
+        after: Segment::Gap(Gap { duration: t - gap_start }),
+    }];
+    let mut absorbed: Vec<String> = Vec::new();
+    let mut covered: Vec<usize> = Vec::new();
+    let mut straddler: Option<usize> = None;
+    let mut acc = gap_end;
+    for k in index + 1..track.segments.len() {
+        let dur = track.segments[k].duration();
+        if acc + dur <= t {
+            covered.push(k);
+        } else if acc < t && t < acc + dur {
+            straddler = Some(k);
+            break;
+        } else {
+            break;
+        }
+        acc += dur;
+    }
+    for k in covered.iter().rev() {
+        absorbed.push(segment_note(&track.segments[*k]));
+        ops.push(EditOp::Remove {
             track: ti,
-            index,
-            before: Segment::Gap(g),
-            after: Segment::Gap(Gap { duration: t - gap_start }),
-        }],
-        desc: format!("extend gap to {}", format_seconds(&t)),
-    })
+            index: *k,
+            segment: track.segments[*k].clone(),
+        });
+    }
+    if let Some(m) = straddler {
+        // All covered followers sat between `index` and `m`, so it lands
+        // right after the gap.
+        let seg = track.segments[m].clone();
+        trim_or_absorb_head(
+            project,
+            ti,
+            Straddle { index: index + 1, start: track.start_of(m), seg },
+            t,
+            &mut ops,
+            &mut absorbed,
+        )?;
+    }
+    let mut desc = format!("extend gap to {}", format_seconds(&t));
+    if !absorbed.is_empty() {
+        desc += &format!(" (absorbed {})", absorbed.join(", "));
+    }
+    Ok(Batch { ops, desc })
+}
+
+/// Move a gap's HEAD (left edge) leftward to `playhead`, growing it over
+/// the preceding segment(s) — the mirror of `extend_gap_tail`. Only
+/// leftward growth is meaningful: a gap's start is the prefix sum of what
+/// precedes it, so moving it left can only be done by shrinking/removing
+/// predecessors (there is nothing to ripple — the prefix is anchored at
+/// 0). The gap overwrites them: covered gaps merge, a straddled clip is
+/// trimmed at its tail.
+pub fn extend_gap_head(project: &Project, index: usize, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let g = match track.segments.get(index) {
+        Some(Segment::Gap(g)) => g.clone(),
+        _ => return Err(EditError::NoGap),
+    };
+    let gap_start = track.start_of(index);
+    let gap_end = gap_start + g.duration;
+    if t >= gap_start {
+        return Err(EditError::NothingToTrim(format_seconds(&t)));
+    }
+    let mut ops = vec![EditOp::Replace {
+        track: ti,
+        index,
+        before: Segment::Gap(g),
+        after: Segment::Gap(Gap { duration: gap_end - t }),
+    }];
+    let mut absorbed: Vec<String> = Vec::new();
+    let mut covered: Vec<usize> = Vec::new();
+    let mut straddler: Option<usize> = None;
+    let mut acc = gap_start;
+    for k in (0..index).rev() {
+        let dur = track.segments[k].duration();
+        let ks = acc - dur;
+        if ks >= t {
+            covered.push(k);
+        } else if ks < t && t < acc {
+            straddler = Some(k);
+            break;
+        } else {
+            break;
+        }
+        acc = ks;
+    }
+    // `covered` is already descending, so removals keep lower indices valid.
+    for k in &covered {
+        absorbed.push(segment_note(&track.segments[*k]));
+        ops.push(EditOp::Remove {
+            track: ti,
+            index: *k,
+            segment: track.segments[*k].clone(),
+        });
+    }
+    if let Some(m) = straddler {
+        let seg = track.segments[m].clone();
+        trim_or_absorb_tail(
+            project,
+            ti,
+            Straddle { index: m, start: track.start_of(m), seg },
+            t,
+            &mut ops,
+            &mut absorbed,
+        )?;
+    }
+    let mut desc = format!("extend gap head to {}", format_seconds(&t));
+    if !absorbed.is_empty() {
+        desc += &format!(" (absorbed {})", absorbed.join(", "));
+    }
+    Ok(Batch { ops, desc })
 }
 
 /// Extend a clip edge outward past neighboring segments (`e`): everything
@@ -2420,8 +2559,8 @@ mod tests {
     fn extend_gap_tail_moves_any_gap() {
         let mut p = fixture(); // [Clip #1 [0..2)] [Gap 1 @2..3] [Clip #2 [3..5)]
         let mut h = History::default();
-        // Grow the middle gap to [2..4): clip #2 slides right, timeline grows.
-        let batch = extend_gap_tail(&p, 1, 4.0).unwrap();
+        // Ripple (E): grow to [2..4), clip #2 shifts right, timeline grows.
+        let batch = extend_gap_tail(&p, 1, 4.0, true).unwrap();
         h.apply(&mut p, batch).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
@@ -2429,14 +2568,50 @@ mod tests {
         assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(0));
         h.undo(&mut p).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
-        // Shrink to [2..2.5): clip #2 slides left, timeline shrinks.
-        let batch = extend_gap_tail(&p, 1, 2.5).unwrap();
+
+        // Replace (e): grow to [2..4.5) overwrites clip #2's head — it is
+        // trimmed, not shifted, and the timeline length is preserved.
+        let batch = extend_gap_tail(&p, 1, 4.5, false).unwrap();
+        assert!(batch.desc.contains("trimmed clip #2"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
-        assert!(matches!(&p.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
+        assert!(matches!(&p.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::new(5, 2)));
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::new(3, 2));
+        assert_eq!(clip_by_id(&p, 2).duration(), Seconds::new(1, 2));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "length held");
+        h.undo(&mut p).unwrap();
+
+        // Shrink to [2..2.5): clip #2 slides left either way.
+        let batch = extend_gap_tail(&p, 1, 2.5, false).unwrap();
+        h.apply(&mut p, batch).unwrap();
         assert_eq!(p.timeline.end(), Seconds::new(9, 2));
         // Not a gap / at/before its start both refuse.
-        assert!(matches!(extend_gap_tail(&p, 0, 1.0), Err(EditError::NoGap)));
-        assert!(matches!(extend_gap_tail(&p, 1, 0.0), Err(EditError::NothingToTrim(_))));
+        assert!(matches!(extend_gap_tail(&p, 0, 1.0, false), Err(EditError::NoGap)));
+        assert!(matches!(extend_gap_tail(&p, 1, 0.0, true), Err(EditError::NothingToTrim(_))));
+    }
+
+    #[test]
+    fn extend_gap_head_replaces_the_previous_segment() {
+        let mut p = fixture(); // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
+        let mut h = History::default();
+        // Grow the gap's head to 1.0: clip #1 is trimmed to [0..1).
+        let batch = extend_gap_head(&p, 1, 1.0).unwrap();
+        assert!(batch.desc.contains("trimmed clip #1"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        let segs = &p.timeline.video_track().unwrap().segments;
+        assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1));
+        assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "length held");
+        h.undo(&mut p).unwrap();
+        // Grow to 0.0: clip #1 is absorbed whole.
+        let batch = extend_gap_head(&p, 1, 0.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert!(matches!(&p.timeline.video_track().unwrap().segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+        // Rightward (at/past the start) refuses; a clip is not a gap.
+        let fresh = fixture();
+        assert!(matches!(extend_gap_head(&fresh, 1, 2.0), Err(EditError::NothingToTrim(_))));
+        assert!(matches!(extend_gap_head(&fresh, 1, 3.0), Err(EditError::NothingToTrim(_))));
+        assert!(matches!(extend_gap_head(&fresh, 0, 1.0), Err(EditError::NoGap)));
     }
 
     #[test]

@@ -42,13 +42,16 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              dd delete (gap) · D delete + ripple · yy yank
 #              p paste-over (replace what's underneath) · P ripple-insert
 #              u / Ctrl-r undo/redo (edits save automatically)
-#   extend:    e/E enter extend mode at a boundary (E = ripple) ·
-#              [ / ] enter on the right / left clip of a cut
-#              (bracket opens toward its side) ·
+#   extend:    e/E enter at a boundary — a gap on the right is preferred
+#              (E = ripple) · [ / ] enter on the right / left segment of
+#              a cut (bracket opens toward its side) ·
 #              navigate to the target (mpv shows the armed material) ·
 #              e commit (replaces what it crosses) · E flip ripple ·
-#              [ ] switch side in-mode · < > (, .) switch end in-mode ·
-#              gaps arm at their tail and extend without bound · Esc cancel
+#              [ ] switch side · < > (, .) switch end in-mode ·
+#              gaps arm at either edge: the tail extends right (e
+#              overwrites, E ripples) and the head overwrites the
+#              segment on its left · the status shows the projected
+#              timeline length · Esc cancel
 #   misc:      r reload project from disk · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 
