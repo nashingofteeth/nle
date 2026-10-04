@@ -41,7 +41,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   editing:   i/o trim in/out (I/O ripple; a gap always ripples) ·
 #              at a segment's edge i/o delete it, I/O or a gap ripples ·
 #              s split at playhead · dd delete (gap) · D delete + ripple
-#              yy yank · p paste-over (replace what's underneath) ·
+#              yy yank clip/gap · p paste-over (replaces underneath) ·
 #              P ripple-insert · u / Ctrl-r undo/redo (auto-saved)
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of

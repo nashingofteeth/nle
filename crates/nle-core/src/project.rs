@@ -236,14 +236,14 @@ mod tests {
         let mut h = History::default();
         let batch = edit::paste_ripple(
             &p,
-            &Clip { id: 0, asset: a0, asset_in: Seconds::from_integer(0), asset_out: Seconds::from_integer(2) },
+            &Segment::Clip(Clip { id: 0, asset: a0, asset_in: Seconds::from_integer(0), asset_out: Seconds::from_integer(2) }),
             0.0,
         )
         .unwrap();
         h.apply(&mut p, batch).unwrap();
         let batch = edit::paste_ripple(
             &p,
-            &Clip { id: 0, asset: a1, asset_in: Seconds::from_integer(2), asset_out: Seconds::from_integer(5) },
+            &Segment::Clip(Clip { id: 0, asset: a1, asset_in: Seconds::from_integer(2), asset_out: Seconds::from_integer(5) }),
             2.0,
         )
         .unwrap();

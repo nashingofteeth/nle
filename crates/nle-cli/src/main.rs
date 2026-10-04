@@ -331,12 +331,12 @@ fn cmd_add(
         Some(t) => t,
         None => project.timeline.end(),
     };
-    let scratch = Clip {
+    let scratch = Segment::Clip(Clip {
         id: 0,
         asset: asset_id,
         asset_in: in_t,
         asset_out: out_t,
-    };
+    });
     let mut history = edit::History::default();
     let batch = edit::paste_ripple(&project, &scratch, secs_f64(&append_at))?;
     history.apply(&mut project, batch)?;

@@ -1094,25 +1094,32 @@ fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batc
     Ok(Batch { ops, desc })
 }
 
+/// The pasted piece for a clipboard segment: a clip takes a fresh id, a
+/// gap just carries its duration.
+fn pasted_piece(snapshot: &Segment, new_id: u32) -> Segment {
+    match snapshot {
+        Segment::Clip(c) => Segment::Clip(Clip {
+            id: new_id,
+            asset: c.asset,
+            asset_in: c.asset_in,
+            asset_out: c.asset_out,
+        }),
+        Segment::Gap(g) => Segment::Gap(Gap { duration: g.duration }),
+    }
+}
+
 /// `p` — replace-paste: drop the clipboard at the playhead, overwriting
 /// whatever its span covers. Covered gaps vanish, wholly-covered clips
 /// are removed, and a straddled follower is trimmed at its near edge;
 /// past the track end the timeline simply grows. The pasted clip keeps
 /// the yanked source range (splitting a clip hands the surviving right
-/// half a fresh id).
-pub fn paste(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch, EditError> {
+/// half a fresh id). A yanked GAP pastes empty space of the same length.
+pub fn paste(project: &Project, snapshot: &Segment, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
     let dur = snapshot.duration();
-    let pasted = |id: u32| {
-        Segment::Clip(Clip {
-            id,
-            asset: snapshot.asset,
-            asset_in: snapshot.asset_in,
-            asset_out: snapshot.asset_out,
-        })
-    };
+    let pasted = pasted_piece(snapshot, project.next_clip_id());
 
     // At/past the end (or an empty track): nothing to overwrite — append,
     // bridging the void with a gap when there's distance to cover.
@@ -1131,7 +1138,7 @@ pub fn paste(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch,
         ops.push(EditOp::Insert {
             track: ti,
             index,
-            segment: pasted(project.next_clip_id()),
+            segment: pasted.clone(),
         });
         return Ok(Batch {
             ops,
@@ -1211,10 +1218,27 @@ pub fn paste(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch,
             })),
         }
     }
-    pieces.push(pasted(project.next_clip_id()));
+    pieces.push(pasted.clone());
     if let Some(r) = right {
         pieces.push(r);
     }
+
+    // Coalesce adjacent gaps the paste produced (a pasted gap butting an
+    // existing one).
+    let pieces: Vec<Segment> = {
+        let mut merged: Vec<Segment> = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            if let Segment::Gap(g) = &piece
+                && let Some(Segment::Gap(prev)) = merged.last_mut()
+            {
+                let total = prev.duration + g.duration;
+                prev.duration = total;
+                continue;
+            }
+            merged.push(piece);
+        }
+        merged
+    };
 
     // Remove wholly-covered followers first (descending, so indices above
     // `si` stay valid), then swap `si` for the piece list.
@@ -1237,16 +1261,20 @@ pub fn paste(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch,
 
 /// `P` — ripple paste: insert the clipboard at the playhead, splitting
 /// whatever is there (clip or gap) and growing the timeline by the
-/// clip's duration. At a cut the insert lands before the clip starting
-/// there.
-pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch, EditError> {
+/// payload's duration. A clipboard gap inserts empty space; a clipboard
+/// clip inserts the clip. At a cut the insert lands before the clip
+/// starting there.
+pub fn paste_ripple(project: &Project, snapshot: &Segment, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
-    let _dur = snapshot.duration();
+    let what = match snapshot {
+        Segment::Clip(_) => format!("clip #{}", project.next_clip_id()),
+        Segment::Gap(_) => "gap".to_string(),
+    };
 
     // At or past the track end: the void becomes a gap segment (when
-    // there's distance to cover), then the clip lands on the playhead.
+    // there's distance to cover), then the payload lands on the playhead.
     if t >= track.end() {
         let mut ops = Vec::new();
         let void = t - track.end();
@@ -1262,25 +1290,29 @@ pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result
         ops.push(EditOp::Insert {
             track: ti,
             index,
-            segment: Segment::Clip(Clip {
-                id: project.next_clip_id(),
-                asset: snapshot.asset,
-                asset_in: snapshot.asset_in,
-                asset_out: snapshot.asset_out,
-            }),
+            segment: pasted_piece(snapshot, project.next_clip_id()),
         });
         return Ok(Batch {
             ops,
-            desc: format!(
-                "ripple paste at {} — clip #{} inserted",
-                stamp(project, &t),
-                project.next_clip_id()
-            ),
+            desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
         });
     }
     let si = track.index_at(t).ok_or(EditError::NoSegment)?;
     let seg = track.segments[si].clone();
     let seg_start = track.start_of(si);
+
+    // A gap pasted into a gap just lengthens it.
+    if let (Segment::Gap(g), Segment::Gap(pg)) = (&seg, snapshot) {
+        return Ok(Batch {
+            ops: replace_with_many(
+                ti,
+                si,
+                &seg,
+                vec![Segment::Gap(Gap { duration: g.duration + pg.duration })],
+            ),
+            desc: format!("ripple paste at {} — gap inserted", stamp(project, &t)),
+        });
+    }
 
     // The containing segment splits at t; the paste rides between the
     // pieces. Inserting shifts every follower automatically.
@@ -1298,12 +1330,7 @@ pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result
                     asset_out: c.asset_in + head_len,
                 }));
             }
-            pieces.push(Segment::Clip(Clip {
-                id: pid,
-                asset: snapshot.asset,
-                asset_in: snapshot.asset_in,
-                asset_out: snapshot.asset_out,
-            }));
+            pieces.push(pasted_piece(snapshot, pid));
             if at_head_edge {
                 // insert-before: the original clip keeps its identity
                 pieces.push(Segment::Clip(Clip {
@@ -1328,26 +1355,16 @@ pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result
             if let Some(l) = gap_piece(t - seg_start) {
                 pieces.push(l);
             }
-            pieces.push(Segment::Clip(Clip {
-                id: project.next_clip_id(),
-                asset: snapshot.asset,
-                asset_in: snapshot.asset_in,
-                asset_out: snapshot.asset_out,
-            }));
+            pieces.push(pasted_piece(snapshot, project.next_clip_id()));
             if let Some(r) = gap_piece(g.duration - (t - seg_start)) {
                 pieces.push(r);
             }
             pieces
         }
     };
-    let desc = format!(
-        "ripple paste at {} — clip #{} inserted",
-        stamp(project, &t),
-        project.next_clip_id()
-    );
     Ok(Batch {
         ops: replace_with_many(ti, si, &seg, pieces),
-        desc,
+        desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
     })
 }
 
@@ -2473,7 +2490,7 @@ mod tests {
 
         // Over the tail of the gap and 1.5s into clip #2: the gap is
         // replaced up to the paste, #2 is trimmed at its near edge.
-        let batch = paste(&p, &snapshot, 2.5).unwrap();
+        let batch = paste(&p, &Segment::Clip(snapshot.clone()), 2.5).unwrap();
         assert!(batch.desc.contains("trimmed clip #2"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         let segs = p.timeline.video_track().unwrap().segments.clone();
@@ -2496,7 +2513,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(3),
         };
-        let batch = paste(&p, &three, 2.0).unwrap();
+        let batch = paste(&p, &Segment::Clip(three.clone()), 2.0).unwrap();
         assert!(batch.desc.contains("replaced clip #2"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 3]);
@@ -2512,7 +2529,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::new(1, 2),
         };
-        let batch = paste(&p, &half, 1.0).unwrap();
+        let batch = paste(&p, &Segment::Clip(half.clone()), 1.0).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 3, 4, 2]);
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1), "head half");
@@ -2527,7 +2544,7 @@ mod tests {
 
         // Past the end: the void becomes a gap, then the clip; the
         // timeline grows.
-        let batch = paste(&p, &snapshot, 6.0).unwrap();
+        let batch = paste(&p, &Segment::Clip(snapshot.clone()), 6.0).unwrap();
         h.apply(&mut p, batch).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
@@ -2550,7 +2567,7 @@ mod tests {
         };
 
         // mid-clip: split + insert between
-        let batch = paste_ripple(&p, &snapshot, 1.0).unwrap();
+        let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 1.0).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert_eq!(clip_ids(&p), vec![1, 3, 4, 2]);
         assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1), "left half");
@@ -2561,14 +2578,14 @@ mod tests {
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
 
         // in a gap: the gap splits, followers slide, timeline grows
-        let batch = paste_ripple(&p, &snapshot, 2.5).unwrap();
+        let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 2.5).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(7), "grew by 2");
         h.undo(&mut p).unwrap();
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
 
         // past the end: the void becomes a gap, then the clip
-        let batch = paste_ripple(&p, &snapshot, 7.0).unwrap();
+        let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 7.0).unwrap();
         h.apply(&mut p, batch).unwrap();
         let track = p.timeline.video_track().unwrap();
         assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
@@ -2577,7 +2594,7 @@ mod tests {
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
 
         // at a cut: the paste lands BEFORE the clip; the clip keeps its id
-        let batch = paste_ripple(&p, &snapshot, 3.0).unwrap();
+        let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 3.0).unwrap();
         eprintln!("at-cut batch: {batch:?}");
         eprintln!("before: ids={:?} end={}", clip_ids(&p), p.timeline.end());
         h.apply(&mut p, batch).unwrap();
@@ -2835,6 +2852,39 @@ mod tests {
     }
 
     #[test]
+    fn paste_gap_payloads() {
+        // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
+        let p = fixture();
+        let payload = Segment::Gap(Gap { duration: Seconds::from_integer(1) });
+
+        // Ripple-paste the gap into clip #1: the clip splits.
+        let mut q = p.clone();
+        let mut h = History::default();
+        let batch = paste_ripple(&q, &payload, 1.0).unwrap();
+        assert!(batch.desc.contains("gap inserted"), "{}", batch.desc);
+        h.apply(&mut q, batch).unwrap();
+        assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert_eq!(q.timeline.end(), Seconds::from_integer(6), "grew by the gap");
+
+        // Ripple-paste into the existing gap: they merge.
+        let mut q = p.clone();
+        let mut h = History::default();
+        let batch = paste_ripple(&q, &payload, 2.5).unwrap();
+        h.apply(&mut q, batch).unwrap();
+        assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        assert_eq!(q.timeline.end(), Seconds::from_integer(6));
+
+        // Replace-paste the gap at 1.0 overwrites [1,2) with gap and
+        // coalesces with the gap already starting at 2.
+        let mut q = p.clone();
+        let mut h = History::default();
+        let batch = paste(&q, &payload, 1.0).unwrap();
+        h.apply(&mut q, batch).unwrap();
+        assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)), "coalesced");
+        assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
+    }
+
+    #[test]
     fn absorb_over_gap_and_clip_removes_and_trims() {
         // [Clip #1 [0..2) src 1..3] [Gap 1] [Clip #2 [3..5) src 0..2],
         // asset is 10s: extend tail of #1 to 4.0.
@@ -2995,7 +3045,7 @@ mod tests {
         let batch = trim_in(&p, 1.0).unwrap();
         h.apply(&mut p, batch).unwrap();
         let snapshot = clip_by_id(&p, 1);
-        let batch = paste_ripple(&p, &snapshot, 2.5).unwrap();
+        let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 2.5).unwrap();
         h.apply(&mut p, batch).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.history.json");
@@ -3089,7 +3139,7 @@ mod tests {
         for _ in 0..(MAX_HISTORY + 5) {
             let end = p.timeline.end();
             let end_f = *end.numer() as f64 / *end.denom() as f64;
-            let batch = paste_ripple(&p, &snapshot, end_f + 10.0).unwrap();
+            let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), end_f + 10.0).unwrap();
             h.apply(&mut p, batch).unwrap();
         }
         assert_eq!(h.depth(), MAX_HISTORY);
@@ -3104,7 +3154,7 @@ mod tests {
         assert!(h.can_redo());
         let end = p.timeline.end();
         let end_f = *end.numer() as f64 / *end.denom() as f64;
-        let batch = paste_ripple(&p, &snapshot, end_f + 10.0).unwrap();
+        let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), end_f + 10.0).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert!(!h.can_redo());
     }

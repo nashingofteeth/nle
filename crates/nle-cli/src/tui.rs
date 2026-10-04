@@ -254,7 +254,7 @@ pub struct App {
     /// Pending two-key sequence.
     pub pending: Pending,
     /// Yanked clip, for `p`/`P`.
-    pub clipboard: Option<Clip>,
+    pub clipboard: Option<TimelineSegment>,
     /// Undo/redo stack of edit batches (session-only).
     pub history: History,
     pub reload_requested: bool,
@@ -1078,14 +1078,31 @@ fn edit_delete(app: &mut App, player: &MpvPlayer) {
 }
 
 fn edit_yank(app: &mut App) {
-    match clip_under(&app.project, app.playhead) {
-        Some(c) => {
-            let id = c.id;
-            app.clipboard = Some(c.clone());
-            app.set_message(&format!("yanked clip #{id}"));
+    let Some(track) = app.project.timeline.video_track() else {
+        app.set_message("nothing to yank — empty timeline");
+        return;
+    };
+    let Some(si) = track.index_at(grid_time(&app.project, app.playhead)) else {
+        app.set_message("nothing to yank — past the end");
+        return;
+    };
+    let seg = track.segments[si].clone();
+    let msg = match &seg {
+        TimelineSegment::Clip(c) => format!("yanked clip #{}", c.id),
+        TimelineSegment::Gap(g) => {
+            let frames = app
+                .project
+                .fps
+                .as_ref()
+                .map(|f| (secs(&g.duration) * secs(f)).round() as i64);
+            match frames {
+                Some(n) => format!("yanked gap (f{n})"),
+                None => "yanked gap".to_string(),
+            }
         }
-        None => app.set_message("nothing to yank — playhead is in a gap"),
-    }
+    };
+    app.clipboard = Some(seg);
+    app.set_message(&msg);
 }
 
 // ------------------------------------------------------------ extend mode
@@ -2674,6 +2691,18 @@ mod tests {
             trim_key(&p, 1.0, false, false).unwrap().ops,
             trim_key(&p, 1.0, false, true).unwrap().ops
         );
+    }
+
+    // yy grabs whichever segment is under the playhead — gap included.
+    #[test]
+    fn yank_grabs_gaps_too() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 4.0; // inside the [3..5) gap
+        edit_yank(&mut app);
+        assert!(matches!(&app.clipboard, Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(2)));
+        app.playhead = 1.0; // inside clip #1
+        edit_yank(&mut app);
+        assert!(matches!(&app.clipboard, Some(TimelineSegment::Clip(c)) if c.id == 1));
     }
 
     // At a segment edge, i/o delete it: non-ripple leaves a gap, capital
