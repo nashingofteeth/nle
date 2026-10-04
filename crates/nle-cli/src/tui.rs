@@ -833,12 +833,19 @@ fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPl
             // known duration, map just the clip's current span.
             let src_at_edge = if head { ain } else { aout };
             let preview = match dur_opt {
-                Some(d) => ExtendPreviewSpec::Clip {
-                    path: asset.path.clone(),
-                    src_start: Seconds::from_integer(0),
-                    length: Seconds::new((d * 1e6).round() as i64, 1_000_000),
-                    origin: edge - src_at_edge,
-                },
+                Some(d) => {
+                    // Trim the preview to the reachable side so mpv stops
+                    // at the segment's edge instead of playing the whole
+                    // asset: a head reaches source [0, aout], a tail
+                    // [ain, d].
+                    let length = if head { aout } else { d };
+                    ExtendPreviewSpec::Clip {
+                        path: asset.path.clone(),
+                        src_start: Seconds::from_integer(0),
+                        length: Seconds::new((length * 1e6).round() as i64, 1_000_000),
+                        origin: edge - src_at_edge,
+                    }
+                }
                 None => ExtendPreviewSpec::Clip {
                     path: asset.path.clone(),
                     src_start: Seconds::new((ain * 1e6).round() as i64, 1_000_000),
@@ -2297,6 +2304,15 @@ mod tests {
         // start, so the range dips negative (prepend).
         let plan = plan_extend(&p, 0.0, false).unwrap();
         assert_eq!((plan.lo, plan.hi), (-1.0, Some(3.0)));
+        // Its preview stops at aout (4), not the whole asset, so mpv can't
+        // play past the head's edge.
+        match plan.preview {
+            ExtendPreviewSpec::Clip { length, origin, .. } => {
+                assert_eq!(length, Seconds::from_integer(4), "trimmed to aout");
+                assert_eq!(origin, -1.0);
+            }
+            _ => panic!("expected clip preview"),
+        }
         // Unknown asset duration: no extension room, trim/delete only,
         // no material strip, span-mapped preview.
         let mut q = asset_project();
