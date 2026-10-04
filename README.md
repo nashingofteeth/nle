@@ -38,10 +38,11 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   transport: space play/pause · h/l ±1s · H/L ±5s · f/F frame step
 #   motion:    j/k next/prev cut · w/b next/prev clip · gg/G/0 ends
 #              < / > (, / .) clip start/end · 3l = 3s (counts)
-#   editing:   i/o trim in/out to playhead · s split at playhead
-#              dd delete (gap) · D delete + ripple · yy yank
-#              p paste-over (replace what's underneath) · P ripple-insert
-#              u / Ctrl-r undo/redo (edits save automatically)
+#   editing:   i/o trim in/out (I/O ripple; a gap always ripples) ·
+#              at a segment's edge i/o delete it, I/O or a gap ripples ·
+#              s split at playhead · dd delete (gap) · D delete + ripple
+#              yy yank · p paste-over (replace what's underneath) ·
+#              P ripple-insert · u / Ctrl-r undo/redo (auto-saved)
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of
 #              a cut (bracket opens toward its side) ·

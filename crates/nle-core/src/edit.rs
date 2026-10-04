@@ -1351,6 +1351,43 @@ pub fn paste_ripple(project: &Project, snapshot: &Clip, playhead: f64) -> Result
     })
 }
 
+/// Delete the segment at `index`: a gap, or a clip when `ripple`, is
+/// removed whole with its neighbours merged; a plain clip delete leaves a
+/// gap behind (dd semantics).
+pub fn delete_segment(project: &Project, index: usize, ripple: bool) -> Result<Batch, EditError> {
+    let ti = video_track_index(project)?;
+    match project.timeline.tracks[ti].segments.get(index) {
+        Some(Segment::Gap(_)) | Some(Segment::Clip(_)) if ripple => {
+            delete_segment_ripple(project, ti, index)
+        }
+        Some(Segment::Clip(c)) => delete_clip_by_id(project, c.id),
+        Some(Segment::Gap(_)) => delete_segment_ripple(project, ti, index),
+        None => Err(EditError::SegmentNotFound(index)),
+    }
+}
+
+/// The segment an edge-trim at the playhead would consume completely (so
+/// the trim should delete it instead). `out` (`o`/`O`) targets the
+/// segment STARTING at the playhead; `!out` (`i`/`I`) the segment ENDING
+/// there — at a shared cut those are the two different neighbours.
+pub fn trim_consume_target(project: &Project, playhead: f64, out: bool) -> Option<usize> {
+    let t = snap(project, playhead).ok()?;
+    let track = project.timeline.video_track()?;
+    if out {
+        let si = track.index_at(t)?;
+        (track.start_of(si) == t).then_some(si)
+    } else {
+        let mut acc = Seconds::from_integer(0);
+        for (i, s) in track.segments.iter().enumerate() {
+            acc += s.duration();
+            if acc == t {
+                return Some(i);
+            }
+        }
+        None
+    }
+}
+
 /// CLI `remove <id>`: replace the clip with a gap (dd semantics).
 pub fn delete_clip_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
     let ti = video_track_index(project)?;
@@ -2765,6 +2802,36 @@ mod tests {
         assert!(matches!(ripple_gap_in(&p, 0.5), Err(EditError::NoGap)));
         let fresh = fixture();
         assert!(matches!(ripple_gap_in(&fresh, 2.0), Err(EditError::NothingToTrim(_))));
+    }
+
+    #[test]
+    fn trim_consume_target_and_delete_segment() {
+        // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
+        let p = fixture();
+        // `o` targets the segment STARTING at the playhead.
+        assert_eq!(trim_consume_target(&p, 2.0, true), Some(1)); // the gap
+        assert_eq!(trim_consume_target(&p, 3.0, true), Some(2)); // clip #2
+        // `i` targets the segment ENDING there.
+        assert_eq!(trim_consume_target(&p, 2.0, false), Some(0)); // clip #1
+        assert_eq!(trim_consume_target(&p, 3.0, false), Some(1)); // the gap
+        // Not at an edge → no consume.
+        assert_eq!(trim_consume_target(&p, 1.0, true), None);
+        assert_eq!(trim_consume_target(&p, 1.0, false), None);
+        assert_eq!(trim_consume_target(&p, 0.0, false), None, "nothing to the left");
+
+        // A plain clip delete leaves a gap (merged with the neighbour);
+        // a ripple delete closes; a gap always ripples.
+        let mut q = fixture();
+        let mut h = History::default();
+        let batch = delete_segment(&q, 0, false).unwrap();
+        h.apply(&mut q, batch).unwrap();
+        assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
+        assert!(matches!(&q.timeline.video_track().unwrap().segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
+        h.undo(&mut q).unwrap();
+        let batch = delete_segment(&q, 0, true).unwrap();
+        h.apply(&mut q, batch).unwrap();
+        assert_eq!(q.timeline.end(), Seconds::from_integer(3), "shrunk by clip #1");
+        assert!(matches!(&q.timeline.video_track().unwrap().segments[0], Segment::Gap(_)));
     }
 
     #[test]

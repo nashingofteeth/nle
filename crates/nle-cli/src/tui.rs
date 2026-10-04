@@ -1006,6 +1006,11 @@ fn grid_time(project: &Project, t: f64) -> Seconds {
 /// shortens and the followers slide left); on a clip, `i`/`o` leave the
 /// trimmed material as a gap and `I`/`O` ripple.
 fn trim_key(project: &Project, ph: f64, out: bool, ripple: bool) -> Result<Batch, EditError> {
+    // At a segment's edge the trim would consume it whole, so delete it
+    // instead. `o`/`O` at a segment's start; `i`/`I` at its end.
+    if let Some(si) = edit::trim_consume_target(project, ph, out) {
+        return edit::delete_segment(project, si, ripple);
+    }
     if edit::is_gap_at(project, ph) {
         if out {
             edit::ripple_gap_out(project, ph)
@@ -2669,6 +2674,23 @@ mod tests {
             trim_key(&p, 1.0, false, false).unwrap().ops,
             trim_key(&p, 1.0, false, true).unwrap().ops
         );
+    }
+
+    // At a segment edge, i/o delete it: non-ripple leaves a gap, capital
+    // ripples, and a gap always ripples.
+    #[test]
+    fn trim_key_deletes_at_segment_edges() {
+        let p = asset_project(); // [C1 0..3][gap 3..5][C2 5..7]
+        let b = trim_key(&p, 0.0, true, false).unwrap(); // o at C1's start
+        assert!(b.desc.contains("delete clip #1"), "{}", b.desc);
+        let b = trim_key(&p, 0.0, true, true).unwrap(); // O at C1's start
+        assert!(b.desc.contains("ripple delete"), "{}", b.desc);
+        let b = trim_key(&p, 3.0, false, false).unwrap(); // i at C1's end
+        assert!(b.desc.contains("delete clip #1"), "{}", b.desc);
+        let b = trim_key(&p, 3.0, true, false).unwrap(); // o at the gap's start
+        assert!(b.desc.contains("delete gap (ripple)"), "{}", b.desc);
+        let b = trim_key(&p, 5.0, true, false).unwrap(); // o at C2's start
+        assert!(b.desc.contains("delete clip #2"), "{}", b.desc);
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {
