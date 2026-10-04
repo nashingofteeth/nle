@@ -39,7 +39,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   motion:    j/k next/prev cut · w/b next/prev clip · gg/G/0 ends
 #              3l = 3s (counts)
 #   editing:   i/o trim in/out to playhead · s split at playhead
-#              dd delete (gap) · D delete + ripple · yy/p/P yank/paste
+#              dd delete (gap) · D delete + ripple · yy yank
+#              p paste-over (replace what's underneath) · P ripple-insert
 #              u / Ctrl-r undo/redo (edits save automatically)
 #   extend:    e/E enter extend mode at a boundary (E = ripple) ·
 #              navigate to the target (mpv shows the armed material) ·

@@ -45,8 +45,6 @@ pub enum EditError {
     BeyondAsset { id: u32, out: String, duration: String },
     #[error("cannot extend clip #{id} — needs {needed} of source before its in-point ({ain})")]
     BeforeAsset { id: u32, needed: String, ain: String },
-    #[error("paste needs a gap with room — the playhead is inside a clip, or the gap is too small")]
-    NoRoom,
     #[error("nothing to undo")]
     NothingToUndo,
     #[error("nothing to redo")]
@@ -1016,43 +1014,145 @@ pub fn delete_ripple(project: &Project, playhead: f64) -> Result<Batch, EditErro
     Ok(Batch { ops, desc })
 }
 
-/// `p` — gentle paste: place the clipboard at the playhead only when it
-/// fits inside the gap there (the gap donates its space; nothing moves).
+/// `p` — replace-paste: drop the clipboard at the playhead, overwriting
+/// whatever its span covers. Covered gaps vanish, wholly-covered clips
+/// are removed, and a straddled follower is trimmed at its near edge;
+/// past the track end the timeline simply grows. The pasted clip keeps
+/// the yanked source range (splitting a clip hands the surviving right
+/// half a fresh id).
 pub fn paste(project: &Project, snapshot: &Clip, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
-    let si = track.index_at(t).ok_or(EditError::NoSegment)?;
     let dur = snapshot.duration();
-    let seg = track.segments[si].clone();
-    let g = match seg {
-        Segment::Gap(g) => g,
-        Segment::Clip(_) => return Err(EditError::NoRoom),
+    let pasted = |id: u32| {
+        Segment::Clip(Clip {
+            id,
+            asset: snapshot.asset,
+            asset_in: snapshot.asset_in,
+            asset_out: snapshot.asset_out,
+        })
     };
-    let left_len = t - track.start_of(si);
-    let right_len = g.duration - left_len - dur;
-    if right_len < Seconds::from_integer(0) {
-        return Err(EditError::NoRoom);
+
+    // At/past the end (or an empty track): nothing to overwrite — append,
+    // bridging the void with a gap when there's distance to cover.
+    if track.segments.is_empty() || t >= track.end() {
+        let mut ops = Vec::new();
+        let mut index = track.segments.len();
+        let void = t - track.end();
+        if void > Seconds::from_integer(0) {
+            ops.push(EditOp::Insert {
+                track: ti,
+                index,
+                segment: Segment::Gap(Gap { duration: void }),
+            });
+            index += 1;
+        }
+        ops.push(EditOp::Insert {
+            track: ti,
+            index,
+            segment: pasted(project.next_clip_id()),
+        });
+        return Ok(Batch {
+            ops,
+            desc: format!("paste at {}", format_seconds(&t)),
+        });
     }
 
-    let pasted = Segment::Clip(Clip {
-        id: project.next_clip_id(),
-        asset: snapshot.asset,
-        asset_in: snapshot.asset_in,
-        asset_out: snapshot.asset_out,
-    });
-    let mut pieces: Vec<Segment> = Vec::new();
-    if let Some(l) = gap_piece(left_len) {
-        pieces.push(l);
+    let si = track.index_at(t).ok_or(EditError::NoSegment)?;
+    let seg = track.segments[si].clone();
+    let left_len = t - track.start_of(si);
+    let target = t + dur;
+
+    // How far the overwrite reaches (`remove_upto`): the straddled
+    // segment containing the paste's end, or the whole tail when the
+    // paste runs off the track.
+    let mut notes: Vec<String> = Vec::new();
+    let straddle = if target < track.end() {
+        Some((track.index_at(target).ok_or(EditError::NoSegment)?, target))
+    } else {
+        None
+    };
+    let remove_upto = straddle.map(|(ei, _)| ei + 1).unwrap_or(track.segments.len());
+
+    // Wholly-covered segments between the paste and the end boundary go
+    // (the straddled segment is re-created as the right piece, so it has
+    // its own note instead).
+    let covered_upto = straddle.map(|(ei, _)| ei).unwrap_or(track.segments.len());
+    for k in si + 1..covered_upto {
+        notes.push(format!("replaced {}", segment_note(&track.segments[k])));
     }
-    pieces.push(pasted);
-    if let Some(r) = gap_piece(right_len) {
+
+    // What survives past the paste: the straddled segment's tail (none
+    // when the paste ends exactly on a boundary).
+    let right = match straddle {
+        Some((ei, at)) => {
+            let off = at - track.start_of(ei);
+            let rem = track.segments[ei].duration() - off;
+            if rem > Seconds::from_integer(0) {
+                match &track.segments[ei] {
+                    Segment::Gap(_) => Some(Segment::Gap(Gap { duration: rem })),
+                    Segment::Clip(c) => {
+                        // A split keeps the head's id on the left, so the
+                        // tail needs a fresh id only when the same clip
+                        // supplied both pieces.
+                        let id = if ei == si && left_len > Seconds::from_integer(0) {
+                            project.next_clip_id() + 1
+                        } else {
+                            c.id
+                        };
+                        if off > Seconds::from_integer(0) {
+                            notes.push(format!("trimmed clip #{}", c.id));
+                        }
+                        Some(Segment::Clip(Clip {
+                            id,
+                            asset: c.asset,
+                            asset_in: c.asset_in + off,
+                            asset_out: c.asset_out,
+                        }))
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+
+    // Compose the replacement for [t, t+dur): left remainder, paste,
+    // right remainder.
+    let mut pieces: Vec<Segment> = Vec::new();
+    if left_len > Seconds::from_integer(0) {
+        match &seg {
+            Segment::Gap(_) => pieces.push(Segment::Gap(Gap { duration: left_len })),
+            Segment::Clip(c) => pieces.push(Segment::Clip(Clip {
+                asset_out: c.asset_in + left_len,
+                ..c.clone()
+            })),
+        }
+    }
+    pieces.push(pasted(project.next_clip_id()));
+    if let Some(r) = right {
         pieces.push(r);
     }
-    Ok(Batch {
-        ops: replace_with_many(ti, si, &Segment::Gap(g), pieces),
-        desc: format!("paste at {}", format_seconds(&t)),
-    })
+
+    // Remove wholly-covered followers first (descending, so indices above
+    // `si` stay valid), then swap `si` for the piece list.
+    let mut ops: Vec<EditOp> = Vec::new();
+    for k in (si + 1..remove_upto).rev() {
+        ops.push(EditOp::Remove {
+            track: ti,
+            index: k,
+            segment: track.segments[k].clone(),
+        });
+    }
+    ops.extend(replace_with_many(ti, si, &seg, pieces));
+
+    let mut desc = format!("paste at {}", format_seconds(&t));
+    if !notes.is_empty() {
+        desc += &format!(" ({})", notes.join(", "));
+    }
+    Ok(Batch { ops, desc })
 }
 
 /// `P` — ripple paste: insert the clipboard at the playhead, splitting
@@ -2053,27 +2153,76 @@ mod tests {
     }
 
     #[test]
-    fn p_fits_only_in_gaps() {
+    fn p_replaces_underneath() {
+        // fixture: [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5) src 0..2]
         let mut p = fixture();
         let mut h = History::default();
-        let snapshot = clip_by_id(&p, 1); // 2s — bigger than the 1s gap
-        assert!(matches!(paste(&p, &snapshot, 2.5), Err(EditError::NoRoom)));
-        // a 0.5s clip fits: the gap splits around it
-        let tiny = Clip {
+        let snapshot = clip_by_id(&p, 1); // 2s
+
+        // Over the tail of the gap and 1.5s into clip #2: the gap is
+        // replaced up to the paste, #2 is trimmed at its near edge.
+        let batch = paste(&p, &snapshot, 2.5).unwrap();
+        assert!(batch.desc.contains("trimmed clip #2"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        let segs = p.timeline.video_track().unwrap().segments.clone();
+        assert_eq!(clip_ids(&p), vec![1, 3, 2]);
+        assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
+        assert_eq!(clip_by_id(&p, 3).duration(), Seconds::from_integer(2), "pasted");
+        let c2 = clip_by_id(&p, 2);
+        assert_eq!(c2.asset_in, Seconds::new(3, 2), "trimmed head");
+        assert_eq!(c2.duration(), Seconds::new(1, 2));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "length unchanged");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3);
+
+        // Fully covering the gap and #2: #2 is removed, the paste grows to
+        // fill exactly the space it overwrote.
+        let three = Clip {
+            id: 0,
+            asset: 1,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(3),
+        };
+        let batch = paste(&p, &three, 2.0).unwrap();
+        assert!(batch.desc.contains("replaced clip #2"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 3]);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "length unchanged");
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+
+        // Wholly inside clip #1: the clip splits, the right half gets a
+        // fresh id, and the paste sits between the halves.
+        let half = Clip {
             id: 0,
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::new(1, 2),
         };
-        let batch = paste(&p, &tiny, 2.25).unwrap(); // 30fps: snaps to 2.2667
+        let batch = paste(&p, &half, 1.0).unwrap();
         h.apply(&mut p, batch).unwrap();
-        let seg_count = p.timeline.video_track().unwrap().segments.len();
-        assert_eq!(seg_count, 5, "gap split into two around the paste");
-        assert_eq!(p.timeline.end(), Seconds::from_integer(5), "length unchanged");
+        assert_eq!(clip_ids(&p), vec![1, 3, 4, 2]);
+        assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(1), "head half");
+        assert_eq!(
+            (clip_by_id(&p, 4).asset_in, clip_by_id(&p, 4).duration()),
+            (Seconds::new(5, 2), Seconds::new(1, 2)),
+            "tail half keeps the source tail"
+        );
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
         h.undo(&mut p).unwrap();
-        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3, "undo restores");
-        // inside a clip → NoRoom
-        assert!(matches!(paste(&p, &snapshot, 1.0), Err(EditError::NoRoom)));
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+
+        // Past the end: the void becomes a gap, then the clip; the
+        // timeline grows.
+        let batch = paste(&p, &snapshot, 6.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert_eq!(clip_ids(&p), vec![1, 2, 3]);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
     }
 
     #[test]
