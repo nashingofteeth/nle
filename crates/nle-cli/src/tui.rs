@@ -624,6 +624,8 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         },
         KeyCode::Char('e') => enter_extend(app, player, false),
         KeyCode::Char('E') => enter_extend(app, player, true),
+        KeyCode::Char('[') => enter_extend_side(app, player, Side::Left),
+        KeyCode::Char(']') => enter_extend_side(app, player, Side::Right),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.history.redo(&mut app.project) {
                 Ok(desc) => {
@@ -1063,55 +1065,76 @@ fn apply_extend_plan(app: &mut App, player: &MpvPlayer, plan: ExtendPlan, ripple
     });
 }
 
-/// The clip boundary coincident with the armed edge but on the other side
-/// of it, if any. At a shared cut a head-armed right clip flips to the
-/// left clip's tail and vice versa; a boundary against a gap has no
-/// second clip side.
-fn alternate_armed(project: &Project, st: &ExtendState) -> Option<Armed> {
-    let (id, head) = match st.armed {
-        Armed::Clip { id, head } => (id, head),
-        Armed::TailGap | Armed::HeadGap => return None,
-    };
+/// Which clip boundary of a cut to work on: the clip that ENDS there
+/// (its tail) or the clip that STARTS there (its head). At a clip|clip
+/// cut both exist; against a gap only one side has a clip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Side {
+    Left,
+    Right,
+}
+
+/// The clip boundary on `side` of the cut at `t`, with its exact edge
+/// position. `None` when no clip sits on that side (a gap, or nothing).
+fn armed_on_side(project: &Project, t: f64, side: Side) -> Option<(Armed, f64)> {
     let track = project.timeline.video_track()?;
     let eps = 1e-6;
-    let edge = st.edge_pos;
     let mut acc = 0.0;
     for seg in &track.segments {
         let start = acc;
         acc += secs(&seg.duration());
         let end = acc;
-        if let TimelineSegment::Clip(c) = seg
-            && c.id != id
-        {
-            // Head-armed: our clip starts at the edge, so the other side
-            // is a clip ENDING here. Tail-armed: mirrored.
-            if head && (end - edge).abs() < eps {
-                return Some(Armed::Clip { id: c.id, head: false });
-            }
-            if !head && (start - edge).abs() < eps {
-                return Some(Armed::Clip { id: c.id, head: true });
+        if let TimelineSegment::Clip(c) = seg {
+            match side {
+                Side::Left if (end - t).abs() < eps => {
+                    return Some((Armed::Clip { id: c.id, head: false }, end));
+                }
+                Side::Right if (start - t).abs() < eps => {
+                    return Some((Armed::Clip { id: c.id, head: true }, start));
+                }
+                _ => {}
             }
         }
     }
     None
 }
 
-/// `x` — swap the armed edge to the other side of a shared cut, keeping
-/// the ripple flag and playhead.
-fn swap_extend(app: &mut App, player: &MpvPlayer) {
-    let Some(st) = extend_state(app) else { return };
-    let Some(alt) = alternate_armed(&app.project, &st) else {
-        app.set_message("no other side here — only a shared cut arms two clips");
+fn side_hint(side: Side) -> &'static str {
+    match side {
+        Side::Left => "no clip ends here — [ works the clip on the left",
+        Side::Right => "no clip starts here — ] works the clip on the right",
+    }
+}
+
+/// `[` / `]` at a cut: enter extend mode already armed on the clip
+/// ending (left) or starting (right) there. `e`/`E` keep the default
+/// (right at a shared cut).
+fn enter_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
+    let Some((armed, edge)) = armed_on_side(&app.project, app.playhead, side) else {
+        app.set_message(side_hint(side));
         return;
     };
-    let plan = match plan_for_armed(&app.project, alt, st.edge_pos) {
-        Ok(p) => p,
-        Err(m) => {
-            app.set_message(&m);
-            return;
-        }
+    match plan_for_armed(&app.project, armed, edge) {
+        Ok(plan) => apply_extend_plan(app, player, plan, false),
+        Err(m) => app.set_message(&m),
+    }
+}
+
+/// `[` / `]` inside extend mode: move to the clip on the other side of
+/// the same cut, keeping the ripple flag and playhead.
+fn set_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
+    let Some(st) = extend_state(app) else { return };
+    let Some((armed, edge)) = armed_on_side(&app.project, st.edge_pos, side) else {
+        app.set_message(side_hint(side));
+        return;
     };
-    apply_extend_plan(app, player, plan, st.ripple);
+    if armed == st.armed {
+        return;
+    }
+    match plan_for_armed(&app.project, armed, edge) {
+        Ok(plan) => apply_extend_plan(app, player, plan, st.ripple),
+        Err(m) => app.set_message(&m),
+    }
 }
 
 /// Leave extend mode: project timeline back on the monitor, playhead at
@@ -1336,7 +1359,8 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('G') | KeyCode::Char('$') => seek_to_mode(app, player, &st, app.total()),
         KeyCode::Char('e') => commit_extend(app, player),
-        KeyCode::Char('x') => swap_extend(app, player),
+        KeyCode::Char('[') => set_extend_side(app, player, Side::Left),
+        KeyCode::Char(']') => set_extend_side(app, player, Side::Right),
         KeyCode::Char('E') => {
             let ripple = match &mut app.mode {
                 Mode::Extend(inner) => {
@@ -1839,9 +1863,9 @@ fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
     );
 
     let help = if matches!(app.mode, Mode::Extend(_)) {
-        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · x swap side · Esc cancel"
+        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · [ ] side · Esc cancel"
     } else {
-        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · r reload · : cmd · q quit"
+        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
     };
 
     let mut lines = vec![
@@ -2245,43 +2269,36 @@ mod tests {
         assert_eq!(app.project.timeline.video_track().unwrap().segments.len(), 2);
     }
 
-    // `x` swaps to the clip on the other side of a shared cut.
+    // `[` / `]` pick the clip on the left (ends at the cut) or right
+    // (starts at it). A gap side has no clip.
     #[test]
-    fn alternate_armed_finds_other_side_of_shared_cut() {
+    fn armed_on_side_picks_clip_by_side() {
         let mut p = asset_project();
         p.timeline.video_track_mut().unwrap().segments.remove(1); // C1 | C2 cut
-        let state = |armed, edge| ExtendState {
-            armed,
-            edge_pos: edge,
-            ripple: false,
-            lo: 0.0,
-            hi: None,
-            mat: None,
-            preview_off: 0.0,
-        };
         assert_eq!(
-            alternate_armed(&p, &state(Armed::Clip { id: 2, head: true }, 3.0)),
-            Some(Armed::Clip { id: 1, head: false }),
-            "head-armed right clip flips to the left tail"
+            armed_on_side(&p, 3.0, Side::Left),
+            Some((Armed::Clip { id: 1, head: false }, 3.0)),
+            "[ is the clip ending at the cut"
         );
         assert_eq!(
-            alternate_armed(&p, &state(Armed::Clip { id: 1, head: false }, 3.0)),
-            Some(Armed::Clip { id: 2, head: true }),
-            "tail-armed left clip flips to the right head"
+            armed_on_side(&p, 3.0, Side::Right),
+            Some((Armed::Clip { id: 2, head: true }, 3.0)),
+            "] is the clip starting at the cut"
         );
-        // Against a gap there is no clip on the other side.
+        // Against a gap only one side has a clip.
         let q = asset_project(); // [C1] [gap] [C2]
         assert_eq!(
-            alternate_armed(&q, &state(Armed::Clip { id: 1, head: false }, 3.0)),
-            None
+            armed_on_side(&q, 3.0, Side::Left),
+            Some((Armed::Clip { id: 1, head: false }, 3.0))
         );
+        assert_eq!(armed_on_side(&q, 3.0, Side::Right), None, "gap on the right");
         assert_eq!(
-            alternate_armed(&q, &state(Armed::Clip { id: 2, head: true }, 5.0)),
-            None
+            armed_on_side(&q, 5.0, Side::Right),
+            Some((Armed::Clip { id: 2, head: true }, 5.0))
         );
-        // Virtual edges never flip.
-        assert_eq!(alternate_armed(&q, &state(Armed::TailGap, 7.0)), None);
-        assert_eq!(alternate_armed(&q, &state(Armed::HeadGap, 0.0)), None);
+        assert_eq!(armed_on_side(&q, 5.0, Side::Left), None, "gap on the left");
+        // Nothing at a non-boundary.
+        assert_eq!(armed_on_side(&q, 1.0, Side::Left), None);
     }
 
     #[test]
