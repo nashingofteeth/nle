@@ -200,6 +200,34 @@ pub fn prev_clip_start(project: &Project, t: f64, eps: f64) -> Option<f64> {
 pub enum Mode {
     Normal,
     Command(String),
+    Extend(ExtendState),
+}
+
+/// Which boundary is armed in extend mode: a clip edge, or a virtual
+/// timeline edge where a gap meets the sequence boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Armed {
+    /// Head (`head == true`) or tail of the clip with this id.
+    Clip { id: u32, head: bool },
+    /// Timeline end with a trailing gap.
+    TailGap,
+    /// Timeline start (0) with a leading gap.
+    HeadGap,
+}
+
+/// Extend-mode session state. All bounds are timeline seconds; `hi` is
+/// `None` for unbounded ranges (gap extension past the end). `mat` is
+/// the asset-material span for display (clip-armed only — gaps have no
+/// material). `preview_off` translates seeks: `mpv = playhead - off`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtendState {
+    pub armed: Armed,
+    pub edge_pos: f64,
+    pub ripple: bool,
+    pub lo: f64,
+    pub hi: Option<f64>,
+    pub mat: Option<(f64, f64)>,
+    pub preview_off: f64,
 }
 
 /// Which two-key sequence is waiting for its second keystroke (`gg`, `dd`, `yy`).
@@ -275,8 +303,15 @@ impl App {
         // boundaries sit off the project grid) can never fight the
         // canonical positions that cuts, the white indicator, and edit
         // keys depend on.
+        //
+        // In extend mode mpv plays the material preview, whose position 0
+        // is the range start: translate back to timeline coordinates.
         if !st.paused && st.file_loaded
             && let Some(t) = st.time_pos {
+                let t = match &self.mode {
+                    Mode::Extend(st) => t + st.preview_off,
+                    _ => t,
+                };
                 let snapped = snap_to_frame(t, self.project.fps.as_ref());
                 self.playhead = snap_to_cut(snapped, &self.project);
             }
@@ -427,9 +462,11 @@ pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     if matches!(app.mode, Mode::Command(_)) {
         let buf = match std::mem::replace(&mut app.mode, Mode::Normal) {
             Mode::Command(buf) => buf,
-            Mode::Normal => unreachable!("checked above"),
+            _ => unreachable!("checked above"),
         };
         command_key(app, buf, key);
+    } else if matches!(app.mode, Mode::Extend(_)) {
+        extend_key(app, player, key);
     } else {
         normal_key(app, player, key);
     }
@@ -555,11 +592,11 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('d') => app.pending = Pending::D,
         KeyCode::Char('y') => app.pending = Pending::Y,
         // ---- editing: uniform playhead-based ops (counts don't multiply) ----
-        KeyCode::Char('i') => run_edit(app, player, edit::trim_in(&app.project, app.playhead)),
-        KeyCode::Char('I') => run_edit(app, player, edit::trim_in_ripple(&app.project, app.playhead)),
-        KeyCode::Char('o') => run_edit(app, player, edit::trim_out(&app.project, app.playhead)),
-        KeyCode::Char('O') => run_edit(app, player, edit::trim_out_ripple(&app.project, app.playhead)),
-        KeyCode::Char('s') => run_edit(app, player, edit::split(&app.project, app.playhead)),
+        KeyCode::Char('i') => { let _ = run_edit(app, player, edit::trim_in(&app.project, app.playhead)); }
+        KeyCode::Char('I') => { let _ = run_edit(app, player, edit::trim_in_ripple(&app.project, app.playhead)); }
+        KeyCode::Char('o') => { let _ = run_edit(app, player, edit::trim_out(&app.project, app.playhead)); }
+        KeyCode::Char('O') => { let _ = run_edit(app, player, edit::trim_out_ripple(&app.project, app.playhead)); }
+        KeyCode::Char('s') => { let _ = run_edit(app, player, edit::split(&app.project, app.playhead)); }
         KeyCode::Char('D') => {
             edit_yank(app); // D yanks too
             run_edit(app, player, edit::delete_ripple(&app.project, app.playhead));
@@ -585,6 +622,8 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             }
             Err(e) => app.set_message(&e.to_string()),
         },
+        KeyCode::Char('e') => enter_extend(app, player, false),
+        KeyCode::Char('E') => enter_extend(app, player, true),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.history.redo(&mut app.project) {
                 Ok(desc) => {
@@ -612,6 +651,271 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     }
 }
 
+// ------------------------------------------------------------ extend mode
+
+/// What committing at the current playhead means. Maps 1:1 to edit ops
+/// in `run_commit` below; kept separate so the routing table is unit
+/// testable without mpv.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CommitKind {
+    TrimHead,
+    TrimTail,
+    GrowHeadIntoGap,
+    GrowTailIntoGap,
+    GrowTailPastEnd,
+    ShortenTail,
+    ShortenHeadGap,
+    GrowTailGap,
+    Delete,
+    Noop,
+}
+
+/// Resolve the armed boundary at timeline position `t`: clip starts win
+/// (head-of-right at shared cuts, consistent with `clip_under`), then
+/// clip ends, then virtual timeline edges with gaps. Anything else is
+/// not a boundary.
+fn resolve_armed(project: &Project, t: f64) -> Result<(Armed, f64), String> {
+    let track = project
+        .timeline
+        .video_track()
+        .ok_or_else(|| "empty timeline — add clips first".to_string())?;
+    if track.segments.is_empty() {
+        return Err("empty timeline — add clips first".to_string());
+    }
+    let eps = 1e-6;
+    // Pass 1: clip starts (shared cuts arm the right clip's head).
+    let mut acc = 0.0;
+    for seg in &track.segments {
+        if let TimelineSegment::Clip(c) = seg
+            && (acc - t).abs() < eps {
+                return Ok((Armed::Clip { id: c.id, head: true }, acc));
+            }
+        acc += secs(&seg.duration());
+    }
+    // Pass 2: clip ends.
+    let mut acc = 0.0;
+    for seg in &track.segments {
+        acc += secs(&seg.duration());
+        if let TimelineSegment::Clip(c) = seg
+            && (acc - t).abs() < eps {
+                return Ok((Armed::Clip { id: c.id, head: false }, acc));
+            }
+    }
+    // Pass 3: virtual timeline edges with gaps.
+    let total = acc;
+    if t.abs() < eps
+        && matches!(track.segments.first(), Some(TimelineSegment::Gap(_))) {
+            return Ok((Armed::HeadGap, 0.0));
+        }
+    if (total - t).abs() < eps
+        && matches!(track.segments.last(), Some(TimelineSegment::Gap(_)))
+    {
+        return Ok((Armed::TailGap, total));
+    }
+    Err("extend starts at a boundary — j/k to a cut".to_string())
+}
+
+/// The timeline span of a clip by id.
+fn clip_span(project: &Project, id: u32) -> Option<(f64, f64)> {
+    let track = project.timeline.video_track()?;
+    let mut acc = 0.0;
+    for seg in &track.segments {
+        let dur = secs(&seg.duration());
+        if let TimelineSegment::Clip(c) = seg
+            && c.id == id {
+                return Some((acc, acc + dur));
+            }
+        acc += dur;
+    }
+    None
+}
+
+/// Plan an extend-mode session: armed boundary, committable range,
+/// material span for display, and preview parameters. Pure — the caller
+/// realizes it with mpv IPC. Positions below are timeline seconds;
+/// `hi == None` means unbounded (gap extension past the end).
+struct ExtendPlan {
+    armed: Armed,
+    edge_pos: f64,
+    lo: f64,
+    hi: Option<f64>,
+    mat: Option<(f64, f64)>,
+    preview: ExtendPreviewSpec,
+}
+
+enum ExtendPreviewSpec {
+    /// Asset path + asset-relative start/length + timeline origin.
+    Clip { path: std::path::PathBuf, src_start: Seconds, length: Seconds, origin: f64 },
+    Black { origin: f64 },
+}
+
+fn plan_extend(project: &Project, playhead: f64, ripple: bool) -> Result<ExtendPlan, String> {
+    let _ = ripple;
+    let (armed, edge) = resolve_armed(project, playhead)?;
+    let track = project.timeline.video_track().ok_or_else(|| "empty timeline".to_string())?;
+    let total = secs(&project.timeline.end());
+
+    match armed {
+        Armed::Clip { id, head } => {
+            let (s, e) = clip_span(project, id).ok_or_else(|| "clip vanished".to_string())?;
+            let asset_id = track
+                .segments
+                .iter()
+                .filter_map(|seg| match seg {
+                    TimelineSegment::Clip(c) if c.id == id => Some(c),
+                    _ => None,
+                })
+                .next()
+                .ok_or_else(|| "clip vanished".to_string())?;
+            let asset = project
+                .asset(asset_id.asset)
+                .ok_or_else(|| format!("asset #{} is missing", asset_id.asset))?;
+            let ain = secs(&asset_id.asset_in);
+            let aout = secs(&asset_id.asset_out);
+            // Unknown asset duration: no extension room, trim/delete only.
+            let mat_avail_out = asset.duration().map(|d| (secs(&d) - aout).max(0.0)).unwrap_or(0.0);
+            let mat_avail_in = ain;
+            // Neighbor bounds: the adjacent gap's far end, or the edge
+            // itself when a clip (or nothing) blocks the way.
+            let si = track
+                .segments
+                .iter()
+                .position(|seg| matches!(seg, TimelineSegment::Clip(c) if c.id == id))
+                .ok_or_else(|| "clip vanished".to_string())?;
+            let (lo, hi, src_start, length, mat) = if head {
+                let lo = if si > 0 {
+                    match &track.segments[si - 1] {
+                        // Adjacent gap: reach back over it, but never past
+                        // the available head material (or time zero).
+                        TimelineSegment::Gap(g) => {
+                            let gs = s - secs(&g.duration);
+                            (s - mat_avail_in.min(s - gs)).max(0.0)
+                        }
+                        _ => s,
+                    }
+                } else {
+                    // First segment: nothing exists left of the edge.
+                    s.max(0.0)
+                };
+                let src_start = Seconds::new(((ain - (s - lo)) * 1e6).round() as i64, 1_000_000);
+                let mat_hi = asset.duration().map(|d| s + (secs(&d) - ain)).unwrap_or(e);
+                (lo, Some(e), src_start, e - lo, Some((s - ain, mat_hi)))
+            } else {
+                let next_gap_end = if si + 1 < track.segments.len() {
+                    match &track.segments[si + 1] {
+                        TimelineSegment::Gap(g) => Some(e + secs(&g.duration)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let hi = match next_gap_end {
+                    Some(ge) => (e + mat_avail_out).min(ge),
+                    None if si + 1 >= track.segments.len() => e + mat_avail_out,
+                    None => e,
+                };
+                let src_start = Seconds::new((ain * 1e6).round() as i64, 1_000_000);
+                let mat_lo = s - ain;
+                let mat_hi = asset.duration().map(|d| e + (secs(&d) - aout)).unwrap_or(e);
+                (s, Some(hi), src_start, hi - s, Some((mat_lo, mat_hi)))
+            };
+            Ok(ExtendPlan {
+                armed,
+                edge_pos: edge,
+                lo,
+                hi,
+                mat,
+                preview: ExtendPreviewSpec::Clip {
+                    path: asset.path.clone(),
+                    src_start,
+                    length: Seconds::new(((length) * 1e6).round() as i64, 1_000_000),
+                    origin: lo,
+                },
+            })
+        }
+        Armed::TailGap => {
+            let gap_start = total - secs(&track.segments.last().map(|s| s.duration()).unwrap_or(Seconds::from_integer(0)));
+            Ok(ExtendPlan {
+                armed,
+                edge_pos: total,
+                lo: gap_start,
+                hi: None,
+                mat: None,
+                preview: ExtendPreviewSpec::Black { origin: gap_start },
+            })
+        }
+        Armed::HeadGap => {
+            let gap_end = secs(&track.segments.first().map(|s| s.duration()).unwrap_or(Seconds::from_integer(0)));
+            Ok(ExtendPlan {
+                armed,
+                edge_pos: 0.0,
+                lo: 0.0,
+                hi: Some(gap_end),
+                mat: None,
+                preview: ExtendPreviewSpec::Black { origin: 0.0 },
+            })
+        }
+    }
+}
+
+fn approx(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-9
+}
+
+/// Route a commit from the armed edge and playhead. Positions use the
+/// live track layout (unchanged while the mode is active).
+fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Result<CommitKind, String> {
+    if approx(ph, edge_pos) {
+        return Ok(CommitKind::Noop);
+    }
+    match armed {
+        Armed::Clip { id, head } => {
+            let (s, e) = clip_span(project, *id).ok_or_else(|| "clip vanished".to_string())?;
+            if *head {
+                if ph > edge_pos && ph < e - 1e-9 {
+                    Ok(CommitKind::TrimHead)
+                } else if ph < edge_pos {
+                    // In the preceding gap (clamp guarantees adjacency):
+                    // extend the head back. E ripples (no neighbor touch).
+                    Ok(CommitKind::GrowHeadIntoGap)
+                } else {
+                    Ok(CommitKind::Delete)
+                }
+            } else if ph < edge_pos && ph > s + 1e-9 {
+                Ok(CommitKind::TrimTail)
+            } else if ph > edge_pos {
+                // Outward: adjacent gap, or past the timeline end.
+                let track = project.timeline.video_track().ok_or_else(|| "clip vanished".to_string())?;
+                let si = track
+                    .segments
+                    .iter()
+                    .position(|seg| matches!(seg, TimelineSegment::Clip(c) if c.id == *id))
+                    .ok_or_else(|| "clip vanished".to_string())?;
+                if si + 1 < track.segments.len()
+                    && matches!(track.segments[si + 1], TimelineSegment::Gap(_))
+                {
+                    Ok(CommitKind::GrowTailIntoGap)
+                } else if si + 1 >= track.segments.len() {
+                    Ok(CommitKind::GrowTailPastEnd)
+                } else {
+                    // Next is a clip: clamp keeps this unreachable (hi == edge).
+                    Ok(CommitKind::Noop)
+                }
+            } else {
+                Ok(CommitKind::Delete)
+            }
+        }
+        Armed::TailGap => {
+            if ph > edge_pos {
+                Ok(CommitKind::GrowTailGap)
+            } else {
+                Ok(CommitKind::ShortenTail)
+            }
+        }
+        Armed::HeadGap => Ok(CommitKind::ShortenHeadGap),
+    }
+}
+
 // ------------------------------------------------------------ edit plumbing
 
 /// The clip the playhead sits inside, if any.
@@ -633,12 +937,12 @@ fn grid_time(project: &Project, t: f64) -> Seconds {
 
 /// Apply an edit batch, then save + rebuild the preview so the monitor
 /// reflects the new timeline at the current playhead.
-fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>) {
+fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>) -> bool {
     let batch = match result {
         Ok(b) => b,
         Err(e) => {
             app.set_message(&e.to_string());
-            return;
+            return false;
         }
     };
     let desc = batch.desc.clone();
@@ -646,8 +950,12 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
         Ok(()) => {
             app.set_message(&desc);
             persist_and_rebuild(app, player);
+            true
         }
-        Err(e) => app.set_message(&e.to_string()),
+        Err(e) => {
+            app.set_message(&e.to_string());
+            false
+        }
     }
 }
 
@@ -682,6 +990,308 @@ fn edit_yank(app: &mut App) {
             app.set_message(&format!("yanked clip #{id}"));
         }
         None => app.set_message("nothing to yank — playhead is in a gap"),
+    }
+}
+
+// ------------------------------------------------------------ extend mode
+
+fn extend_state(app: &App) -> Option<ExtendState> {
+    match &app.mode {
+        Mode::Extend(st) => Some(st.clone()),
+        _ => None,
+    }
+}
+
+fn clamp_extend(st: &ExtendState, t: f64) -> f64 {
+    t.clamp(st.lo, st.hi.unwrap_or(f64::INFINITY))
+}
+
+fn armed_desc(armed: &Armed) -> String {
+    match armed {
+        Armed::Clip { id, head } => format!("{} of clip #{id}", if *head { "head" } else { "tail" }),
+        Armed::TailGap => "timeline end".to_string(),
+        Armed::HeadGap => "timeline start".to_string(),
+    }
+}
+
+/// Enter extend mode: resolve the boundary, build the material preview,
+/// and hand mpv over to it. Stays in Normal on any failure.
+fn enter_extend(app: &mut App, player: &MpvPlayer, ripple: bool) {
+    let plan = match plan_extend(&app.project, app.playhead, ripple) {
+        Err(msg) => {
+            app.set_message(&msg);
+            return;
+        }
+        Ok(p) => p,
+    };
+    let (url, origin) = match &plan.preview {
+        ExtendPreviewSpec::Clip { path, src_start, length, origin } => {
+            let pv = preview::build_clip_preview(path, *src_start, *length, *origin);
+            (pv.url, pv.origin)
+        }
+        ExtendPreviewSpec::Black { origin } => {
+            // Bounded ranges (leading gap) cover just the gap; unbounded
+            // ones (trailing gap) reach an hour out via repeated chunks.
+            let length = match plan.hi {
+                Some(hi) => Seconds::new(((hi - origin) * 1e6).round() as i64, 1_000_000),
+                None => Seconds::from_integer(preview::EXTEND_PREVIEW_SECS),
+            };
+            match preview::build_black_preview(&app.project, *origin, length) {
+                Err(e) => {
+                    app.set_message(&format!("preview failed: {e}"));
+                    return;
+                }
+                Ok(pv) => (pv.url, pv.origin),
+            }
+        }
+    };
+    player.load(&url, Some((app.playhead - origin).max(0.0)));
+    let flag = if ripple { " · RIPPLE" } else { "" };
+    app.set_message(&format!("extend {}{flag} — navigate, e to commit", armed_desc(&plan.armed)));
+    app.mode = Mode::Extend(ExtendState {
+        armed: plan.armed,
+        edge_pos: plan.edge_pos,
+        ripple,
+        lo: plan.lo,
+        hi: plan.hi,
+        mat: plan.mat,
+        preview_off: origin,
+    });
+}
+
+/// Leave extend mode: project timeline back on the monitor, playhead at
+/// `pos`.
+fn exit_extend(app: &mut App, player: &MpvPlayer, pos: f64, msg: &str) {
+    match preview::build_edl(&app.project) {
+        Ok(edl) => player.load(&edl, Some(pos.max(0.0))),
+        Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
+    }
+    app.playhead = pos;
+    app.mode = Mode::Normal;
+    app.set_message(msg);
+}
+
+/// Map a commit kind to its edit op. The playhead does the routing: it
+/// sits wherever navigation left it, and each op reads positionally.
+fn run_commit_action(app: &App, armed: &Armed, kind: CommitKind, ripple: bool) -> Result<Batch, EditError> {
+    let (project, ph) = (&app.project, app.playhead);
+    let (id, head) = match armed {
+        Armed::Clip { id, head } => (*id, *head),
+        Armed::TailGap | Armed::HeadGap => (0, false),
+    };
+    match kind {
+        CommitKind::TrimHead => {
+            if ripple {
+                edit::trim_in_ripple(project, ph)
+            } else {
+                edit::trim_in(project, ph)
+            }
+        }
+        CommitKind::TrimTail => {
+            if ripple {
+                edit::trim_out_ripple(project, ph)
+            } else {
+                edit::trim_out(project, ph)
+            }
+        }
+        CommitKind::GrowHeadIntoGap => {
+            // Preserve: the existing gap op extends the head while the
+            // neighboring gap shrinks (length unchanged). Ripple: extend
+            // without touching the gap (followers shift).
+            if ripple {
+                edit::extend_edge(project, id, true, ph)
+            } else {
+                edit::trim_out(project, ph)
+            }
+        }
+        CommitKind::GrowTailIntoGap => {
+            if ripple {
+                edit::extend_edge(project, id, false, ph)
+            } else {
+                edit::trim_in(project, ph)
+            }
+        }
+        CommitKind::GrowTailPastEnd => {
+            edit::extend_edge(project, id, head, ph)
+        }
+        CommitKind::ShortenTail | CommitKind::ShortenHeadGap => {
+            if matches!(armed, Armed::TailGap) {
+                edit::trim_out(project, ph)
+            } else {
+                edit::trim_in(project, ph)
+            }
+        }
+        CommitKind::GrowTailGap => edit::extend_gap_end(project, ph),
+        CommitKind::Delete => {
+            if ripple {
+                edit::delete_ripple(project, ph)
+            } else {
+                edit::delete_under(project, ph)
+            }
+        }
+        CommitKind::Noop => Err(EditError::NothingToTrim(format!("edge already at {}", ph))),
+    }
+}
+
+/// Commit: route, apply as one undo step, and leave the mode. Failures
+/// keep the mode (and its preview) so the position isn't lost.
+fn commit_extend(app: &mut App, player: &MpvPlayer) {
+    let Some(st) = extend_state(app) else { return };
+    let kind = match plan_commit(&app.project, &st.armed, st.edge_pos, app.playhead) {
+        Err(msg) => {
+            app.set_message(&msg);
+            return;
+        }
+        Ok(k) => k,
+    };
+    if kind == CommitKind::Noop {
+        exit_extend(app, player, st.edge_pos, "edge already there");
+        return;
+    }
+    if run_edit(app, player, run_commit_action(app, &st.armed, kind, st.ripple)) {
+        app.mode = Mode::Normal;
+    }
+}
+
+/// Cancel: snap the playhead back to the armed edge, project timeline
+/// back on the monitor.
+fn cancel_extend(app: &mut App, player: &MpvPlayer) {
+    let Some(st) = extend_state(app) else { return };
+    exit_extend(app, player, st.edge_pos, "extend cancelled");
+}
+
+/// Mode-aware absolute seek: clamped to the committable range, translated
+/// through the preview offset for mpv.
+fn seek_to_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, t: f64) {
+    if !app.guard_loaded() {
+        return;
+    }
+    let target = clamp_extend(st, t).max(0.0);
+    app.playhead = target;
+    player.seek_absolute(target - st.preview_off + 0.004);
+}
+
+fn seek_rel_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, delta: f64) {
+    let target = app.playhead + delta;
+    seek_to_mode(app, player, st, target);
+}
+
+/// Mode-aware frame step: the frame index is clamped to the range, and
+/// mpv only steps when the model actually moved (no divergence).
+fn step_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, dir: i64, mult: u32) {
+    if !app.guard_loaded() {
+        return;
+    }
+    let Some(fps) = app.project.fps.as_ref() else { return };
+    let f = secs(fps);
+    let lo_i = (st.lo * f).round() as i64;
+    let hi_i = st.hi.map(|h| (h * f).round() as i64).unwrap_or(i64::MAX);
+    let idx = ((app.playhead * f).round() as i64 + dir * mult as i64).clamp(lo_i, hi_i);
+    let next = (idx.max(0) as f64) / f;
+    if next != app.playhead {
+        app.playhead = next;
+        for _ in 0..mult {
+            if dir > 0 {
+                player.frame_step();
+            } else {
+                player.frame_back_step();
+            }
+        }
+    }
+}
+
+fn extend_inert(app: &mut App) {
+    app.set_message("exit extend mode first (Esc)");
+}
+
+fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
+    let code = key.code;
+
+    if code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.quit = true;
+        return;
+    }
+
+    // Counts still build for nav keys; bare `0` seeks (clamped below).
+    if let KeyCode::Char(c @ '0'..='9') = code {
+        if c == '0' && app.count.is_none() {
+            if let Some(st) = extend_state(app) {
+                seek_to_mode(app, player, &st, 0.0);
+            }
+            return;
+        }
+        let d = c.to_digit(10).unwrap_or(0);
+        app.count = Some(app.count.unwrap_or(0) * 10 + d);
+        return;
+    }
+    let mult = app.count.take().unwrap_or(1);
+    let eps = half_frame(&app.project);
+
+    // `gg` still works (lands on the range start via clamp).
+    if let (Pending::G, KeyCode::Char('g')) = (&app.pending, code) {
+        app.pending = Pending::None;
+        if let Some(st) = extend_state(app) {
+            seek_to_mode(app, player, &st, 0.0);
+        }
+        return;
+    }
+
+    let Some(st) = extend_state(app) else { return };
+    match code {
+        KeyCode::Char(' ') => {
+            if app.guard_loaded() {
+                player.toggle_pause();
+            }
+        }
+        KeyCode::Char('h') => seek_rel_mode(app, player, &st, -(mult as f64)),
+        KeyCode::Char('l') => seek_rel_mode(app, player, &st, mult as f64),
+        KeyCode::Char('H') => seek_rel_mode(app, player, &st, -5.0 * mult as f64),
+        KeyCode::Char('L') => seek_rel_mode(app, player, &st, 5.0 * mult as f64),
+        KeyCode::Char('f') => step_mode(app, player, &st, 1, mult),
+        KeyCode::Char('F') => step_mode(app, player, &st, -1, mult),
+        KeyCode::Char('j') => match next_cut(&cut_points(&app.project), app.playhead, eps) {
+            Some(t) => seek_to_mode(app, player, &st, t),
+            None => seek_to_mode(app, player, &st, app.total()),
+        },
+        KeyCode::Char('k') => match prev_cut(&cut_points(&app.project), app.playhead, eps) {
+            Some(t) => seek_to_mode(app, player, &st, t),
+            None => seek_to_mode(app, player, &st, 0.0),
+        },
+        KeyCode::Char('w') => match next_clip_start(&app.project, app.playhead, eps) {
+            Some(t) => seek_to_mode(app, player, &st, t),
+            None => seek_to_mode(app, player, &st, app.total()),
+        },
+        KeyCode::Char('b') => match prev_clip_start(&app.project, app.playhead, eps) {
+            Some(t) => seek_to_mode(app, player, &st, t),
+            None => seek_to_mode(app, player, &st, 0.0),
+        },
+        KeyCode::Char('g') => app.pending = Pending::G,
+        KeyCode::Char('G') | KeyCode::Char('$') => seek_to_mode(app, player, &st, app.total()),
+        KeyCode::Char('e') => commit_extend(app, player),
+        KeyCode::Char('E') => {
+            let ripple = match &mut app.mode {
+                Mode::Extend(inner) => {
+                    inner.ripple = !inner.ripple;
+                    inner.ripple
+                }
+                _ => return,
+            };
+            app.set_message(if ripple { "extend: ripple ON" } else { "extend: preserve" });
+        }
+        KeyCode::Esc => cancel_extend(app, player),
+        KeyCode::Char('q') => cancel_extend(app, player),
+        KeyCode::Char(':') | KeyCode::Char('r') | KeyCode::Char('u')
+        | KeyCode::Char('i') | KeyCode::Char('I') | KeyCode::Char('o') | KeyCode::Char('O')
+        | KeyCode::Char('s') | KeyCode::Char('p') | KeyCode::Char('P')
+        | KeyCode::Char('d') | KeyCode::Char('y') => extend_inert(app),
+        _ => {}
+    }
+
+    if !matches!(
+        code,
+        KeyCode::Char('g') | KeyCode::Char('0'..='9')
+    ) {
+        app.pending = Pending::None;
     }
 }
 
@@ -728,6 +1338,13 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let mode = match &app.mode {
         Mode::Normal => "NORMAL".to_string(),
         Mode::Command(buf) => format!(":{buf}▏"),
+        Mode::Extend(st) => {
+            if st.ripple {
+                "EXTEND·RIPPLE".to_string()
+            } else {
+                "EXTEND".to_string()
+            }
+        }
     };
     let count = app.count.map(|c| format!("{c}")).unwrap_or_default();
 
@@ -764,7 +1381,14 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let segs = preview::segments(&app.project).unwrap_or_default();
-    let total = app.total().max(0.001);
+    // In extend mode the row rescales past the timeline end so the
+    // projected range stays visible while navigating outward.
+    let in_extend = matches!(app.mode, Mode::Extend(_));
+    let total = if in_extend {
+        app.total().max(app.playhead).max(0.001)
+    } else {
+        app.total().max(0.001)
+    };
     let w = inner.width as f64;
 
     let parts: Vec<(f64, String, Style)> = segs
@@ -786,10 +1410,11 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     // Track row: segments with boundary dividers. The playhead doesn't
-    // live here (it renders on the marker row below).
+    // live here in normal mode (it renders on the marker row below); in
+    // extend mode a yellow notch marks it on this row too.
     let mut x: u16 = 0;
     let mut cum: f64 = 0.0;
-    let mut spans: Vec<Span> = Vec::new();
+    let mut cells: Vec<(u16, String, Style)> = Vec::new();
     let n = parts.len();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
         cum += dur;
@@ -805,31 +1430,80 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         } else {
             format!("▏{}", truncate_label(label, width.saturating_sub(1)))
         };
-        spans.push(Span::styled(text, *style));
+        cells.push((x, text, *style));
         x = end_x;
+    }
+    let mut spans: Vec<Span> = Vec::new();
+    if in_extend {
+        // Notch the playhead into the row: split the containing part's
+        // text around a yellow marker (same left-hugging convention as
+        // every other timeline glyph).
+        let ph = marker_col(app.playhead, total, inner.width);
+        let notch = Style::default().fg(Color::Yellow);
+        for (x0, text, style) in &cells {
+            let chars: Vec<char> = text.chars().collect();
+            let off = (ph as usize).saturating_sub(*x0 as usize);
+            if ph >= *x0 && off < chars.len() {
+                let before: String = chars[..off].iter().collect();
+                let after: String = chars[off + 1..].iter().collect();
+                if !before.is_empty() {
+                    spans.push(Span::styled(before, *style));
+                }
+                spans.push(Span::styled("▏".to_string(), notch));
+                if !after.is_empty() {
+                    spans.push(Span::styled(after, *style));
+                }
+            } else {
+                spans.push(Span::styled(text.clone(), *style));
+            }
+        }
+    } else {
+        for (_, text, style) in &cells {
+            spans.push(Span::styled(text.clone(), *style));
+        }
     }
     let track_row = Rect { height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(spans)), track_row);
 
     // Marker row: just the playhead — red ▏ normally, WHITE when it sits
     // exactly on a cut frame (the snapped position makes that test
-    // exact). EOF still hugs the border with ▕.
+    // exact). EOF still hugs the border with ▕. In extend mode the row
+    // also carries the workable span (yellow) and the material extent
+    // beyond it (dim), with a yellow playhead.
     let ph = marker_col(app.playhead, total, inner.width);
     let at_end = app.eof;
-    let color = if on_boundary(&app.project, app.playhead) {
-        Color::White
+    let mut marker_cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
+    if let Mode::Extend(st) = &app.mode {
+        // Material extent first (dim, underneath), then the workable span.
+        if let Some((m0, m1)) = st.mat {
+            paint_run(&mut marker_cells, total, inner.width, m0, m1, '·', Style::default().fg(Color::DarkGray));
+        }
+        let hi_edge = st.hi.unwrap_or(f64::INFINITY);
+        paint_run(&mut marker_cells, total, inner.width, st.lo, hi_edge, '─', Style::default().fg(Color::Yellow));
+        let color = if on_boundary(&app.project, app.playhead) {
+            Color::White
+        } else {
+            Color::Yellow
+        };
+        marker_cells[ph as usize] = (
+            if at_end { '▕' } else { '▏' },
+            Style::default().fg(color),
+        );
     } else {
-        Color::Red
-    };
-    let mut cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
-    cells[ph as usize] = (
-        if at_end { '▕' } else { '▏' },
-        Style::default().fg(color),
-    );
+        let color = if on_boundary(&app.project, app.playhead) {
+            Color::White
+        } else {
+            Color::Red
+        };
+        marker_cells[ph as usize] = (
+            if at_end { '▕' } else { '▏' },
+            Style::default().fg(color),
+        );
+    }
     let mut marker: Vec<Span> = Vec::new();
     let mut run = String::new();
     let mut run_style: Option<Style> = None;
-    for (ch, style) in cells {
+    for (ch, style) in marker_cells {
         if run_style.as_ref() != Some(&style) {
             if let Some(s) = run_style {
                 marker.push(Span::styled(std::mem::take(&mut run), s));
@@ -845,10 +1519,31 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(Line::from(marker)), playhead_row);
 }
 
+/// Paint `glyph` with `style` over the cells spanning `[a, b)` in
+/// timeline seconds (`b` may exceed the row — it clamps).
+fn paint_run(cells: &mut [(char, Style)], total: f64, width: u16, a: f64, b: f64, glyph: char, style: Style) {
+    if width == 0 || b <= a {
+        return;
+    }
+    let col_a = marker_col(a.max(0.0), total, width) as usize;
+    let mut col_b = marker_col(b, total, width) as usize;
+    if b >= total - 1e-9 {
+        col_b = cells.len();
+    }
+    for cell in cells.iter_mut().take(col_b).skip(col_a) {
+        *cell = (glyph, style);
+    }
+}
+
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
     let t = app.playhead;
 
-    let clip_line = clip_under(&app.project, t)
+    let first_line = match &app.mode {
+        Mode::Extend(st) => extend_status(app, st),
+        _ => clip_line(app, t),
+    };
+fn clip_line(app: &App, t: f64) -> String {
+    clip_under(&app.project, t)
         .map(|c| {
             let asset = app
                 .project
@@ -890,7 +1585,55 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
                 )
             }
             None => "— gap —".to_string(),
-        });
+        })
+}
+
+/// First info line in extend mode: armed edge, committable range,
+/// available material, and the mode keys.
+fn extend_status(app: &App, st: &ExtendState) -> String {
+    let fps = app.project.fps.as_ref();
+    let hi = st.hi.map(|h| fmt_timecode(h, fps)).unwrap_or_else(|| "…".to_string());
+    let range = format!("{}–{}", fmt_timecode(st.lo, fps), hi);
+    let flag = if st.ripple { " · RIPPLE" } else { "" };
+    match &st.armed {
+        Armed::Clip { id, head } => {
+            let mat = match material_remaining(app, *id, *head) {
+                Some(s) => format!(" · material {s:.1}s left"),
+                None => String::new(),
+            };
+            format!(
+                "EXTEND {} of clip #{} · edge {} · range {range}{mat}{flag}",
+                if *head { "head" } else { "tail" },
+                id,
+                fmt_timecode(st.edge_pos, fps),
+            )
+        }
+        Armed::TailGap => format!(
+            "EXTEND timeline end · range {range} · free growth{flag}"
+        ),
+        Armed::HeadGap => format!(
+            "EXTEND timeline start · range {range}{flag}"
+        ),
+    }
+}
+
+/// Source seconds still unused on the extend side of a clip edge:
+/// before the in-point (head) or past the out-point (tail). `None`
+/// when the asset duration is unknown.
+fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
+    let track = app.project.timeline.video_track()?;
+    let clip = track.segments.iter().filter_map(|seg| match seg {
+        TimelineSegment::Clip(c) if c.id == id => Some(c),
+        _ => None,
+    }).next()?;
+    let asset = app.project.asset(clip.asset)?;
+    let dur = asset.duration()?;
+    Some(if head {
+        secs(&clip.asset_in)
+    } else {
+        (secs(&dur) - secs(&clip.asset_out)).max(0.0)
+    })
+}
 
     let stats = format!(
         "{} clip(s) · {} · {} fps · undo depth {}",
@@ -913,10 +1656,14 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         app.history.depth()
     );
 
-    let help = "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · r reload · : cmd · q quit";
+    let help = if matches!(app.mode, Mode::Extend(_)) {
+        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · Esc cancel"
+    } else {
+        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · r reload · : cmd · q quit"
+    };
 
     let mut lines = vec![
-        Line::from(clip_line),
+        Line::from(first_line),
         Line::from(""),
         Line::from(Span::styled(stats, Style::default().fg(Color::Gray))),
         Line::from(""),
@@ -982,8 +1729,208 @@ fn truncate_label(label: &str, width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nle_core::media::{RawFormat, RawProbe, RawStream};
     use nle_core::timeline::{Gap as TimelineGap, Timeline, Track, TrackKind};
     use std::path::PathBuf;
+
+    fn asset_project() -> Project {
+        // [Clip #1 [0..3) src 1..4] [Gap 2 @3..5] [Clip #2 [5..7) src 0..2],
+        // asset 1 is 10s long: headroom on both sides.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let probe = RawProbe {
+            streams: vec![RawStream {
+                index: 0,
+                codec_type: Some("video".into()),
+                codec_name: Some("h264".into()),
+                width: Some(320),
+                height: Some(240),
+                r_frame_rate: Some("30/1".into()),
+                ..Default::default()
+            }],
+            format: RawFormat {
+                format_name: "mp4".into(),
+                duration: Some("10".into()),
+                ..Default::default()
+            },
+        };
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe);
+        p.timeline = Timeline {
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                segments: vec![
+                    TimelineSegment::Clip(nle_core::Clip {
+                        id: 1,
+                        asset: a,
+                        asset_in: Seconds::from_integer(1),
+                        asset_out: Seconds::from_integer(4),
+                    }),
+                    TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+                    TimelineSegment::Clip(nle_core::Clip {
+                        id: 2,
+                        asset: a,
+                        asset_in: Seconds::from_integer(0),
+                        asset_out: Seconds::from_integer(2),
+                    }),
+                ],
+            }],
+        };
+        p
+    }
+
+    #[test]
+    fn resolve_armed_matrix() {
+        let p = asset_project();
+        // Clip starts win (head-of-right at shared cuts).
+        assert_eq!(resolve_armed(&p, 0.0), Ok((Armed::Clip { id: 1, head: true }, 0.0)));
+        assert_eq!(resolve_armed(&p, 5.0), Ok((Armed::Clip { id: 2, head: true }, 5.0)));
+        // Clip ends (gap starts resolve to the clip tail).
+        assert_eq!(resolve_armed(&p, 3.0), Ok((Armed::Clip { id: 1, head: false }, 3.0)));
+        assert_eq!(resolve_armed(&p, 7.0), Ok((Armed::Clip { id: 2, head: false }, 7.0)));
+        // Mid-segment positions refuse.
+        assert!(resolve_armed(&p, 1.5).is_err());
+        assert!(resolve_armed(&p, 4.0).is_err());
+        // Shared clip|clip cut arms the right head.
+        let mut q = asset_project();
+        q.timeline.video_track_mut().unwrap().segments.remove(1);
+        assert_eq!(resolve_armed(&q, 3.0), Ok((Armed::Clip { id: 2, head: true }, 3.0)));
+        // Virtual edges with gaps.
+        let mut r = asset_project();
+        r.timeline.video_track_mut().unwrap().segments.push(
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
+        );
+        assert_eq!(resolve_armed(&r, 10.0), Ok((Armed::TailGap, 10.0)));
+        let mut s = asset_project();
+        s.timeline.video_track_mut().unwrap().segments.insert(
+            0,
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+        );
+        assert_eq!(resolve_armed(&s, 0.0), Ok((Armed::HeadGap, 0.0)));
+        // Empty timeline refuses.
+        assert!(resolve_armed(&Project::new(), 0.0).is_err());
+    }
+
+    #[test]
+    fn plan_extend_clip_bounds() {
+        let p = asset_project();
+        // Tail of #1 at 3.0: lo = clip start, hi = min(gap end 5, 3 + (10-4)).
+        let plan = plan_extend(&p, 3.0, false).unwrap();
+        assert_eq!(plan.armed, Armed::Clip { id: 1, head: false });
+        assert_eq!(plan.edge_pos, 3.0);
+        assert_eq!((plan.lo, plan.hi), (0.0, Some(5.0)));
+        assert_eq!(plan.mat, Some((-1.0, 9.0)));
+        match plan.preview {
+            ExtendPreviewSpec::Clip { src_start, length, origin, .. } => {
+                assert_eq!(src_start, Seconds::from_integer(1));
+                assert_eq!(length, Seconds::from_integer(5));
+                assert_eq!(origin, 0.0);
+            }
+            _ => panic!("expected clip preview"),
+        }
+        // Head of #2 at 5.0: ain 0 means no left room.
+        let plan = plan_extend(&p, 5.0, true).unwrap();
+        assert_eq!((plan.lo, plan.hi), (5.0, Some(7.0)));
+        // Head of #1 at 0.0: clamped at the origin despite material.
+        let plan = plan_extend(&p, 0.0, false).unwrap();
+        assert_eq!((plan.lo, plan.hi), (0.0, Some(3.0)));
+        // Unknown asset duration: no extension room, trim/delete only.
+        let mut q = asset_project();
+        q.media[0].probe.format.duration = None;
+        let plan = plan_extend(&q, 3.0, false).unwrap();
+        assert_eq!((plan.lo, plan.hi), (0.0, Some(3.0)));
+        assert_eq!(plan.mat, Some((-1.0, 3.0)));
+    }
+
+    #[test]
+    fn plan_extend_virtual_edges() {
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments.push(
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
+        );
+        let plan = plan_extend(&p, 10.0, false).unwrap();
+        assert_eq!(plan.armed, Armed::TailGap);
+        assert_eq!(plan.lo, 7.0);
+        assert_eq!(plan.hi, None);
+        assert_eq!(plan.mat, None);
+        assert!(matches!(plan.preview, ExtendPreviewSpec::Black { origin } if origin == 7.0));
+        // Leading gap: bounded head range, black preview, no material line.
+        let mut s = asset_project();
+        s.timeline.video_track_mut().unwrap().segments.insert(
+            0,
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+        );
+        let plan = plan_extend(&s, 0.0, false).unwrap();
+        assert_eq!(plan.armed, Armed::HeadGap);
+        assert_eq!((plan.lo, plan.hi), (0.0, Some(2.0)));
+        assert_eq!(plan.mat, None);
+    }
+
+    #[test]
+    fn clamp_extend_holds_both_modes() {
+        let st = ExtendState {
+            armed: Armed::TailGap,
+            edge_pos: 7.0,
+            ripple: false,
+            lo: 7.0,
+            hi: Some(9.0),
+            mat: None,
+            preview_off: 7.0,
+        };
+        assert_eq!(clamp_extend(&st, 5.0), 7.0);
+        assert_eq!(clamp_extend(&st, 8.0), 8.0);
+        assert_eq!(clamp_extend(&st, 99.0), 9.0);
+        let open = ExtendState { hi: None, ..st.clone() };
+        assert_eq!(clamp_extend(&open, 1e9), 1e9);
+    }
+
+    #[test]
+    fn plan_commit_routing_table() {
+        let p = asset_project(); // C1 [0..3), gap [3..5), C2 [5..7)
+        let tail1 = Armed::Clip { id: 1, head: false };
+        assert_eq!(plan_commit(&p, &tail1, 3.0, 4.0), Ok(CommitKind::GrowTailIntoGap));
+        assert_eq!(plan_commit(&p, &tail1, 3.0, 1.0), Ok(CommitKind::TrimTail));
+        assert_eq!(plan_commit(&p, &tail1, 3.0, 0.0), Ok(CommitKind::Delete));
+        assert_eq!(plan_commit(&p, &tail1, 3.0, 3.0), Ok(CommitKind::Noop));
+        let head2 = Armed::Clip { id: 2, head: true };
+        assert_eq!(plan_commit(&p, &head2, 5.0, 6.0), Ok(CommitKind::TrimHead));
+        assert_eq!(plan_commit(&p, &head2, 5.0, 4.0), Ok(CommitKind::GrowHeadIntoGap));
+        assert_eq!(plan_commit(&p, &head2, 5.0, 7.0), Ok(CommitKind::Delete));
+        assert_eq!(plan_commit(&p, &head2, 5.0, 5.0), Ok(CommitKind::Noop));
+        // Routing is flag-independent (ripple splits at run time).
+        assert_eq!(
+            plan_commit(&p, &tail1, 3.0, 4.0),
+            plan_commit(&p, &tail1, 3.0, 4.0)
+        );
+        // Past-end tail with no following gap.
+        let mut q = asset_project();
+        q.timeline.video_track_mut().unwrap().segments.truncate(1);
+        let tail = Armed::Clip { id: 1, head: false };
+        assert_eq!(plan_commit(&q, &tail, 3.0, 4.0), Ok(CommitKind::GrowTailPastEnd));
+        // Virtual edges.
+        let mut r = asset_project();
+        r.timeline.video_track_mut().unwrap().segments.push(
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
+        );
+        assert_eq!(plan_commit(&r, &Armed::TailGap, 10.0, 8.0), Ok(CommitKind::ShortenTail));
+        assert_eq!(plan_commit(&r, &Armed::TailGap, 10.0, 12.0), Ok(CommitKind::GrowTailGap));
+        assert_eq!(plan_commit(&r, &Armed::TailGap, 10.0, 10.0), Ok(CommitKind::Noop));
+    }
+
+    #[test]
+    fn run_commit_maps_kinds_to_ops() {
+        let p = asset_project();
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 4.0; // inside the [3..5) gap
+        let tail1 = Armed::Clip { id: 1, head: false };
+        let b = run_commit_action(&app, &tail1, CommitKind::GrowTailIntoGap, false).unwrap();
+        assert!(b.desc.contains("trim gap in"), "{}", b.desc);
+        let b = run_commit_action(&app, &tail1, CommitKind::GrowTailIntoGap, true).unwrap();
+        assert!(b.desc.contains("extend tail"), "{}", b.desc);
+        let b = run_commit_action(&app, &tail1, CommitKind::Delete, true).unwrap();
+        assert!(b.desc.contains("ripple"), "{}", b.desc);
+        let b = run_commit_action(&app, &tail1, CommitKind::Delete, false).unwrap();
+        assert_eq!(b.desc, "delete gap");
+    }
 
     fn seg_clip(id: u32, dur: i64) -> TimelineSegment {
         TimelineSegment::Clip(nle_core::Clip {

@@ -41,6 +41,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   editing:   i/o trim in/out to playhead · s split at playhead
 #              dd delete (gap) · D delete + ripple · yy/p/P yank/paste
 #              u / Ctrl-r undo/redo (edits save automatically)
+#   extend:    e/E enter extend mode at a boundary (E = ripple) ·
+#              navigate to the target (mpv shows the armed material) ·
+#              e commit · E flip ripple · Esc cancel
 #   misc:      r reload project from disk · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 

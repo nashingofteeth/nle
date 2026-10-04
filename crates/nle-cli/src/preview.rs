@@ -123,6 +123,58 @@ fn fmt_entry(start: Seconds, length: Seconds) -> String {
     format!("{},{}", format_seconds(&start), format_seconds(&length))
 }
 
+/// A single-source preview for extend mode: mpv position 0 corresponds
+/// to `origin` in timeline coordinates, so seeks translate by
+/// subtracting it (`mpv = playhead - origin`). Clip previews show the
+/// armed asset's real frames across the whole workable range; black
+/// previews (gap work, which has no material) show blank.
+pub struct ExtendPreview {
+    pub url: String,
+    /// Timeline position of mpv position 0.
+    pub origin: f64,
+}
+
+/// Material preview for a clip-armed edge: the asset trimmed to the
+/// source span covering the workable range. `origin` is the timeline
+/// position mpv 0 maps to; `src_start`/`length` are asset-relative.
+pub fn build_clip_preview(
+    path: &Path,
+    src_start: Seconds,
+    length: Seconds,
+    origin: f64,
+) -> ExtendPreview {
+    ExtendPreview {
+        url: format!("edl://{},{}", edl_quote(&path.display().to_string()), fmt_entry(src_start, length)),
+        origin,
+    }
+}
+
+/// Blank preview for gap-armed edges: the cached black file, repeated
+/// in `BLACK_FILE_SECS` chunks to cover `length` (mpv can't address
+/// past a segment's source length, so — like timeline gaps — long spans
+/// become multiple entries). No loop flag needed: seeks stay valid
+/// across the whole span.
+pub fn build_black_preview(
+    project: &Project,
+    origin: f64,
+    length: Seconds,
+) -> Result<ExtendPreview, PreviewError> {
+    let size = project.video.as_ref().ok_or(PreviewError::NoSize)?;
+    let fps = project.fps.ok_or(PreviewError::NoFps)?;
+    let black = ensure_black_file(size.width, size.height, &fps)?;
+    let url = format!(
+        "edl://{}",
+        assemble_edl(&[Segment::Gap { length }], Some(&black))?
+    );
+    Ok(ExtendPreview { url, origin })
+}
+
+/// How far past the timeline end a gap-armed preview reaches. Repeating
+/// the 10s black file costs ~40 bytes per chunk in the URL, so an hour
+/// of navigable black is cheap; the terminal row projects beyond it
+/// anyway (mpv simply holds black past the last chunk).
+pub const EXTEND_PREVIEW_SECS: i64 = 3600;
+
 /// Build the full `edl://` URL for a project, generating the black gap
 /// file if the timeline has gaps.
 pub fn build_edl(project: &Project) -> Result<String, PreviewError> {
@@ -295,6 +347,34 @@ mod tests {
         let segs = vec![Segment::Gap { length: Seconds::from_integer(BLACK_FILE_SECS) }];
         let edl = assemble_edl(&segs, Some(Path::new("/cache/black.mp4"))).unwrap();
         assert_eq!(edl, "%16%/cache/black.mp4,0,10");
+    }
+
+    #[test]
+    fn extend_clip_preview_maps_origin_to_zero() {
+        let pv = build_clip_preview(
+            Path::new("/media/red.mp4"),
+            Seconds::from_integer(1),
+            Seconds::from_integer(4),
+            2.0,
+        );
+        // asset trimmed to the material span; mpv 0 == timeline 2.0
+        assert_eq!(pv.url, "edl://%14%/media/red.mp4,1,4");
+        assert_eq!(pv.origin, 2.0);
+    }
+
+    #[test]
+    fn extend_black_preview_needs_geometry() {
+        // geometry errors surface without touching the cache
+        let mut bare = Project::new();
+        assert!(matches!(
+            build_black_preview(&bare, 5.0, Seconds::from_integer(25)),
+            Err(PreviewError::NoSize)
+        ));
+        bare.video = Some(VideoSettings { width: 320, height: 240 });
+        assert!(matches!(
+            build_black_preview(&bare, 5.0, Seconds::from_integer(25)),
+            Err(PreviewError::NoFps)
+        ));
     }
 
     #[test]

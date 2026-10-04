@@ -1237,6 +1237,95 @@ pub fn delete_clip_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditE
     }
 }
 
+/// Extend a clip edge outward to `t` without touching neighbors —
+/// followers reseat structurally, so the timeline grows by the
+/// extension. The extension consumes source material: the head reaches
+/// earlier into the asset, the tail further past its out-point.
+/// Material-gated (`BeforeAsset` / `BeyondAsset`); `t` must lie strictly
+/// outward of the edge.
+pub fn extend_edge(project: &Project, clip_id: u32, head: bool, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let si = track
+        .clip_index(clip_id)
+        .ok_or(EditError::ClipNotFound(clip_id))?;
+    let c = match &track.segments[si] {
+        Segment::Clip(c) => c.clone(),
+        Segment::Gap(_) => return Err(EditError::ClipNotFound(clip_id)),
+    };
+    let edge = track.start_of(si) + if head { Seconds::from_integer(0) } else { c.duration() };
+    let after = if head {
+        if t >= edge {
+            return Err(EditError::NothingToTrim(format_seconds(&t)));
+        }
+        let delta = edge - t;
+        let asset_in = c.asset_in - delta;
+        if asset_in < Seconds::from_integer(0) {
+            return Err(EditError::BeforeAsset {
+                id: c.id,
+                needed: format_seconds(&delta),
+                ain: format_seconds(&c.asset_in),
+            });
+        }
+        Clip { asset_in, ..c }
+    } else {
+        if t <= edge {
+            return Err(EditError::NothingToTrim(format_seconds(&t)));
+        }
+        let asset_out = c.asset_out + (t - edge);
+        let asset = project
+            .asset(c.asset)
+            .ok_or(EditError::ClipNotFound(c.asset))?;
+        if let Some(d) = asset.duration()
+            && asset_out > d
+        {
+            return Err(EditError::BeyondAsset {
+                id: c.id,
+                out: format_seconds(&asset_out),
+                duration: format_seconds(&d),
+            });
+        }
+        Clip { asset_out, ..c }
+    };
+    let side = if head { "head" } else { "tail" };
+    Ok(Batch {
+        ops: vec![EditOp::Replace {
+            track: ti,
+            index: si,
+            before: Segment::Clip(c),
+            after: Segment::Clip(after),
+        }],
+        desc: format!("extend {side} of clip #{clip_id} to {}", format_seconds(&t)),
+    })
+}
+
+/// Lengthen the trailing gap to reach `t` (free — gaps have no source
+/// material). Used where the timeline itself grows into empty space.
+pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let last = track.segments.len().checked_sub(1).ok_or(EditError::NoSegment)?;
+    let g = match &track.segments[last] {
+        Segment::Gap(g) => g.clone(),
+        Segment::Clip(_) => return Err(EditError::NoGap),
+    };
+    let gap_start = track.start_of(last);
+    if t <= gap_start {
+        return Err(EditError::NothingToTrim(format_seconds(&t)));
+    }
+    Ok(Batch {
+        ops: vec![EditOp::Replace {
+            track: ti,
+            index: last,
+            before: Segment::Gap(g),
+            after: Segment::Gap(Gap { duration: t - gap_start }),
+        }],
+        desc: format!("extend gap to {}", format_seconds(&t)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1778,6 +1867,108 @@ mod tests {
         assert_eq!(clip_by_id(&p, 2).duration(), Seconds::from_integer(2), "source kept");
         assert_eq!(clip_by_id(&p, 3).duration(), Seconds::from_integer(2), "pasted");
         h.undo(&mut p).unwrap();
+    }
+
+    #[test]
+    fn extend_tail_grows_clip_and_followers_shift() {
+        let mut p = fixture(); // [Clip #1 [0..2)] [Gap 1] [Clip #2 [3..5)]
+        let mut h = History::default();
+        // extend tail of #1 to 2.5 (asset has material to 10): gap stays,
+        // followers shift right, timeline grows by 0.5
+        let batch = extend_edge(&p, 1, false, 2.5).unwrap();
+        assert!(batch.desc.contains("extend tail of clip #1"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        let c = clip_by_id(&p, 1);
+        assert_eq!(c.asset_out, Seconds::new(7, 2));
+        let track = p.timeline.video_track().unwrap();
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert_eq!(p.timeline.end(), Seconds::new(11, 2));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(3));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+    }
+
+    #[test]
+    fn extend_tail_past_end_grows_timeline_from_material() {
+        let mut p = fixture();
+        p.timeline.video_track_mut().unwrap().segments.pop(); // drop clip #2
+        p.timeline.video_track_mut().unwrap().segments.pop(); // drop the gap: [#1 [0..2)]
+        let mut h = History::default();
+        let batch = extend_edge(&p, 1, false, 4.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(5));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(4));
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(2));
+    }
+
+    #[test]
+    fn extend_tail_refuses_without_material() {
+        let p = fixture(); // asset ends at 10; clip #1 out is 3
+        assert!(matches!(
+            extend_edge(&p, 1, false, 12.0),
+            Err(EditError::BeyondAsset { .. })
+        ));
+        // wrong side is not an extend
+        assert!(matches!(
+            extend_edge(&p, 1, false, 1.0),
+            Err(EditError::NothingToTrim(_))
+        ));
+    }
+
+    #[test]
+    fn extend_head_reaches_earlier_material() {
+        let mut p = fixture();
+        // clip #2 src 0..2 has nothing before 0: give it headroom first
+        p.timeline.video_track_mut().unwrap().segments[2] = Segment::Clip(Clip {
+            id: 2,
+            asset: 1,
+            asset_in: Seconds::from_integer(1),
+            asset_out: Seconds::from_integer(3),
+        });
+        let mut h = History::default();
+        let batch = extend_edge(&p, 2, true, 2.5).unwrap();
+        assert!(batch.desc.contains("extend head of clip #2"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        let c = clip_by_id(&p, 2);
+        assert_eq!(c.asset_in, Seconds::new(1, 2));
+        assert_eq!(p.timeline.end(), Seconds::new(11, 2));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(1));
+    }
+
+    #[test]
+    fn extend_head_refuses_without_material() {
+        let p = fixture(); // clip #2 src 0..2 — nothing before 0
+        assert!(matches!(
+            extend_edge(&p, 2, true, 2.5),
+            Err(EditError::BeforeAsset { .. })
+        ));
+        assert!(matches!(
+            extend_edge(&p, 2, true, 4.0),
+            Err(EditError::NothingToTrim(_))
+        ));
+        assert!(matches!(extend_edge(&p, 99, true, 1.0), Err(EditError::ClipNotFound(99))));
+    }
+
+    #[test]
+    fn extend_gap_end_lengthens_trailing_gap() {
+        let mut p = fixture();
+        p.timeline.video_track_mut().unwrap().segments.push(Segment::Gap(Gap {
+            duration: Seconds::from_integer(3),
+        })); // trailing [5..8)
+        let mut h = History::default();
+        let batch = extend_gap_end(&p, 10.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert!(matches!(&track.segments[3], Segment::Gap(g) if g.duration == Seconds::from_integer(5)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(10));
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+        // not past the gap start, and no trailing gap at all, both refuse
+        assert!(matches!(extend_gap_end(&p, 4.0), Err(EditError::NothingToTrim(_))));
+        let q = fixture(); // ends with a clip
+        assert!(matches!(extend_gap_end(&q, 6.0), Err(EditError::NoGap)));
     }
 
     #[test]
