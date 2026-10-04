@@ -1438,6 +1438,33 @@ pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditErr
     })
 }
 
+/// Move a gap's tail (right edge) to `playhead`, for ANY gap — not just
+/// the trailing one. Growing inserts empty space and shifts the following
+/// segments right; shrinking pulls them left. Gaps have no source
+/// material, so there is no upper bound.
+pub fn extend_gap_tail(project: &Project, index: usize, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let g = match track.segments.get(index) {
+        Some(Segment::Gap(g)) => g.clone(),
+        _ => return Err(EditError::NoGap),
+    };
+    let gap_start = track.start_of(index);
+    if t <= gap_start {
+        return Err(EditError::NothingToTrim(format_seconds(&t)));
+    }
+    Ok(Batch {
+        ops: vec![EditOp::Replace {
+            track: ti,
+            index,
+            before: Segment::Gap(g),
+            after: Segment::Gap(Gap { duration: t - gap_start }),
+        }],
+        desc: format!("extend gap to {}", format_seconds(&t)),
+    })
+}
+
 /// Extend a clip edge outward past neighboring segments (`e`): everything
 /// the span covers is reconciled destructively — gaps and wholly-covered
 /// clips are removed, a straddled follower is trimmed at its near edge
@@ -2387,6 +2414,29 @@ mod tests {
         assert!(matches!(extend_gap_end(&p, 4.0), Err(EditError::NothingToTrim(_))));
         let q = fixture(); // ends with a clip
         assert!(matches!(extend_gap_end(&q, 6.0), Err(EditError::NoGap)));
+    }
+
+    #[test]
+    fn extend_gap_tail_moves_any_gap() {
+        let mut p = fixture(); // [Clip #1 [0..2)] [Gap 1 @2..3] [Clip #2 [3..5)]
+        let mut h = History::default();
+        // Grow the middle gap to [2..4): clip #2 slides right, timeline grows.
+        let batch = extend_gap_tail(&p, 1, 4.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        assert!(matches!(&track.segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(6));
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(0));
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+        // Shrink to [2..2.5): clip #2 slides left, timeline shrinks.
+        let batch = extend_gap_tail(&p, 1, 2.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert!(matches!(&p.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
+        assert_eq!(p.timeline.end(), Seconds::new(9, 2));
+        // Not a gap / at/before its start both refuse.
+        assert!(matches!(extend_gap_tail(&p, 0, 1.0), Err(EditError::NoGap)));
+        assert!(matches!(extend_gap_tail(&p, 1, 0.0), Err(EditError::NothingToTrim(_))));
     }
 
     #[test]

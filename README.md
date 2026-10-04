@@ -48,7 +48,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              navigate to the target (mpv shows the armed material) ·
 #              e commit (replaces what it crosses) · E flip ripple ·
 #              [ ] switch side in-mode · < > (, .) switch end in-mode ·
-#              Esc cancel
+#              gaps arm at their tail and extend without bound · Esc cancel
 #   misc:      r reload project from disk · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 

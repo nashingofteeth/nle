@@ -203,14 +203,17 @@ pub enum Mode {
     Extend(ExtendState),
 }
 
-/// Which boundary is armed in extend mode: a clip edge, or a virtual
-/// timeline edge where a gap meets the sequence boundary.
+/// Which boundary is armed in extend mode: a clip edge, or a gap's tail.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Armed {
     /// Head (`head == true`) or tail of the clip with this id.
     Clip { id: u32, head: bool },
-    /// Timeline end with a trailing gap.
-    TailGap,
+    /// A gap armed at its tail (right edge) — the only edge a gap can
+    /// move independently, since its start is fixed by the preceding
+    /// segment's duration. `index` is the gap's segment index, stable
+    /// while the mode is active. Gaps have no source material, so the
+    /// range is unbounded.
+    GapTail { index: usize },
     /// Timeline start (0) with a leading gap.
     HeadGap,
 }
@@ -669,9 +672,9 @@ enum CommitKind {
     GrowTailPastEnd,
     AbsorbTail,
     AbsorbHead,
-    ShortenTail,
     ShortenHeadGap,
-    GrowTailGap,
+    /// Move a gap's tail to the playhead (grow or shrink).
+    GapTail,
     Delete,
     Noop,
 }
@@ -707,16 +710,22 @@ fn resolve_armed(project: &Project, t: f64) -> Result<(Armed, f64), String> {
                 return Ok((Armed::Clip { id: c.id, head: false }, acc));
             }
     }
-    // Pass 3: virtual timeline edges with gaps.
-    let total = acc;
-    if t.abs() < eps
-        && matches!(track.segments.first(), Some(TimelineSegment::Gap(_))) {
-            return Ok((Armed::HeadGap, 0.0));
+    // Pass 3: gap ends — arm the gap at its tail, so any gap can be
+    // extended (not just the trailing one). Clip boundaries above win, so
+    // this only fires for a gap followed by nothing or by another gap.
+    let mut acc = 0.0;
+    for (i, seg) in track.segments.iter().enumerate() {
+        acc += secs(&seg.duration());
+        if matches!(seg, TimelineSegment::Gap(_)) && (acc - t).abs() < eps {
+            return Ok((Armed::GapTail { index: i }, acc));
         }
-    if (total - t).abs() < eps
-        && matches!(track.segments.last(), Some(TimelineSegment::Gap(_)))
+    }
+    // Pass 4: a leading gap's head (timeline start, where it can only be
+    // shortened by growing the first clip into it).
+    if t.abs() < eps
+        && matches!(track.segments.first(), Some(TimelineSegment::Gap(_)))
     {
-        return Ok((Armed::TailGap, total));
+        return Ok((Armed::HeadGap, 0.0));
     }
     Err("extend starts at a boundary — j/k to a cut".to_string())
 }
@@ -766,7 +775,6 @@ fn plan_extend(project: &Project, playhead: f64, ripple: bool) -> Result<ExtendP
 /// cut without re-resolving from a playhead.
 fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPlan, String> {
     let track = project.timeline.video_track().ok_or_else(|| "empty timeline".to_string())?;
-    let total = secs(&project.timeline.end());
 
     match armed {
         Armed::Clip { id, head } => {
@@ -824,11 +832,15 @@ fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPl
                 preview,
             })
         }
-        Armed::TailGap => {
-            let gap_start = total - secs(&track.segments.last().map(|s| s.duration()).unwrap_or(Seconds::from_integer(0)));
+        Armed::GapTail { index } => {
+            let g = match track.segments.get(index) {
+                Some(TimelineSegment::Gap(g)) => g,
+                _ => return Err("gap vanished".to_string()),
+            };
+            let gap_start = secs(&track.start_of(index));
             Ok(ExtendPlan {
                 armed,
-                edge_pos: total,
+                edge_pos: gap_start + secs(&g.duration),
                 lo: gap_start,
                 hi: None,
                 mat: None,
@@ -907,13 +919,7 @@ fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Resu
                 Ok(CommitKind::Delete)
             }
         }
-        Armed::TailGap => {
-            if ph > edge_pos {
-                Ok(CommitKind::GrowTailGap)
-            } else {
-                Ok(CommitKind::ShortenTail)
-            }
-        }
+        Armed::GapTail { .. } => Ok(CommitKind::GapTail),
         Armed::HeadGap => Ok(CommitKind::ShortenHeadGap),
     }
 }
@@ -1053,7 +1059,7 @@ fn snap_extend_target(fps: Option<&Seconds>, st: &ExtendState, t: f64) -> f64 {
 fn armed_desc(armed: &Armed) -> String {
     match armed {
         Armed::Clip { id, head } => format!("{} of clip #{id}", if *head { "head" } else { "tail" }),
-        Armed::TailGap => "timeline end".to_string(),
+        Armed::GapTail { .. } => "gap end".to_string(),
         Armed::HeadGap => "timeline start".to_string(),
     }
 }
@@ -1124,12 +1130,12 @@ fn armed_on_side(project: &Project, t: f64, side: Side) -> Option<(Armed, f64)> 
     let track = project.timeline.video_track()?;
     let eps = 1e-6;
     let mut acc = 0.0;
-    for seg in &track.segments {
+    for (i, seg) in track.segments.iter().enumerate() {
         let start = acc;
         acc += secs(&seg.duration());
         let end = acc;
-        if let TimelineSegment::Clip(c) = seg {
-            match side {
+        match seg {
+            TimelineSegment::Clip(c) => match side {
                 Side::Left if (end - t).abs() < eps => {
                     return Some((Armed::Clip { id: c.id, head: false }, end));
                 }
@@ -1137,6 +1143,17 @@ fn armed_on_side(project: &Project, t: f64, side: Side) -> Option<(Armed, f64)> 
                     return Some((Armed::Clip { id: c.id, head: true }, start));
                 }
                 _ => {}
+            },
+            // A gap is armed at its tail whichever side it presents; the
+            // node is where the gap ends.
+            TimelineSegment::Gap(_) => {
+                let on_side = match side {
+                    Side::Left => (end - t).abs() < eps,
+                    Side::Right => (start - t).abs() < eps,
+                };
+                if on_side {
+                    return Some((Armed::GapTail { index: i }, end));
+                }
             }
         }
     }
@@ -1160,7 +1177,12 @@ fn enter_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
         return;
     };
     match plan_for_armed(&app.project, armed, edge) {
-        Ok(plan) => apply_extend_plan(app, player, plan, false),
+        Ok(plan) => {
+            // Land on the armed edge (a gap presents its tail, which can
+            // be away from the cut we armed it from).
+            app.playhead = edge;
+            apply_extend_plan(app, player, plan, false);
+        }
         Err(m) => app.set_message(&m),
     }
 }
@@ -1177,7 +1199,10 @@ fn set_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
         return;
     }
     match plan_for_armed(&app.project, armed, edge) {
-        Ok(plan) => apply_extend_plan(app, player, plan, st.ripple),
+        Ok(plan) => {
+            app.playhead = edge;
+            apply_extend_plan(app, player, plan, st.ripple);
+        }
         Err(m) => app.set_message(&m),
     }
 }
@@ -1227,7 +1252,7 @@ fn run_commit_action(app: &App, armed: &Armed, kind: CommitKind, ripple: bool) -
     let (project, ph) = (&app.project, app.playhead);
     let (id, head) = match armed {
         Armed::Clip { id, head } => (*id, *head),
-        Armed::TailGap | Armed::HeadGap => (0, false),
+        Armed::GapTail { .. } | Armed::HeadGap => (0, false),
     };
     match kind {
         CommitKind::TrimHead => {
@@ -1273,14 +1298,13 @@ fn run_commit_action(app: &App, armed: &Armed, kind: CommitKind, ripple: bool) -
                 edit::absorb_outward(project, id, head, ph)
             }
         }
-        CommitKind::ShortenTail | CommitKind::ShortenHeadGap => {
-            if matches!(armed, Armed::TailGap) {
-                edit::trim_out(project, ph)
-            } else {
-                edit::trim_in(project, ph)
-            }
+        CommitKind::ShortenHeadGap => edit::trim_in(project, ph),
+        CommitKind::GapTail => {
+            let Armed::GapTail { index } = armed else {
+                return Err(EditError::NoGap);
+            };
+            edit::extend_gap_tail(project, *index, ph)
         }
-        CommitKind::GrowTailGap => edit::extend_gap_end(project, ph),
         CommitKind::Delete => {
             // The playhead reached the armed clip's opposite end, so the
             // clip is fully consumed: delete IT, not whatever segment the
@@ -1582,7 +1606,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         let label = match &app.mode {
             Mode::Extend(st) => match st.armed {
                 Armed::Clip { id, .. } => format!("clip #{id}"),
-                Armed::TailGap | Armed::HeadGap => "gap".to_string(),
+                Armed::GapTail { .. } | Armed::HeadGap => "gap".to_string(),
             },
             _ => String::new(),
         };
@@ -1894,8 +1918,8 @@ fn extend_status(app: &App, st: &ExtendState) -> String {
                 fmt_timecode(st.edge_pos, fps),
             )
         }
-        Armed::TailGap => format!(
-            "EXTEND timeline end · range {range} · free growth{flag}"
+        Armed::GapTail { .. } => format!(
+            "EXTEND gap end · range {range} · free growth{flag}"
         ),
         Armed::HeadGap => format!(
             "EXTEND timeline start · range {range}{flag}"
@@ -2085,7 +2109,7 @@ mod tests {
         r.timeline.video_track_mut().unwrap().segments.push(
             TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
         );
-        assert_eq!(resolve_armed(&r, 10.0), Ok((Armed::TailGap, 10.0)));
+        assert_eq!(resolve_armed(&r, 10.0), Ok((Armed::GapTail { index: 3 }, 10.0)));
         let mut s = asset_project();
         s.timeline.video_track_mut().unwrap().segments.insert(
             0,
@@ -2144,7 +2168,7 @@ mod tests {
             TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
         );
         let plan = plan_extend(&p, 10.0, false).unwrap();
-        assert_eq!(plan.armed, Armed::TailGap);
+        assert_eq!(plan.armed, Armed::GapTail { index: 3 });
         assert_eq!(plan.lo, 7.0);
         assert_eq!(plan.hi, None);
         assert_eq!(plan.mat, None);
@@ -2183,7 +2207,7 @@ mod tests {
         };
         assert_eq!(strip_geom(&app, &st), Some((10.0, 1.0, 4.0)));
         // Gap-armed: no strip.
-        let open = ExtendState { armed: Armed::TailGap, ..st };
+        let open = ExtendState { armed: Armed::GapTail { index: 1 }, ..st };
         assert_eq!(strip_geom(&app, &open), None);
         // Unknown duration: no strip.
         let mut q = asset_project();
@@ -2196,7 +2220,7 @@ mod tests {
     #[test]
     fn clamp_extend_holds_both_modes() {
         let st = ExtendState {
-            armed: Armed::TailGap,
+            armed: Armed::GapTail { index: 1 },
             edge_pos: 7.0,
             ripple: false,
             lo: 7.0,
@@ -2324,9 +2348,9 @@ mod tests {
         r.timeline.video_track_mut().unwrap().segments.push(
             TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
         );
-        assert_eq!(plan_commit(&r, &Armed::TailGap, 10.0, 8.0), Ok(CommitKind::ShortenTail));
-        assert_eq!(plan_commit(&r, &Armed::TailGap, 10.0, 12.0), Ok(CommitKind::GrowTailGap));
-        assert_eq!(plan_commit(&r, &Armed::TailGap, 10.0, 10.0), Ok(CommitKind::Noop));
+        assert_eq!(plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 8.0), Ok(CommitKind::GapTail));
+        assert_eq!(plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 12.0), Ok(CommitKind::GapTail));
+        assert_eq!(plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 10.0), Ok(CommitKind::Noop));
     }
 
     #[test]
@@ -2351,6 +2375,56 @@ mod tests {
         assert!(b.desc.contains("absorbed"), "{}", b.desc);
         let b = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, true).unwrap();
         assert!(b.desc.contains("extend tail"), "{}", b.desc);
+    }
+
+    // Any gap (here a middle one) can be armed at its tail and extended
+    // without bound; growing shifts what follows.
+    #[test]
+    fn arm_and_extend_middle_gap() {
+        let p = asset_project(); // [C1 0..3][gap 3..5][C2 5..7]
+        // `]` (Left) at the gap's end arms it; `[` (Right) at its start
+        // arms it too (the node it presents is its tail).
+        assert_eq!(
+            armed_on_side(&p, 5.0, Side::Left),
+            Some((Armed::GapTail { index: 1 }, 5.0))
+        );
+        assert_eq!(
+            armed_on_side(&p, 3.0, Side::Right),
+            Some((Armed::GapTail { index: 1 }, 5.0))
+        );
+        // `e` still prefers the clip boundary; the gap needs `[`/`]`.
+        assert_eq!(resolve_armed(&p, 5.0), Ok((Armed::Clip { id: 2, head: true }, 5.0)));
+
+        let plan = plan_for_armed(&p, Armed::GapTail { index: 1 }, 5.0).unwrap();
+        assert_eq!((plan.lo, plan.hi), (3.0, None), "unbounded");
+        assert!(matches!(plan.preview, ExtendPreviewSpec::Black { origin } if origin == 3.0));
+        assert_eq!(
+            plan_commit(&p, &Armed::GapTail { index: 1 }, 5.0, 9.0),
+            Ok(CommitKind::GapTail)
+        );
+
+        // Grow the gap to 7: clip #2 slides right, timeline grows.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 7.0;
+        let armed = Armed::GapTail { index: 1 };
+        let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
+        let mut h = History::default();
+        h.apply(&mut app.project, batch).unwrap();
+        let segs = app.project.timeline.video_track().unwrap().segments.clone();
+        assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
+        assert_eq!(app.project.timeline.end(), Seconds::from_integer(9));
+        assert_eq!(clip_by_id(&app.project, 2).duration(), Seconds::from_integer(2));
+
+        // Shrink it to 4: clip #2 slides left.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 4.0;
+        let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
+        let mut h = History::default();
+        h.apply(&mut app.project, batch).unwrap();
+        let segs = app.project.timeline.video_track().unwrap().segments.clone();
+        assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
+        assert_eq!(clip_by_id(&app.project, 2).duration(), Seconds::from_integer(2));
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {
@@ -2441,18 +2515,26 @@ mod tests {
             Some((Armed::Clip { id: 2, head: true }, 3.0)),
             "] is the clip starting at the cut"
         );
-        // Against a gap only one side has a clip.
+        // Against a gap, the gap is armed at its tail from either side.
         let q = asset_project(); // [C1] [gap] [C2]
         assert_eq!(
             armed_on_side(&q, 3.0, Side::Left),
             Some((Armed::Clip { id: 1, head: false }, 3.0))
         );
-        assert_eq!(armed_on_side(&q, 3.0, Side::Right), None, "gap on the right");
+        assert_eq!(
+            armed_on_side(&q, 3.0, Side::Right),
+            Some((Armed::GapTail { index: 1 }, 5.0)),
+            "gap on the right arms the gap"
+        );
         assert_eq!(
             armed_on_side(&q, 5.0, Side::Right),
             Some((Armed::Clip { id: 2, head: true }, 5.0))
         );
-        assert_eq!(armed_on_side(&q, 5.0, Side::Left), None, "gap on the left");
+        assert_eq!(
+            armed_on_side(&q, 5.0, Side::Left),
+            Some((Armed::GapTail { index: 1 }, 5.0)),
+            "gap on the left arms the gap"
+        );
         // Nothing at a non-boundary.
         assert_eq!(armed_on_side(&q, 1.0, Side::Left), None);
     }
