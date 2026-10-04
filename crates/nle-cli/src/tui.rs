@@ -1913,11 +1913,19 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         // meaningless in source space).
         let white_here = (app.playhead - st.edge_pos).abs() < 1e-9;
         let color = if white_here { Color::White } else { Color::Yellow };
-        if strip.is_some() {
+        if let Some((_, ain, _)) = strip {
             // Strip scale: the clamped range translated through the
             // preview offset; no material run (it spans the strip).
             let hi_edge = st.hi.unwrap_or(f64::INFINITY);
-            paint_run(&mut marker_cells, total, inner.width, st.lo - strip_off, hi_edge - strip_off, '─', Style::default().fg(Color::Yellow));
+            // A head's workable span stops at the segment's edge: the
+            // source before its in-point is material headroom, not part
+            // of the segment. (A tail's span runs on to the asset end,
+            // which is real forward timeline.)
+            let run_lo = match st.armed {
+                Armed::Clip { head: true, .. } => (st.lo - strip_off).max(ain),
+                _ => st.lo - strip_off,
+            };
+            paint_run(&mut marker_cells, total, inner.width, run_lo, hi_edge - strip_off, '─', Style::default().fg(Color::Yellow));
             let sph = marker_col(app.playhead - strip_off, total, inner.width);
             marker_cells[sph as usize] = (
                 if at_end { '▕' } else { '▏' },
@@ -3339,13 +3347,15 @@ mod tests {
         let (s, _, b) = sym(9, 1); // first label char of "clip #2"
         assert_eq!((s.as_str(), b), ("c", Color::Cyan));
 
-        // Marker row: yellow run from source 0 to 3.5 (strip cols 0..20
-        // → buffer 1..=20), playhead notch white inside it, default
-        // space right after the run.
+        // Marker row: for a head the run stops at the segment's edge (the
+        // in-point, source 0.5), so it starts at the playhead — no yellow
+        // over the material headroom.
         let (s, f, _) = sym(2, 2);
-        assert_eq!((s.as_str(), f), ("─", Color::Yellow));
+        assert_eq!((s.as_str(), f), (" ", Color::Reset), "no span over the headroom");
         let (s, f, _) = sym(4, 2);
         assert_eq!((s.as_str(), f), ("▏", Color::White));
+        let (s, f, _) = sym(5, 2);
+        assert_eq!((s.as_str(), f), ("─", Color::Yellow), "run starts at the edge");
         let (s, f, _) = sym(20, 2);
         assert_eq!((s.as_str(), f), ("─", Color::Yellow));
         let (s, f, _) = sym(21, 2);
