@@ -815,9 +815,14 @@ fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPl
             // Unknown asset duration: no extension room, trim/delete only,
             // and no material strip to show.
             let (lo, hi, mat) = if head {
-                // Head material reaches back to source zero; time zero
-                // caps the range (nothing exists left of the origin).
-                ((s - ain).max(0.0), Some(e), dur_opt.map(|d| (s - ain, s + (d - ain))))
+                // Head material reaches back to source zero. A segment at
+                // the timeline start (s == 0) can extend PAST it: the
+                // material is prepended (the segment keeps its start and
+                // grows, followers shift right), so its lower bound goes
+                // negative by the head room. Anywhere further right is
+                // capped at 0 — nothing exists left of the origin.
+                let lo = if s <= 0.0 { -ain } else { (s - ain).max(0.0) };
+                (lo, Some(e), dur_opt.map(|d| (s - ain, s + (d - ain))))
             } else {
                 // Tail material reaches forward to the asset end.
                 (s, Some(dur_opt.map(|d| e + (d - aout)).unwrap_or(e)), dur_opt.map(|d| (e - aout, e + (d - aout))))
@@ -1126,7 +1131,9 @@ fn clamp_extend(st: &ExtendState, t: f64) -> f64 {
 /// can step just outside the range, so pull back to the nearest in-range
 /// frame.
 fn snap_extend_target(fps: Option<&Seconds>, st: &ExtendState, t: f64) -> f64 {
-    let clamped = clamp_extend(st, t).max(0.0);
+    // No floor at 0: a timeline-start segment can extend left of it
+    // (material prepended), so `st.lo` may be negative.
+    let clamped = clamp_extend(st, t);
     let Some(fps) = fps else { return clamped };
     let f = secs(fps);
     let mut target = (clamped * f).round() / f;
@@ -1138,7 +1145,7 @@ fn snap_extend_target(fps: Option<&Seconds>, st: &ExtendState, t: f64) -> f64 {
     if target < st.lo {
         target = (st.lo * f).ceil() / f;
     }
-    target.max(0.0)
+    target
 }
 
 fn armed_desc(armed: &Armed) -> String {
@@ -2311,9 +2318,10 @@ mod tests {
         // Head of #2 at 5.0: ain 0 means no left room.
         let plan = plan_extend(&p, 5.0, true).unwrap();
         assert_eq!((plan.lo, plan.hi), (5.0, Some(7.0)));
-        // Head of #1 at 0.0: clamped at the origin despite material.
+        // Head of #1 at 0.0: the head material reaches past the timeline
+        // start, so the range dips negative (prepend).
         let plan = plan_extend(&p, 0.0, false).unwrap();
-        assert_eq!((plan.lo, plan.hi), (0.0, Some(3.0)));
+        assert_eq!((plan.lo, plan.hi), (-1.0, Some(3.0)));
         // Unknown asset duration: no extension room, trim/delete only,
         // no material strip, span-mapped preview.
         let mut q = asset_project();
@@ -2329,6 +2337,51 @@ mod tests {
             }
             _ => panic!("expected clip preview"),
         }
+    }
+
+    // A timeline-start segment can extend left of time 0 by prepending its
+    // head material; the timeline grows at the front.
+    #[test]
+    fn first_clip_head_extends_past_timeline_start() {
+        let p = asset_project(); // C1 [0..3) src 1..4 of a 10s asset
+        let head1 = Armed::Clip { id: 1, head: true };
+        let plan = plan_for_armed(&p, head1, 0.0).unwrap();
+        assert_eq!((plan.lo, plan.hi), (-1.0, Some(3.0)), "one second of head room below zero");
+        assert_eq!(plan_commit(&p, &head1, 0.0, -1.0), Ok(CommitKind::AbsorbHead));
+
+        for ripple in [false, true] {
+            let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+            app.playhead = -1.0;
+            let batch = run_commit_action(&app, &head1, CommitKind::AbsorbHead, ripple).unwrap();
+            let mut h = History::default();
+            h.apply(&mut app.project, batch).unwrap();
+            let c1 = clip_by_id(&app.project, 1);
+            assert_eq!(c1.asset_in, Seconds::from_integer(0), "head material used");
+            assert_eq!(c1.duration(), Seconds::from_integer(4));
+            assert_eq!(app.project.timeline.end(), Seconds::from_integer(8), "grew at the front");
+        }
+    }
+
+    // Rendering must survive a negative playhead (head extend past 0).
+    #[test]
+    fn extend_head_below_zero_renders() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let p = asset_project();
+        let plan = plan_for_armed(&p, Armed::Clip { id: 1, head: true }, 0.0).unwrap();
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = -1.0;
+        app.mode = Mode::Extend(ExtendState {
+            armed: plan.armed,
+            edge_pos: plan.edge_pos,
+            ripple: false,
+            lo: plan.lo,
+            hi: plan.hi,
+            mat: plan.mat,
+            preview_off: -1.0, // edge 0 at source 1
+        });
+        let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
+        term.draw(|f| render_timeline(f, Rect { x: 0, y: 0, width: 60, height: 4 }, &app)).unwrap();
     }
 
     #[test]

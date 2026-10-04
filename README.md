@@ -51,8 +51,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              [ ] switch side · < > (, .) switch end in-mode ·
 #              gaps arm at either edge: the tail extends right (e
 #              overwrites, E ripples) and the head overwrites the
-#              segment on its left · the status shows the projected
-#              timeline length · Esc cancel
+#              segment on its left · a clip at the very start can prepend
+#              its head material past time 0 · the status shows the
+#              projected timeline length · Esc cancel
 #   misc:      r reload project from disk · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 
