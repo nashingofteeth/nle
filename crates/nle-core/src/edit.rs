@@ -17,12 +17,13 @@ use thiserror::Error;
 
 use crate::project::{Project, ProjectError};
 use crate::time::{format_seconds, Seconds};
-use crate::timeline::{Clip, Gap, Segment, TimelineError, TrackKind};
+use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
 
-/// Deepest undo stack we keep (batches).
+/// Deepest undo stack we keep (changes).
 pub const MAX_HISTORY: usize = 100;
-/// Sidecar file format version (bump when EditOp changes shape).
-pub const HISTORY_VERSION: u32 = 2;
+/// Sidecar file format version. No migration path is kept (see
+/// README "Compatibility: none, by design"): old sidecars start fresh.
+pub const HISTORY_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -58,15 +59,13 @@ pub enum EditError {
     Project(#[from] ProjectError),
 }
 
-/// Serde wrapper: Option<Seconds> as "n/d" strings — enum variant fields
-/// can't carry #[serde(with)] directly, so the newtype does.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SerLen(#[serde(with = "crate::time::rational_ser::opt")] Option<Seconds>);
-
 /// One reversible change: a segment inserted / removed / replaced at an
 /// index of a track's segment list.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// NOTE: deliberately NOT serializable. The persisted history form is
+/// `Change` (frame topologies); op shapes are runtime-only so refactors
+/// here cannot break old sidecars.
+#[derive(Debug, Clone, PartialEq)]
 pub enum EditOp {
     Insert { track: usize, index: usize, segment: Segment },
     /// The embedded segment is the removed snapshot (its inverse re-adds it).
@@ -146,26 +145,44 @@ impl EditOp {
 }
 
 /// A user action: ops applied together, undone together.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Runtime-only (see `EditOp`): the persisted form is `Change`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Batch {
     pub ops: Vec<EditOp>,
     /// Human description, shown in the TUI message line.
     pub desc: String,
 }
 
-/// Undo/redo stack of batches. `apply` is the only way in — it validates,
-/// rolls back on failure, clears the redo stack, and caps the depth.
+/// Undo/redo stack of frame-topology changes. `apply` is the only way
+/// in: it snapshots the affected track as frames before running the
+/// batch, then stores the before/after pair as a `Change`. Undo and redo
+/// verify the live track against the recorded topology (by segment id,
+/// never by list index) and substitute the other side.
 #[derive(Debug, Default, Clone)]
 pub struct History {
-    done: Vec<Batch>,
-    undone: Vec<Batch>,
+    done: Vec<Change>,
+    undone: Vec<Change>,
 }
 
 impl History {
     pub fn apply(&mut self, project: &mut Project, batch: Batch) -> Result<(), EditError> {
+        if batch.ops.is_empty() {
+            project.validate()?;
+            return Ok(());
+        }
+        let track = batch_track(&batch, project)?;
+        let fps = history_fps(project);
+        let before = snapshot_track(&project.timeline.tracks[track], fps);
         apply_batch(project, &batch.ops)?;
         project.validate()?;
-        self.done.push(batch);
+        let after = snapshot_track(&project.timeline.tracks[track], fps);
+        self.done.push(Change {
+            track,
+            start_frame: 0,
+            before,
+            after,
+            desc: batch.desc,
+        });
         self.undone.clear();
         if self.done.len() > MAX_HISTORY {
             let excess = self.done.len() - MAX_HISTORY;
@@ -175,20 +192,21 @@ impl History {
     }
 
     pub fn undo(&mut self, project: &mut Project) -> Result<String, EditError> {
-        let batch = self.done.pop().ok_or(EditError::NothingToUndo)?;
-        let inverses: Vec<EditOp> = batch.ops.iter().rev().map(|op| op.invert()).collect();
-        apply_batch(project, &inverses)?;
+        let change = self.done.pop().ok_or(EditError::NothingToUndo)?;
+        substitute_topology(project, &change, false)?;
         project.validate()?;
-        self.undone.push(batch.clone());
-        Ok(batch.desc)
+        let desc = change.desc.clone();
+        self.undone.push(change);
+        Ok(desc)
     }
 
     pub fn redo(&mut self, project: &mut Project) -> Result<String, EditError> {
-        let batch = self.undone.pop().ok_or(EditError::NothingToRedo)?;
-        apply_batch(project, &batch.ops)?;
+        let change = self.undone.pop().ok_or(EditError::NothingToRedo)?;
+        substitute_topology(project, &change, true)?;
         project.validate()?;
-        self.done.push(batch.clone());
-        Ok(batch.desc)
+        let desc = change.desc.clone();
+        self.done.push(change);
+        Ok(desc)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -203,16 +221,18 @@ impl History {
         self.done.len()
     }
 
-    /// Serializable snapshot of both stacks (persisted in a sidecar file).
+    /// Serializable snapshot of the undo stack (persisted in a sidecar
+    /// file). Only `done` is stored: redo history dies across restarts
+    /// and is rebuilt live in-session.
     pub fn state(&self) -> HistoryState {
         HistoryState {
             version: HISTORY_VERSION,
             done: self.done.clone(),
-            undone: self.undone.clone(),
         }
     }
 
     /// Rebuild a History from a snapshot, honoring the depth cap.
+    /// The redo stack always starts empty.
     pub fn restore(state: HistoryState) -> Self {
         if state.version != HISTORY_VERSION {
             return Self::default();
@@ -222,10 +242,7 @@ impl History {
             let excess = done.len() - MAX_HISTORY;
             done.drain(0..excess);
         }
-        Self {
-            done,
-            undone: state.undone,
-        }
+        Self { done, undone: Vec::new() }
     }
 
     /// Atomic save to the sidecar file (crash can't corrupt it).
@@ -258,12 +275,117 @@ impl History {
     }
 }
 
-/// Serializable snapshot of the undo/redo stacks (the sidecar file).
+/// Serializable snapshot of the undo stack (the sidecar file).
+/// Only the `done` stack is stored; `undone` (redo) is session-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryState {
     pub version: u32,
-    pub done: Vec<Batch>,
-    pub undone: Vec<Batch>,
+    pub done: Vec<Change>,
+}
+
+/// One timeline segment as frame counts. This is the persisted history
+/// unit: positions are frames (robust to fps reinterpretation), clips
+/// are located by segment id (robust to index shifts), and the shape
+/// mirrors the timeline data model rather than any op implementation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Atom {
+    Clip { id: u32, asset: u32, in_frame: i64, out_frame: i64 },
+    Gap { frames: i64 },
+}
+
+/// One undoable user action as topologies: the affected track's
+/// segments before and after, in frames. Undo substitutes `before` for
+/// `after`; redo does the reverse. `start_frame` is reserved (whole-track
+/// snapshots start at 0) for future region-scoped entries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Change {
+    pub track: usize,
+    pub start_frame: i64,
+    pub before: Vec<Atom>,
+    pub after: Vec<Atom>,
+    pub desc: String,
+}
+
+fn history_fps(project: &Project) -> Seconds {
+    // Mirrors `snap`'s fallback: without a known fps the grid is whole
+    // seconds, so frame counts are second counts. Production always sets
+    // fps before the first edit; this only fires for empty projects.
+    project.fps.unwrap_or_else(|| Seconds::from_integer(1))
+}
+
+fn seconds_to_frames(s: Seconds, fps: Seconds) -> i64 {
+    (s * fps).round().to_integer()
+}
+
+fn frames_to_seconds(frames: i64, fps: Seconds) -> Seconds {
+    Seconds::new(frames, 1) / fps
+}
+
+fn atom_from_segment(seg: &Segment, fps: Seconds) -> Atom {
+    match seg {
+        Segment::Clip(c) => Atom::Clip {
+            id: c.id,
+            asset: c.asset,
+            in_frame: seconds_to_frames(c.asset_in, fps),
+            out_frame: seconds_to_frames(c.asset_out, fps),
+        },
+        Segment::Gap(g) => Atom::Gap {
+            frames: seconds_to_frames(g.duration, fps),
+        },
+    }
+}
+
+fn segment_from_atom(atom: &Atom, fps: Seconds) -> Segment {
+    match atom {
+        Atom::Clip { id, asset, in_frame, out_frame } => Segment::Clip(Clip {
+            id: *id,
+            asset: *asset,
+            asset_in: frames_to_seconds(*in_frame, fps),
+            asset_out: frames_to_seconds(*out_frame, fps),
+        }),
+        Atom::Gap { frames } => Segment::Gap(Gap {
+            duration: frames_to_seconds(*frames, fps),
+        }),
+    }
+}
+
+fn snapshot_track(track: &Track, fps: Seconds) -> Vec<Atom> {
+    track.segments.iter().map(|s| atom_from_segment(s, fps)).collect()
+}
+
+/// Which track a batch touches (all current batches are single-track).
+fn batch_track(batch: &Batch, project: &Project) -> Result<usize, EditError> {
+    match batch.ops.first() {
+        Some(EditOp::Insert { track, .. })
+        | Some(EditOp::Remove { track, .. })
+        | Some(EditOp::Replace { track, .. }) => Ok(*track),
+        None => video_track_index(project),
+    }
+}
+
+/// Verify the live track matches one side of `change` (by segment id and
+/// frame counts) and substitute the other. `forward == false` is undo
+/// (expect `after`, write `before`); `true` is redo.
+fn substitute_topology(project: &mut Project, change: &Change, forward: bool) -> Result<(), EditError> {
+    let fps = history_fps(project);
+    let track = project
+        .timeline
+        .tracks
+        .get_mut(change.track)
+        .ok_or(EditError::TrackNotFound(change.track))?;
+    let (expected, write) = if forward {
+        (&change.before, &change.after)
+    } else {
+        (&change.after, &change.before)
+    };
+    let live = snapshot_track(track, fps);
+    if live != *expected {
+        return Err(EditError::Timeline(TimelineError::Corrupt(
+            "timeline changed outside the undo stack — history entry does not apply".to_string(),
+        )));
+    }
+    track.segments = write.iter().map(|a| segment_from_atom(a, fps)).collect();
+    Ok(())
 }
 
 /// Apply ops in order; on any failure, roll back the applied prefix in
@@ -1253,5 +1375,170 @@ mod tests {
         assert_eq!(clip_ids(&p), vec![1, 2]);
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
         let _ = h;
+    }
+
+    #[test]
+    fn sidecar_persists_done_only_and_round_trips() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = split(&p, 4.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let batch = trim_in(&p, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        h.undo(&mut p).unwrap(); // done=[split], undone=[trim] (dies on save)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.history.json");
+        h.save(&path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 3"), "{text}");
+        assert!(!text.contains("undone"), "{text}");
+        assert!(!text.contains("30/1"), "{text}");
+
+        let mut loaded = History::load(&path).unwrap();
+        assert!(loaded.can_undo());
+        assert!(!loaded.can_redo(), "redo dies across restarts");
+        let mut q = p.clone();
+        assert!(matches!(loaded.redo(&mut q), Err(EditError::NothingToRedo)));
+        // the surviving entry still undoes
+        loaded.undo(&mut q).unwrap();
+        assert_eq!(clip_ids(&q), vec![1, 2]);
+    }
+
+    #[test]
+    fn persisted_edits_undo_by_topology_after_reload() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = split(&p, 4.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let batch = trim_in(&p, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let snapshot = clip_by_id(&p, 1);
+        let batch = paste_ripple(&p, &snapshot, 2.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.history.json");
+        h.save(&path).unwrap();
+
+        // Restart simulation: project and history both reloaded from disk
+        // (production saves both after every edit). The reloaded project
+        // is in the post-edit state; history is purely from the sidecar.
+        let saved_project = serde_json::to_string(&p).unwrap();
+        let mut p2: Project = serde_json::from_str(&saved_project).unwrap();
+        let mut h2 = History::load(&path).unwrap();
+        h2.undo(&mut p2).unwrap(); // paste_ripple
+        h2.undo(&mut p2).unwrap(); // trim_in
+        let desc = h2.undo(&mut p2).unwrap(); // split
+        assert!(desc.contains("split"), "{desc}");
+        assert_eq!(clip_ids(&p2), vec![1, 2]);
+        assert_eq!(clip_by_id(&p2, 2).asset_out, Seconds::from_integer(2));
+        assert_eq!(p2.timeline.end(), Seconds::from_integer(5));
+        // redo was rebuilt live in-session
+        assert!(h2.can_redo());
+        h2.redo(&mut p2).unwrap();
+        assert_eq!(clip_ids(&p2), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn stale_history_fails_cleanly_on_edited_project() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = split(&p, 4.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.history.json");
+        h.save(&path).unwrap();
+
+        // Hand-edit outside undo: renumber a clip id.
+        let mut p2 = fixture();
+        if let Segment::Clip(c) = &mut p2.timeline.video_track_mut().unwrap().segments[2] {
+            c.id = 99;
+        }
+        let mut h2 = History::load(&path).unwrap();
+        assert!(matches!(
+            h2.undo(&mut p2),
+            Err(EditError::Timeline(TimelineError::Corrupt(_)))
+        ));
+        // project untouched by the failed undo
+        assert_eq!(clip_ids(&p2), vec![1, 99]);
+        assert_eq!(p2.timeline.end(), Seconds::from_integer(5));
+    }
+
+    #[test]
+    fn recorded_frames_scale_with_fps() {
+        // The same 1s trim records 30 gap frames at 30fps, 60 at 60fps.
+        let mut p30 = fixture();
+        let mut h30 = History::default();
+        let batch = trim_in(&p30, 1.0).unwrap();
+        h30.apply(&mut p30, batch).unwrap();
+        let first_gap = |h: &History| {
+            h.state().done[0]
+                .after
+                .iter()
+                .find_map(|a| match a {
+                    Atom::Gap { frames } => Some(*frames),
+                    Atom::Clip { .. } => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(first_gap(&h30), 30);
+
+        let mut p60 = fixture();
+        p60.fps = Some(Seconds::new(60, 1));
+        let mut h60 = History::default();
+        let batch = trim_in(&p60, 1.0).unwrap();
+        h60.apply(&mut p60, batch).unwrap();
+        assert_eq!(first_gap(&h60), 60);
+
+        // Reinterpreting the project at another fps invalidates loudly:
+        // frame counts no longer match, so undo refuses instead of
+        // mis-restoring.
+        p30.fps = Some(Seconds::new(60, 1));
+        assert!(matches!(
+            h30.undo(&mut p30),
+            Err(EditError::Timeline(TimelineError::Corrupt(_)))
+        ));
+    }
+
+    #[test]
+    fn history_depth_is_capped_and_redo_clears() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let snapshot = clip_by_id(&p, 1);
+        for _ in 0..(MAX_HISTORY + 5) {
+            let end = p.timeline.end();
+            let end_f = *end.numer() as f64 / *end.denom() as f64;
+            let batch = paste_ripple(&p, &snapshot, end_f + 10.0).unwrap();
+            h.apply(&mut p, batch).unwrap();
+        }
+        assert_eq!(h.depth(), MAX_HISTORY);
+        // cap survives a save/load round trip
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.history.json");
+        h.save(&path).unwrap();
+        assert_eq!(History::load(&path).unwrap().depth(), MAX_HISTORY);
+
+        // a new edit clears the redo stack
+        h.undo(&mut p).unwrap();
+        assert!(h.can_redo());
+        let end = p.timeline.end();
+        let end_f = *end.numer() as f64 / *end.denom() as f64;
+        let batch = paste_ripple(&p, &snapshot, end_f + 10.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert!(!h.can_redo());
+    }
+
+    #[test]
+    fn corrupt_and_foreign_sidecars_start_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.json");
+        std::fs::write(&bad, "not json").unwrap();
+        assert!(History::load(&bad).is_err());
+
+        // v2 stored raw op shapes: rejected, never misread
+        let old = dir.path().join("old.json");
+        std::fs::write(&old, "{\"version\": 2, \"done\": [], \"undone\": []}").unwrap();
+        assert!(History::load(&old).is_err());
+        assert!(History::restore(HistoryState { version: 2, done: vec![] }).depth() == 0);
     }
 }

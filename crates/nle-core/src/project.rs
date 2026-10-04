@@ -15,6 +15,9 @@ use crate::media::RawProbe;
 use crate::time::{rational_ser, Seconds};
 use crate::timeline::{Segment, Timeline, TimelineError};
 
+/// Project file format version. No migration path is kept (see
+/// README "Compatibility: none, by design"): old files are rejected,
+/// never silently misread.
 pub const PROJECT_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]

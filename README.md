@@ -9,6 +9,16 @@ Editing for real: the TUI drives the model directly — trim in/out, split,
 delete (gap or ripple), yank/paste, undo/redo — with auto-save and instant
 preview rebuilds on every edit. Next: M4 — multi-track + audio.
 
+## Compatibility: none, by design
+
+**nle is a private application for one machine and one user. It is not
+distributed, so there is no backward compatibility to preserve.**
+Project files (`nle.json`), history sidecars (`nle.history.json`), and
+cached artifacts may change shape at any time: old files are rejected
+with a clear error (never silently misread), and the fix is always
+"rebuild it" (`./demo.sh` regenerates the demo project). Don't write
+migration code; bump the format version and move on.
+
 ## Layout
 
 | Crate | Job |
