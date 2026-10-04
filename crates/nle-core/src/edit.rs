@@ -173,8 +173,11 @@ impl History {
         let track = batch_track(&batch, project)?;
         let fps = history_fps(project);
         let before = snapshot_track(&project.timeline.tracks[track], fps);
-        apply_batch(project, &batch.ops)?;
-        project.validate()?;
+        let saved = project.timeline.tracks[track].segments.clone();
+        if let Err(e) = apply_batch(project, &batch.ops).and_then(|_| project.validate().map_err(EditError::from)) {
+            project.timeline.tracks[track].segments = saved;
+            return Err(e);
+        }
         let after = snapshot_track(&project.timeline.tracks[track], fps);
         self.done.push(Change {
             track,
@@ -192,19 +195,45 @@ impl History {
     }
 
     pub fn undo(&mut self, project: &mut Project) -> Result<String, EditError> {
-        let change = self.done.pop().ok_or(EditError::NothingToUndo)?;
-        substitute_topology(project, &change, false)?;
-        project.validate()?;
+        let change = self.done.last().ok_or(EditError::NothingToUndo)?.clone();
+        let saved = project
+            .timeline
+            .tracks
+            .get(change.track)
+            .map(|t| t.segments.clone());
         let desc = change.desc.clone();
+        if let Err(e) =
+            substitute_topology(project, &change, false).and_then(|_| project.validate().map_err(EditError::from))
+        {
+            if let Some(segments) = saved
+                && let Some(track) = project.timeline.tracks.get_mut(change.track) {
+                    track.segments = segments;
+                }
+            return Err(e);
+        }
+        self.done.pop();
         self.undone.push(change);
         Ok(desc)
     }
 
     pub fn redo(&mut self, project: &mut Project) -> Result<String, EditError> {
-        let change = self.undone.pop().ok_or(EditError::NothingToRedo)?;
-        substitute_topology(project, &change, true)?;
-        project.validate()?;
+        let change = self.undone.last().ok_or(EditError::NothingToRedo)?.clone();
+        let saved = project
+            .timeline
+            .tracks
+            .get(change.track)
+            .map(|t| t.segments.clone());
         let desc = change.desc.clone();
+        if let Err(e) =
+            substitute_topology(project, &change, true).and_then(|_| project.validate().map_err(EditError::from))
+        {
+            if let Some(segments) = saved
+                && let Some(track) = project.timeline.tracks.get_mut(change.track) {
+                    track.segments = segments;
+                }
+            return Err(e);
+        }
+        self.undone.pop();
         self.done.push(change);
         Ok(desc)
     }
@@ -1540,5 +1569,51 @@ mod tests {
         std::fs::write(&old, "{\"version\": 2, \"done\": [], \"undone\": []}").unwrap();
         assert!(History::load(&old).is_err());
         assert!(History::restore(HistoryState { version: 2, done: vec![] }).depth() == 0);
+    }
+
+    #[test]
+    fn failed_apply_restores_project_and_keeps_history_empty() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let before = p.clone();
+        // Zero-duration replacement passes op application but fails validate.
+        let seg = p.timeline.video_track().unwrap().segments[0].clone();
+        let bad = match seg {
+            Segment::Clip(c) => Segment::Clip(Clip {
+                asset_out: c.asset_in,
+                ..c
+            }),
+            Segment::Gap(_) => unreachable!(),
+        };
+        let batch = Batch {
+            ops: vec![EditOp::Replace {
+                track: 0,
+                index: 0,
+                before: p.timeline.video_track().unwrap().segments[0].clone(),
+                after: bad,
+            }],
+            desc: "bad edit".into(),
+        };
+        assert!(h.apply(&mut p, batch).is_err());
+        assert_eq!(p, before, "project untouched");
+        assert_eq!(h.depth(), 0, "nothing pushed");
+    }
+
+    #[test]
+    fn failed_undo_keeps_its_history_entry() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = split(&p, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        let expected = p.clone();
+        // External mutation: undo must refuse and keep its entry.
+        p.timeline.video_track_mut().unwrap().segments.pop();
+        assert!(h.undo(&mut p).is_err());
+        assert_eq!(h.depth(), 1, "entry preserved for retry");
+        assert!(!h.can_redo());
+        // Restoring the expected topology makes undo work again.
+        p = expected;
+        assert!(h.undo(&mut p).is_ok());
+        assert_eq!(h.depth(), 0);
     }
 }
