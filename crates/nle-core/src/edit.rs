@@ -1551,7 +1551,12 @@ pub fn extend_gap_tail(
 /// predecessors (there is nothing to ripple — the prefix is anchored at
 /// 0). The gap overwrites them: covered gaps merge, a straddled clip is
 /// trimmed at its tail.
-pub fn extend_gap_head(project: &Project, index: usize, playhead: f64) -> Result<Batch, EditError> {
+pub fn extend_gap_head(
+    project: &Project,
+    index: usize,
+    playhead: f64,
+    ripple: bool,
+) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
@@ -1563,6 +1568,23 @@ pub fn extend_gap_head(project: &Project, index: usize, playhead: f64) -> Result
     let gap_end = gap_start + g.duration;
     if t >= gap_start {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
+    }
+    // Ripple: insert empty space at the gap's head. The gap's start is the
+    // prefix sum (anchored), so the inserted space merges into the gap —
+    // its duration grows by `delta` and everything after shifts right; the
+    // preceding segment is left untouched. (There is nowhere to shift the
+    // prefix to, so a plain "push the predecessors left" is impossible.)
+    if ripple {
+        let delta = gap_start - t;
+        return Ok(Batch {
+            ops: vec![EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Gap(g.clone()),
+                after: Segment::Gap(Gap { duration: g.duration + delta }),
+            }],
+            desc: format!("insert gap at {}", stamp(project, &t)),
+        });
     }
     let mut ops = vec![EditOp::Replace {
         track: ti,
@@ -2615,7 +2637,7 @@ mod tests {
         let mut p = fixture(); // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
         let mut h = History::default();
         // Grow the gap's head to 1.0: clip #1 is trimmed to [0..1).
-        let batch = extend_gap_head(&p, 1, 1.0).unwrap();
+        let batch = extend_gap_head(&p, 1, 1.0, false).unwrap();
         assert!(batch.desc.contains("trimmed clip #1"), "{}", batch.desc);
         h.apply(&mut p, batch).unwrap();
         let segs = &p.timeline.video_track().unwrap().segments;
@@ -2624,15 +2646,26 @@ mod tests {
         assert_eq!(p.timeline.end(), Seconds::from_integer(5), "length held");
         h.undo(&mut p).unwrap();
         // Grow to 0.0: clip #1 is absorbed whole.
-        let batch = extend_gap_head(&p, 1, 0.0).unwrap();
+        let batch = extend_gap_head(&p, 1, 0.0, false).unwrap();
         h.apply(&mut p, batch).unwrap();
         assert!(matches!(&p.timeline.video_track().unwrap().segments[0], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
         // Rightward (at/past the start) refuses; a clip is not a gap.
         let fresh = fixture();
-        assert!(matches!(extend_gap_head(&fresh, 1, 2.0), Err(EditError::NothingToTrim(_))));
-        assert!(matches!(extend_gap_head(&fresh, 1, 3.0), Err(EditError::NothingToTrim(_))));
-        assert!(matches!(extend_gap_head(&fresh, 0, 1.0), Err(EditError::NoGap)));
+        assert!(matches!(extend_gap_head(&fresh, 1, 2.0, false), Err(EditError::NothingToTrim(_))));
+        assert!(matches!(extend_gap_head(&fresh, 1, 3.0, false), Err(EditError::NothingToTrim(_))));
+        assert!(matches!(extend_gap_head(&fresh, 0, 1.0, false), Err(EditError::NoGap)));
+
+        // Ripple: insert space at the head — clip #1 is untouched, the gap
+        // grows, and clip #2 shifts right.
+        let mut q = fixture();
+        let mut h2 = History::default();
+        let batch = extend_gap_head(&q, 1, 1.0, true).unwrap();
+        assert!(batch.desc.contains("insert gap"), "{}", batch.desc);
+        h2.apply(&mut q, batch).unwrap();
+        assert_eq!(clip_by_id(&q, 1).duration(), Seconds::from_integer(2), "clip #1 kept");
+        assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
+        assert_eq!(q.timeline.end(), Seconds::from_integer(6), "grew by 1");
     }
 
     #[test]

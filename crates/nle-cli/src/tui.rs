@@ -737,6 +737,17 @@ fn resolve_armed(project: &Project, t: f64) -> Result<(Armed, f64), String> {
     Err("extend starts at a boundary — j/k to a cut".to_string())
 }
 
+/// The timeline span of a gap by segment index.
+fn gap_span(project: &Project, index: usize) -> Option<(f64, f64)> {
+    let track = project.timeline.video_track()?;
+    let g = match track.segments.get(index) {
+        Some(TimelineSegment::Gap(g)) => g,
+        _ => return None,
+    };
+    let s = secs(&track.start_of(index));
+    Some((s, s + secs(&g.duration)))
+}
+
 /// The timeline span of a clip by id.
 fn clip_span(project: &Project, id: u32) -> Option<(f64, f64)> {
     let track = project.timeline.video_track()?;
@@ -1240,23 +1251,43 @@ fn set_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
     }
 }
 
+/// The armed edge on the requested end of the same segment (clip or gap),
+/// and its position. `None` when the segment is gone.
+fn flip_target(project: &Project, armed: Armed, head: bool) -> Option<(Armed, f64)> {
+    match armed {
+        Armed::Clip { id, .. } => {
+            clip_span(project, id).map(|(s, e)| (Armed::Clip { id, head }, if head { s } else { e }))
+        }
+        Armed::GapHead { index } | Armed::GapTail { index } => gap_span(project, index).map(|(s, e)| {
+            if head {
+                (Armed::GapHead { index }, s)
+            } else {
+                (Armed::GapTail { index }, e)
+            }
+        }),
+        Armed::HeadGap => gap_span(project, 0).map(|(s, e)| {
+            if head {
+                (Armed::HeadGap, s)
+            } else {
+                (Armed::GapTail { index: 0 }, e)
+            }
+        }),
+    }
+}
+
 /// `<` / `>` (and `,` / `.`) inside extend mode: re-anchor the armed edge
-/// to the head or tail of the clip being edited, keeping the ripple flag.
+/// to the head or tail of the segment being edited (clip or gap), keeping
+/// the ripple flag.
 fn flip_extend_edge(app: &mut App, player: &MpvPlayer, head: bool) {
     let Some(st) = extend_state(app) else { return };
-    let Armed::Clip { id, .. } = st.armed else {
-        app.set_message("only a clip has two ends — head/tail needs a clip");
+    let Some((armed, edge)) = flip_target(&app.project, st.armed, head) else {
+        app.set_message("segment is gone");
         return;
     };
-    let Some((s, e)) = clip_span(&app.project, id) else {
-        app.set_message(&format!("clip #{id} is gone"));
-        return;
-    };
-    if st.armed == (Armed::Clip { id, head }) {
+    if st.armed == armed {
         return; // already on that end
     }
-    let edge = if head { s } else { e };
-    match plan_for_armed(&app.project, Armed::Clip { id, head }, edge) {
+    match plan_for_armed(&app.project, armed, edge) {
         Ok(plan) => {
             // Anchor the playhead before handing the monitor over so the
             // material preview opens on the armed source point.
@@ -1353,7 +1384,7 @@ fn commit_batch(
             let Armed::GapHead { index } = armed else {
                 return Err(EditError::NoGap);
             };
-            edit::extend_gap_head(project, *index, ph)
+            edit::extend_gap_head(project, *index, ph, ripple)
         }
         CommitKind::Delete => {
             // The playhead reached the armed clip's opposite end, so the
@@ -2739,6 +2770,38 @@ mod tests {
         let head = plan_for_armed(&p, Armed::Clip { id: 2, head: true }, s).unwrap();
         assert_eq!(head.lo, 5.0); // src in is 0: no head room
         assert_eq!(head.hi, Some(7.0));
+    }
+
+    // `<` / `>` flip either end of a clip or a gap.
+    #[test]
+    fn flip_target_covers_clips_and_gaps() {
+        let p = asset_project(); // [C1 0..3][gap 3..5][C2 5..7]
+        assert_eq!(
+            flip_target(&p, Armed::Clip { id: 1, head: false }, true),
+            Some((Armed::Clip { id: 1, head: true }, 0.0))
+        );
+        assert_eq!(
+            flip_target(&p, Armed::Clip { id: 1, head: true }, false),
+            Some((Armed::Clip { id: 1, head: false }, 3.0))
+        );
+        assert_eq!(
+            flip_target(&p, Armed::GapHead { index: 1 }, false),
+            Some((Armed::GapTail { index: 1 }, 5.0))
+        );
+        assert_eq!(
+            flip_target(&p, Armed::GapTail { index: 1 }, true),
+            Some((Armed::GapHead { index: 1 }, 3.0))
+        );
+        // Leading gap head flips to its tail.
+        let mut s = asset_project();
+        s.timeline.video_track_mut().unwrap().segments.insert(
+            0,
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+        );
+        assert_eq!(
+            flip_target(&s, Armed::HeadGap, false),
+            Some((Armed::GapTail { index: 0 }, 2.0))
+        );
     }
 
     #[test]
