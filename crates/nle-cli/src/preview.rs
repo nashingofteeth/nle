@@ -6,8 +6,9 @@
 //!
 //! Gaps become segments of a cached black file: mpv refuses protocol URLs
 //! (like `av://lavfi:...`) inside EDL entries for security reasons, but
-//! plain files are always allowed. EDL's third field is LENGTH (not end),
-//! so one 10s black file per geometry gets trimmed to every gap's length.
+//! plain files are always allowed. Long gaps are split into chunks no
+//! longer than the black file (mpv can't address past a segment's source
+//! length), so one black file per geometry serves every gap length.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -85,8 +86,14 @@ pub fn segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
     Ok(segs)
 }
 
+/// Length of the cached black filler file in seconds. Gaps longer than
+/// this are emitted as multiple EDL entries (mpv can't seek past a
+/// segment's source length).
+pub const BLACK_FILE_SECS: i64 = 10;
+
 /// Render segments to EDL entries (the part after `edl://`).
-/// `black` is required only when a gap exists.
+/// `black` is required only when a gap exists. Gaps longer than the
+/// black file are split into `BLACK_FILE_SECS`-sized chunks.
 pub fn assemble_edl(segments: &[Segment], black: Option<&Path>) -> Result<String, PreviewError> {
     let mut entries = Vec::new();
     for seg in segments {
@@ -98,7 +105,14 @@ pub fn assemble_edl(segments: &[Segment], black: Option<&Path>) -> Result<String
             )),
             Segment::Gap { length } => {
                 let black = black.ok_or(PreviewError::NoSize)?;
-                entries.push(format!("{},0,{}", edl_quote(&black.display().to_string()), format_seconds(length)));
+                let quoted = edl_quote(&black.display().to_string());
+                let chunk = Seconds::from_integer(BLACK_FILE_SECS);
+                let mut remaining = *length;
+                while remaining > chunk {
+                    entries.push(format!("{quoted},0,{}", format_seconds(&chunk)));
+                    remaining -= chunk;
+                }
+                entries.push(format!("{quoted},0,{}", format_seconds(&remaining)));
             }
         }
     }
@@ -133,9 +147,10 @@ pub fn black_cache_dir() -> PathBuf {
     base.join("nle").join("black")
 }
 
-/// Ensure a silent 10s black clip exists for this geometry and return its
-/// path. EDL length-trims it per gap, so one file per WxH+fps serves all
-/// projects on this machine.
+/// Ensure a silent black clip of `BLACK_FILE_SECS` exists for this
+/// geometry and return its path. EDL entries reference it in chunks of at
+/// most that length, so one file per WxH+fps serves all projects on this
+/// machine.
 pub fn ensure_black_file(width: u32, height: u32, fps: &Seconds) -> Result<PathBuf, std::io::Error> {
     let dir = black_cache_dir();
     fs::create_dir_all(&dir)?;
@@ -149,12 +164,13 @@ pub fn ensure_black_file(width: u32, height: u32, fps: &Seconds) -> Result<PathB
     // file that later loads "successfully".
     let tmp = dir.join(format!("{name}.tmp-{}.mp4", std::process::id()));
     let fps_s = format!("{}/{}", fps.numer(), fps.denom());
+    let len_s = BLACK_FILE_SECS.to_string();
     let status = Command::new("ffmpeg")
         .args([
             "-v", "error", "-y",
             "-f", "lavfi", "-i", &format!("color=c=black:s={width}x{height}:r={fps_s}"),
             "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-            "-t", "10",
+            "-t", &len_s,
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "40",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "32k",
@@ -265,6 +281,20 @@ mod tests {
     fn gap_without_black_file_is_an_error() {
         let segs = vec![Segment::Gap { length: Seconds::from_integer(1) }];
         assert!(matches!(assemble_edl(&segs, None), Err(PreviewError::NoSize)));
+    }
+
+    #[test]
+    fn long_gaps_split_into_black_file_chunks() {
+        let segs = vec![Segment::Gap { length: Seconds::from_integer(25) }];
+        let edl = assemble_edl(&segs, Some(Path::new("/cache/black.mp4"))).unwrap();
+        assert_eq!(
+            edl,
+            "%16%/cache/black.mp4,0,10;%16%/cache/black.mp4,0,10;%16%/cache/black.mp4,0,5"
+        );
+        // exactly one black file long stays a single entry
+        let segs = vec![Segment::Gap { length: Seconds::from_integer(BLACK_FILE_SECS) }];
+        let edl = assemble_edl(&segs, Some(Path::new("/cache/black.mp4"))).unwrap();
+        assert_eq!(edl, "%16%/cache/black.mp4,0,10");
     }
 
     #[test]
