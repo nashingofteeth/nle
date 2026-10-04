@@ -44,7 +44,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              u / Ctrl-r undo/redo (edits save automatically)
 #   extend:    e/E enter extend mode at a boundary (E = ripple) ·
 #              navigate to the target (mpv shows the armed material) ·
-#              e commit · E flip ripple · Esc cancel
+#              e commit (replaces what it crosses) · E flip ripple ·
+#              x swap to the other side of a shared cut · Esc cancel
 #   misc:      r reload project from disk · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 

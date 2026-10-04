@@ -754,6 +754,13 @@ enum ExtendPreviewSpec {
 fn plan_extend(project: &Project, playhead: f64, ripple: bool) -> Result<ExtendPlan, String> {
     let _ = ripple;
     let (armed, edge) = resolve_armed(project, playhead)?;
+    plan_for_armed(project, armed, edge)
+}
+
+/// Build the plan for a known armed boundary at `edge`. Split from
+/// `plan_extend` so extend mode can re-arm to the other side of a shared
+/// cut without re-resolving from a playhead.
+fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPlan, String> {
     let track = project.timeline.video_track().ok_or_else(|| "empty timeline".to_string())?;
     let total = secs(&project.timeline.end());
 
@@ -1015,6 +1022,12 @@ fn enter_extend(app: &mut App, player: &MpvPlayer, ripple: bool) {
         }
         Ok(p) => p,
     };
+    apply_extend_plan(app, player, plan, ripple);
+}
+
+/// Hand the monitor over to an extend plan's material preview and enter
+/// the mode. Shared by entry and by swapping sides at a shared cut.
+fn apply_extend_plan(app: &mut App, player: &MpvPlayer, plan: ExtendPlan, ripple: bool) {
     let (url, origin) = match &plan.preview {
         ExtendPreviewSpec::Clip { path, src_start, length, origin } => {
             let pv = preview::build_clip_preview(path, *src_start, *length, *origin);
@@ -1048,6 +1061,57 @@ fn enter_extend(app: &mut App, player: &MpvPlayer, ripple: bool) {
         mat: plan.mat,
         preview_off: origin,
     });
+}
+
+/// The clip boundary coincident with the armed edge but on the other side
+/// of it, if any. At a shared cut a head-armed right clip flips to the
+/// left clip's tail and vice versa; a boundary against a gap has no
+/// second clip side.
+fn alternate_armed(project: &Project, st: &ExtendState) -> Option<Armed> {
+    let (id, head) = match st.armed {
+        Armed::Clip { id, head } => (id, head),
+        Armed::TailGap | Armed::HeadGap => return None,
+    };
+    let track = project.timeline.video_track()?;
+    let eps = 1e-6;
+    let edge = st.edge_pos;
+    let mut acc = 0.0;
+    for seg in &track.segments {
+        let start = acc;
+        acc += secs(&seg.duration());
+        let end = acc;
+        if let TimelineSegment::Clip(c) = seg
+            && c.id != id
+        {
+            // Head-armed: our clip starts at the edge, so the other side
+            // is a clip ENDING here. Tail-armed: mirrored.
+            if head && (end - edge).abs() < eps {
+                return Some(Armed::Clip { id: c.id, head: false });
+            }
+            if !head && (start - edge).abs() < eps {
+                return Some(Armed::Clip { id: c.id, head: true });
+            }
+        }
+    }
+    None
+}
+
+/// `x` — swap the armed edge to the other side of a shared cut, keeping
+/// the ripple flag and playhead.
+fn swap_extend(app: &mut App, player: &MpvPlayer) {
+    let Some(st) = extend_state(app) else { return };
+    let Some(alt) = alternate_armed(&app.project, &st) else {
+        app.set_message("no other side here — only a shared cut arms two clips");
+        return;
+    };
+    let plan = match plan_for_armed(&app.project, alt, st.edge_pos) {
+        Ok(p) => p,
+        Err(m) => {
+            app.set_message(&m);
+            return;
+        }
+    };
+    apply_extend_plan(app, player, plan, st.ripple);
 }
 
 /// Leave extend mode: project timeline back on the monitor, playhead at
@@ -1272,6 +1336,7 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('G') | KeyCode::Char('$') => seek_to_mode(app, player, &st, app.total()),
         KeyCode::Char('e') => commit_extend(app, player),
+        KeyCode::Char('x') => swap_extend(app, player),
         KeyCode::Char('E') => {
             let ripple = match &mut app.mode {
                 Mode::Extend(inner) => {
@@ -1774,7 +1839,7 @@ fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
     );
 
     let help = if matches!(app.mode, Mode::Extend(_)) {
-        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · Esc cancel"
+        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · x swap side · Esc cancel"
     } else {
         "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · r reload · : cmd · q quit"
     };
@@ -2178,6 +2243,45 @@ mod tests {
         assert_eq!(clip_by_id(&app.project, 2).asset_in, Seconds::from_integer(0));
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
         assert_eq!(app.project.timeline.video_track().unwrap().segments.len(), 2);
+    }
+
+    // `x` swaps to the clip on the other side of a shared cut.
+    #[test]
+    fn alternate_armed_finds_other_side_of_shared_cut() {
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments.remove(1); // C1 | C2 cut
+        let state = |armed, edge| ExtendState {
+            armed,
+            edge_pos: edge,
+            ripple: false,
+            lo: 0.0,
+            hi: None,
+            mat: None,
+            preview_off: 0.0,
+        };
+        assert_eq!(
+            alternate_armed(&p, &state(Armed::Clip { id: 2, head: true }, 3.0)),
+            Some(Armed::Clip { id: 1, head: false }),
+            "head-armed right clip flips to the left tail"
+        );
+        assert_eq!(
+            alternate_armed(&p, &state(Armed::Clip { id: 1, head: false }, 3.0)),
+            Some(Armed::Clip { id: 2, head: true }),
+            "tail-armed left clip flips to the right head"
+        );
+        // Against a gap there is no clip on the other side.
+        let q = asset_project(); // [C1] [gap] [C2]
+        assert_eq!(
+            alternate_armed(&q, &state(Armed::Clip { id: 1, head: false }, 3.0)),
+            None
+        );
+        assert_eq!(
+            alternate_armed(&q, &state(Armed::Clip { id: 2, head: true }, 5.0)),
+            None
+        );
+        // Virtual edges never flip.
+        assert_eq!(alternate_armed(&q, &state(Armed::TailGap, 7.0)), None);
+        assert_eq!(alternate_armed(&q, &state(Armed::HeadGap, 0.0)), None);
     }
 
     #[test]
