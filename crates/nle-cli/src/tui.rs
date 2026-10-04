@@ -861,11 +861,12 @@ fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Resu
                 if ph > edge_pos && ph < e - 1e-9 {
                     Ok(CommitKind::TrimHead)
                 } else if ph < edge_pos {
-                    // Still inside the adjacent gap: plain grow. Past it:
-                    // absorb everything covered up to the playhead.
+                    // Strictly inside the adjacent gap: plain grow. At or
+                    // past its far edge there's no gap left to donate, so
+                    // absorb (which removes the covered span).
                     let in_gap = si > 0
                         && matches!(track.segments[si - 1], TimelineSegment::Gap(_))
-                        && ph >= s - secs(&track.segments[si - 1].duration()) - 1e-9;
+                        && ph > s - secs(&track.segments[si - 1].duration()) + 1e-9;
                     if in_gap {
                         Ok(CommitKind::GrowHeadIntoGap)
                     } else {
@@ -877,11 +878,12 @@ fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Resu
             } else if ph < edge_pos && ph > s + 1e-9 {
                 Ok(CommitKind::TrimTail)
             } else if ph > edge_pos {
-                // Still inside the adjacent gap: plain grow. Past it (or
-                // directly into the next clip): absorb the covered span.
+                // Strictly inside the adjacent gap: plain grow. At or past
+                // its far edge the gap is fully spanned, so absorb (which
+                // removes it and trims/removes any clip the span reaches).
                 let in_gap = si + 1 < track.segments.len()
                     && matches!(track.segments[si + 1], TimelineSegment::Gap(_))
-                    && ph <= e + secs(&track.segments[si + 1].duration()) + 1e-9;
+                    && ph < e + secs(&track.segments[si + 1].duration()) - 1e-9;
                 if in_gap {
                     Ok(CommitKind::GrowTailIntoGap)
                 } else if si + 1 >= track.segments.len() {
@@ -2104,6 +2106,78 @@ mod tests {
         assert!(b.desc.contains("absorbed"), "{}", b.desc);
         let b = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, true).unwrap();
         assert!(b.desc.contains("extend tail"), "{}", b.desc);
+    }
+
+    fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {
+        p.timeline
+            .video_track()
+            .unwrap()
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                TimelineSegment::Clip(c) => Some(c),
+                TimelineSegment::Gap(_) => None,
+            })
+            .find(|c| c.id == id)
+            .unwrap()
+            .clone()
+    }
+
+    // Extending a tail to the adjacent gap's far edge (exactly where the
+    // next clip starts — where `j` lands, and where 1s `l` steps often
+    // land) must absorb the now-fully-spanned gap, not call trim_in at the
+    // boundary and fail with "nothing to trim".
+    #[test]
+    fn commit_tail_to_gap_far_edge_absorbs() {
+        let p = asset_project(); // [C1 [0..3) src1..4] [gap 2 @3..5] [C2 [5..7)]
+        let (tail1, edge) = resolve_armed(&p, 3.0).unwrap();
+        assert_eq!(tail1, Armed::Clip { id: 1, head: false });
+        assert_eq!(
+            plan_commit(&p, &tail1, edge, 5.0),
+            Ok(CommitKind::AbsorbTail),
+            "the gap's far edge is not 'inside' the gap"
+        );
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 5.0;
+        let batch = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, false).unwrap();
+        let mut h = History::default();
+        h.apply(&mut app.project, batch).unwrap();
+        assert_eq!(clip_by_id(&app.project, 1).asset_out, Seconds::from_integer(6));
+        assert_eq!(app.project.timeline.end(), Seconds::from_integer(7));
+        assert_eq!(
+            app.project.timeline.video_track().unwrap().segments.len(),
+            2,
+            "gap absorbed"
+        );
+    }
+
+    // Symmetric: a head reaching the adjacent gap's near edge absorbs it.
+    #[test]
+    fn commit_head_to_gap_near_edge_absorbs() {
+        // [C1 [0..3)] [gap 1 @3..4] [C2 [4..6) src1..3]: one second of head
+        // room, enough to reach the gap's near edge at 3.0.
+        let mut p = asset_project();
+        {
+            let segs = &mut p.timeline.video_track_mut().unwrap().segments;
+            segs[1] = TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(1) });
+            segs[2] = TimelineSegment::Clip(nle_core::Clip {
+                id: 2,
+                asset: 1,
+                asset_in: Seconds::from_integer(1),
+                asset_out: Seconds::from_integer(3),
+            });
+        }
+        let (head2, edge) = resolve_armed(&p, 4.0).unwrap();
+        assert_eq!(head2, Armed::Clip { id: 2, head: true });
+        assert_eq!(plan_commit(&p, &head2, edge, 3.0), Ok(CommitKind::AbsorbHead));
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 3.0;
+        let batch = run_commit_action(&app, &head2, CommitKind::AbsorbHead, false).unwrap();
+        let mut h = History::default();
+        h.apply(&mut app.project, batch).unwrap();
+        assert_eq!(clip_by_id(&app.project, 2).asset_in, Seconds::from_integer(0));
+        assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
+        assert_eq!(app.project.timeline.video_track().unwrap().segments.len(), 2);
     }
 
     #[test]
