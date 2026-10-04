@@ -1326,6 +1326,263 @@ pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditErr
     })
 }
 
+/// Extend a clip edge outward past neighboring segments (`e`): everything
+/// the span covers is reconciled destructively — gaps and wholly-covered
+/// clips are removed, a straddled follower is trimmed at its near edge
+/// (absorbed whole when under a frame remains). One batch, one undo.
+/// (`E` never reaches here: it pushes everything aside via `extend_edge`.)
+pub fn absorb_outward(project: &Project, clip_id: u32, head: bool, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+    let si = track
+        .clip_index(clip_id)
+        .ok_or(EditError::ClipNotFound(clip_id))?;
+    let c = match &track.segments[si] {
+        Segment::Clip(c) => c.clone(),
+        Segment::Gap(_) => return Err(EditError::ClipNotFound(clip_id)),
+    };
+    let start = track.start_of(si);
+    let edge = start + if head { Seconds::from_integer(0) } else { c.duration() };
+
+    // Extend the armed edge first (indices below stay valid throughout).
+    let after = if head {
+        if t >= edge {
+            return Err(EditError::NothingToTrim(format_seconds(&t)));
+        }
+        let delta = edge - t;
+        let asset_in = c.asset_in - delta;
+        if asset_in < Seconds::from_integer(0) {
+            return Err(EditError::BeforeAsset {
+                id: c.id,
+                needed: format_seconds(&delta),
+                ain: format_seconds(&c.asset_in),
+            });
+        }
+        Clip { asset_in, ..c.clone() }
+    } else {
+        if t <= edge {
+            return Err(EditError::NothingToTrim(format_seconds(&t)));
+        }
+        let asset_out = c.asset_out + (t - edge);
+        let asset = project
+            .asset(c.asset)
+            .ok_or(EditError::ClipNotFound(c.asset))?;
+        if let Some(d) = asset.duration()
+            && asset_out > d
+        {
+            return Err(EditError::BeyondAsset {
+                id: c.id,
+                out: format_seconds(&asset_out),
+                duration: format_seconds(&d),
+            });
+        }
+        Clip { asset_out, ..c.clone() }
+    };
+    let mut ops = vec![EditOp::Replace {
+        track: ti,
+        index: si,
+        before: Segment::Clip(c),
+        after: Segment::Clip(after),
+    }];
+    let mut absorbed: Vec<String> = Vec::new();
+
+    if head {
+        // Covered predecessors, descending (higher indices first so
+        // lower ones stay valid), then the straddled one (if any).
+        let mut straddler: Option<usize> = None;
+        let mut covered: Vec<usize> = Vec::new();
+        let mut acc = start;
+        for k in (0..si).rev() {
+            let dur = track.segments[k].duration();
+            let ks = acc - dur;
+            if ks >= t {
+                covered.push(k);
+            } else if ks < t && t < acc {
+                straddler = Some(k);
+                break;
+            } else {
+                break;
+            }
+            acc = ks;
+        }
+        for k in covered {
+            absorbed.push(segment_note(&track.segments[k]));
+            ops.push(EditOp::Remove {
+                track: ti,
+                index: k,
+                segment: track.segments[k].clone(),
+            });
+        }
+        if let Some(m) = straddler {
+            let seg = track.segments[m].clone();
+            trim_or_absorb_tail(project, ti, Straddle { index: m, start: track.start_of(m), seg }, t, &mut ops, &mut absorbed)?;
+        }
+    } else {
+        // Covered followers, descending, then the straddled one (if any).
+        // NOTE: after the removals the straddler sits at si+1, so its
+        // pre-state content is passed explicitly with the adjusted index.
+        let mut straddler: Option<usize> = None;
+        let mut covered: Vec<usize> = Vec::new();
+        let mut acc = edge;
+        for k in si + 1..track.segments.len() {
+            let dur = track.segments[k].duration();
+            if acc + dur <= t {
+                covered.push(k);
+            } else if acc < t && t < acc + dur {
+                straddler = Some(k);
+                break;
+            } else {
+                break;
+            }
+            acc += dur;
+        }
+        for k in covered.iter().rev() {
+            absorbed.push(segment_note(&track.segments[*k]));
+            ops.push(EditOp::Remove {
+                track: ti,
+                index: *k,
+                segment: track.segments[*k].clone(),
+            });
+        }
+        if let Some(m) = straddler {
+            let seg = track.segments[m].clone();
+            trim_or_absorb_head(
+                project,
+                ti,
+                Straddle { index: si + 1, start: track.start_of(m), seg },
+                t,
+                &mut ops,
+                &mut absorbed,
+            )?;
+        }
+    }
+
+    let side = if head { "head" } else { "tail" };
+    let mut desc = format!("extend {side} of clip #{clip_id} to {}", format_seconds(&t));
+    if !absorbed.is_empty() {
+        desc += &format!(" (absorbed {})", absorbed.join(", "));
+    }
+    Ok(Batch { ops, desc })
+}
+
+/// Describe an absorbed segment for the batch description.
+fn segment_note(seg: &Segment) -> String {
+    match seg {
+        Segment::Gap(_) => "gap".to_string(),
+        Segment::Clip(c) => format!("clip #{}", c.id),
+    }
+}
+
+/// Where a straddled segment sits when its reconciling op applies
+/// (`index`), and what it looked like before any removals (`seg` at
+/// `start`). Removals ahead of it may have shifted it from its pre-state
+/// position, so the two are tracked separately.
+struct Straddle {
+    index: usize,
+    start: Seconds,
+    seg: Segment,
+}
+
+/// Trim a straddled follower's head to `t`, or absorb it whole when under
+/// a frame would remain. A straddled gap simply shrinks to its uncovered
+/// remainder. Appends to `ops`/`absorbed`.
+fn trim_or_absorb_head(
+    project: &Project,
+    ti: usize,
+    target: Straddle,
+    t: Seconds,
+    ops: &mut Vec<EditOp>,
+    absorbed: &mut Vec<String>,
+) -> Result<(), EditError> {
+    let (index, start, seg) = (target.index, target.start, target.seg);
+    match seg {
+        // A straddled gap shrinks to its uncovered remainder.
+        Segment::Gap(g) => {
+            ops.push(EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Gap(g.clone()),
+                after: Segment::Gap(Gap { duration: start + g.duration - t }),
+            });
+            Ok(())
+        }
+        Segment::Clip(c) => {
+            let remainder = start + c.duration() - t;
+            if at_least_a_frame(project, &remainder).is_err() {
+                absorbed.push(format!("clip #{}", c.id));
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index,
+                    segment: Segment::Clip(c),
+                });
+                return Ok(());
+            }
+            let after = Clip {
+                asset_in: c.asset_in + (t - start),
+                ..c.clone()
+            };
+            absorbed.push(format!("trimmed clip #{}", c.id));
+            ops.push(EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Clip(c),
+                after: Segment::Clip(after),
+            });
+            Ok(())
+        }
+    }
+}
+
+/// Trim a straddled predecessor's tail to `t`, or absorb it whole when
+/// under a frame would remain.
+fn trim_or_absorb_tail(
+    project: &Project,
+    ti: usize,
+    target: Straddle,
+    t: Seconds,
+    ops: &mut Vec<EditOp>,
+    absorbed: &mut Vec<String>,
+) -> Result<(), EditError> {
+    let (index, start, seg) = (target.index, target.start, target.seg);
+    match seg {
+        // A straddled gap shrinks to its uncovered remainder.
+        Segment::Gap(g) => {
+            ops.push(EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Gap(g.clone()),
+                after: Segment::Gap(Gap { duration: g.duration - (t - start) }),
+            });
+            Ok(())
+        }
+        Segment::Clip(c) => {
+            let remainder = t - start;
+            if at_least_a_frame(project, &remainder).is_err() {
+                absorbed.push(format!("clip #{}", c.id));
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index,
+                    segment: Segment::Clip(c),
+                });
+                return Ok(());
+            }
+            let after = Clip {
+                asset_out: c.asset_in + remainder,
+                ..c.clone()
+            };
+            absorbed.push(format!("trimmed clip #{}", c.id));
+            ops.push(EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Clip(c),
+                after: Segment::Clip(after),
+            });
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1969,6 +2226,120 @@ mod tests {
         assert!(matches!(extend_gap_end(&p, 4.0), Err(EditError::NothingToTrim(_))));
         let q = fixture(); // ends with a clip
         assert!(matches!(extend_gap_end(&q, 6.0), Err(EditError::NoGap)));
+    }
+
+    #[test]
+    fn absorb_over_gap_and_clip_removes_and_trims() {
+        // [Clip #1 [0..2) src 1..3] [Gap 1] [Clip #2 [3..5) src 0..2],
+        // asset is 10s: extend tail of #1 to 4.0.
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = absorb_outward(&p, 1, false, 4.0).unwrap();
+        assert!(batch.desc.contains("absorbed"), "{}", batch.desc);
+        assert!(batch.desc.contains("trimmed clip #2"), "{}", batch.desc);
+        h.apply(&mut p, batch).unwrap();
+        // #1 spans [0..4), the gap is gone, #2 keeps [4..5) src 1..2.
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(5));
+        let c2 = clip_by_id(&p, 2);
+        assert_eq!(c2.asset_in, Seconds::from_integer(1));
+        assert_eq!(c2.duration(), Seconds::from_integer(1));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(3));
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(0));
+        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3);
+    }
+
+    #[test]
+    fn absorb_over_two_gaps_and_a_clip() {
+        // [Clip #1 [0..2)] [Gap 1] [Clip #2 [3..5)] [Gap 1] [Clip #3 [6..8)]:
+        // extend tail of #1 to 6.5 absorbs both gaps, removes #2, trims #3.
+        let mut p = fixture();
+        {
+            let track = p.timeline.video_track_mut().unwrap();
+            track.segments.push(Segment::Gap(Gap { duration: Seconds::from_integer(1) }));
+            track.segments.push(Segment::Clip(Clip {
+                id: 3,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+            }));
+        }
+        let mut h = History::default();
+        let batch = absorb_outward(&p, 1, false, 6.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 3]);
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::new(15, 2));
+        assert_eq!(clip_by_id(&p, 3).asset_in, Seconds::new(1, 2));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 2, 3]);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+    }
+
+    #[test]
+    fn absorb_head_mirrors_tail() {
+        // Extend head of #2 left to 1.0: absorbs the gap, trims nothing
+        // else (#1 ends at 2.0 > 1.0, so #1 is only... wait: covered is
+        // [1.0, 3.0): the gap [2..3) fully, #1 [0..2) straddled -> trim
+        // #1's tail to 1.0.
+        let mut p = fixture();
+        // clip #2 needs 2s of head material for the reach to 1.0.
+        p.timeline.video_track_mut().unwrap().segments[2] = Segment::Clip(Clip {
+            id: 2,
+            asset: 1,
+            asset_in: Seconds::from_integer(2),
+            asset_out: Seconds::from_integer(4),
+        });
+        let mut h = History::default();
+        let batch = absorb_outward(&p, 2, true, 1.0).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(0));
+        let c1 = clip_by_id(&p, 1);
+        assert_eq!(c1.asset_out, Seconds::from_integer(2), "trimmed tail");
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_out, Seconds::from_integer(3));
+        assert_eq!(clip_by_id(&p, 2).asset_in, Seconds::from_integer(2));
+    }
+
+    #[test]
+    fn absorb_sub_frame_remainder_removes_whole() {
+        // A straddled follower left with under a frame is absorbed whole
+        // instead of leaving a sliver. Reachable via hand-placed
+        // off-grid ends (snapped positions always leave whole frames).
+        let mut p = fixture();
+        p.timeline.video_track_mut().unwrap().segments[2] = Segment::Clip(Clip {
+            id: 2,
+            asset: 1,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::new(99, 50),
+        }); // C2 [3..4.98)
+        let mut h = History::default();
+        // 4.97 snaps to frame 149 (4.9667), leaving a 0.013s stump:
+        // under half a 30fps frame, so #2 is absorbed whole.
+        let batch = absorb_outward(&p, 1, false, 4.97).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_ids(&p), vec![1]);
+        assert_eq!(p.timeline.end(), Seconds::new(149, 30));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_ids(&p), vec![1, 2]);
+    }
+
+    #[test]
+    fn absorb_validates_direction_and_material() {
+        let p = fixture();
+        // inward is not an extend
+        assert!(matches!(absorb_outward(&p, 1, false, 1.0), Err(EditError::NothingToTrim(_))));
+        assert!(matches!(absorb_outward(&p, 2, true, 6.0), Err(EditError::NothingToTrim(_))));
+        // past the asset end refuses
+        assert!(matches!(
+            absorb_outward(&p, 1, false, 12.0),
+            Err(EditError::BeyondAsset { .. })
+        ));
+        assert!(matches!(absorb_outward(&p, 99, false, 3.0), Err(EditError::ClipNotFound(99))));
     }
 
     #[test]

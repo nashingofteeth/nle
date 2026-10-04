@@ -663,6 +663,8 @@ enum CommitKind {
     GrowHeadIntoGap,
     GrowTailIntoGap,
     GrowTailPastEnd,
+    AbsorbTail,
+    AbsorbHead,
     ShortenTail,
     ShortenHeadGap,
     GrowTailGap,
@@ -772,52 +774,35 @@ fn plan_extend(project: &Project, playhead: f64, ripple: bool) -> Result<ExtendP
                 .ok_or_else(|| format!("asset #{} is missing", asset_id.asset))?;
             let ain = secs(&asset_id.asset_in);
             let aout = secs(&asset_id.asset_out);
-            // Unknown asset duration: no extension room, trim/delete only.
-            let mat_avail_out = asset.duration().map(|d| (secs(&d) - aout).max(0.0)).unwrap_or(0.0);
-            let mat_avail_in = ain;
-            // Neighbor bounds: the adjacent gap's far end, or the edge
-            // itself when a clip (or nothing) blocks the way.
-            let si = track
-                .segments
-                .iter()
-                .position(|seg| matches!(seg, TimelineSegment::Clip(c) if c.id == id))
-                .ok_or_else(|| "clip vanished".to_string())?;
-            let (lo, hi, src_start, length, mat) = if head {
-                let lo = if si > 0 {
-                    match &track.segments[si - 1] {
-                        // Adjacent gap: reach back over it, but never past
-                        // the available head material (or time zero).
-                        TimelineSegment::Gap(g) => {
-                            let gs = s - secs(&g.duration);
-                            (s - mat_avail_in.min(s - gs)).max(0.0)
-                        }
-                        _ => s,
-                    }
-                } else {
-                    // First segment: nothing exists left of the edge.
-                    s.max(0.0)
-                };
-                let src_start = Seconds::new(((ain - (s - lo)) * 1e6).round() as i64, 1_000_000);
-                let mat_hi = asset.duration().map(|d| s + (secs(&d) - ain)).unwrap_or(e);
-                (lo, Some(e), src_start, e - lo, Some((s - ain, mat_hi)))
+            let dur_opt = asset.duration().map(|d| secs(&d));
+            // Unknown asset duration: no extension room, trim/delete only,
+            // and no material strip to show.
+            let (lo, hi, mat) = if head {
+                // Head material reaches back to source zero; time zero
+                // caps the range (nothing exists left of the origin).
+                ((s - ain).max(0.0), Some(e), dur_opt.map(|d| (s - ain, s + (d - ain))))
             } else {
-                let next_gap_end = if si + 1 < track.segments.len() {
-                    match &track.segments[si + 1] {
-                        TimelineSegment::Gap(g) => Some(e + secs(&g.duration)),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                let hi = match next_gap_end {
-                    Some(ge) => (e + mat_avail_out).min(ge),
-                    None if si + 1 >= track.segments.len() => e + mat_avail_out,
-                    None => e,
-                };
-                let src_start = Seconds::new((ain * 1e6).round() as i64, 1_000_000);
-                let mat_lo = s - ain;
-                let mat_hi = asset.duration().map(|d| e + (secs(&d) - aout)).unwrap_or(e);
-                (s, Some(hi), src_start, hi - s, Some((mat_lo, mat_hi)))
+                // Tail material reaches forward to the asset end.
+                (s, Some(dur_opt.map(|d| e + (d - aout)).unwrap_or(e)), dur_opt.map(|d| (e - aout, e + (d - aout))))
+            };
+            // Preview: the whole asset file, so every reachable position
+            // shows real frames. mpv 0 maps to the timeline position of
+            // source zero (edge minus the edge's source point). Without a
+            // known duration, map just the clip's current span.
+            let src_at_edge = if head { ain } else { aout };
+            let preview = match dur_opt {
+                Some(d) => ExtendPreviewSpec::Clip {
+                    path: asset.path.clone(),
+                    src_start: Seconds::from_integer(0),
+                    length: Seconds::new((d * 1e6).round() as i64, 1_000_000),
+                    origin: edge - src_at_edge,
+                },
+                None => ExtendPreviewSpec::Clip {
+                    path: asset.path.clone(),
+                    src_start: Seconds::new((ain * 1e6).round() as i64, 1_000_000),
+                    length: Seconds::new(((aout - ain) * 1e6).round() as i64, 1_000_000),
+                    origin: s,
+                },
             };
             Ok(ExtendPlan {
                 armed,
@@ -825,12 +810,7 @@ fn plan_extend(project: &Project, playhead: f64, ripple: bool) -> Result<ExtendP
                 lo,
                 hi,
                 mat,
-                preview: ExtendPreviewSpec::Clip {
-                    path: asset.path.clone(),
-                    src_start,
-                    length: Seconds::new(((length) * 1e6).round() as i64, 1_000_000),
-                    origin: lo,
-                },
+                preview,
             })
         }
         Armed::TailGap => {
@@ -871,35 +851,44 @@ fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Resu
     match armed {
         Armed::Clip { id, head } => {
             let (s, e) = clip_span(project, *id).ok_or_else(|| "clip vanished".to_string())?;
+            let track = project.timeline.video_track().ok_or_else(|| "clip vanished".to_string())?;
+            let si = track
+                .segments
+                .iter()
+                .position(|seg| matches!(seg, TimelineSegment::Clip(c) if c.id == *id))
+                .ok_or_else(|| "clip vanished".to_string())?;
             if *head {
                 if ph > edge_pos && ph < e - 1e-9 {
                     Ok(CommitKind::TrimHead)
                 } else if ph < edge_pos {
-                    // In the preceding gap (clamp guarantees adjacency):
-                    // extend the head back. E ripples (no neighbor touch).
-                    Ok(CommitKind::GrowHeadIntoGap)
+                    // Still inside the adjacent gap: plain grow. Past it:
+                    // absorb everything covered up to the playhead.
+                    let in_gap = si > 0
+                        && matches!(track.segments[si - 1], TimelineSegment::Gap(_))
+                        && ph >= s - secs(&track.segments[si - 1].duration()) - 1e-9;
+                    if in_gap {
+                        Ok(CommitKind::GrowHeadIntoGap)
+                    } else {
+                        Ok(CommitKind::AbsorbHead)
+                    }
                 } else {
                     Ok(CommitKind::Delete)
                 }
             } else if ph < edge_pos && ph > s + 1e-9 {
                 Ok(CommitKind::TrimTail)
             } else if ph > edge_pos {
-                // Outward: adjacent gap, or past the timeline end.
-                let track = project.timeline.video_track().ok_or_else(|| "clip vanished".to_string())?;
-                let si = track
-                    .segments
-                    .iter()
-                    .position(|seg| matches!(seg, TimelineSegment::Clip(c) if c.id == *id))
-                    .ok_or_else(|| "clip vanished".to_string())?;
-                if si + 1 < track.segments.len()
+                // Still inside the adjacent gap: plain grow. Past it (or
+                // directly into the next clip): absorb the covered span.
+                let in_gap = si + 1 < track.segments.len()
                     && matches!(track.segments[si + 1], TimelineSegment::Gap(_))
-                {
+                    && ph <= e + secs(&track.segments[si + 1].duration()) + 1e-9;
+                if in_gap {
                     Ok(CommitKind::GrowTailIntoGap)
                 } else if si + 1 >= track.segments.len() {
+                    // Nothing beyond: past the timeline end.
                     Ok(CommitKind::GrowTailPastEnd)
                 } else {
-                    // Next is a clip: clamp keeps this unreachable (hi == edge).
-                    Ok(CommitKind::Noop)
+                    Ok(CommitKind::AbsorbTail)
                 }
             } else {
                 Ok(CommitKind::Delete)
@@ -1113,6 +1102,15 @@ fn run_commit_action(app: &App, armed: &Armed, kind: CommitKind, ripple: bool) -
         }
         CommitKind::GrowTailPastEnd => {
             edit::extend_edge(project, id, head, ph)
+        }
+        // Absorb: e replaces everything covered (gaps removed, clips
+        // trimmed/removed); E pushes everything aside via plain extend.
+        CommitKind::AbsorbTail | CommitKind::AbsorbHead => {
+            if ripple {
+                edit::extend_edge(project, id, head, ph)
+            } else {
+                edit::absorb_outward(project, id, head, ph)
+            }
         }
         CommitKind::ShortenTail | CommitKind::ShortenHeadGap => {
             if matches!(armed, Armed::TailGap) {
@@ -1382,32 +1380,67 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
 
     let segs = preview::segments(&app.project).unwrap_or_default();
     // In extend mode the row rescales past the timeline end so the
-    // projected range stays visible while navigating outward.
+    // projected range stays visible while navigating outward. With a
+    // known material strip it rescales to the whole asset instead (the
+    // strip is the row).
     let in_extend = matches!(app.mode, Mode::Extend(_));
-    let total = if in_extend {
+    let strip: Option<(f64, f64, f64)> = match &app.mode {
+        Mode::Extend(st) => strip_geom(app, st),
+        _ => None,
+    };
+    let total = if let Some((dur, _, _)) = strip {
+        dur.max(0.001)
+    } else if in_extend {
         app.total().max(app.playhead).max(0.001)
     } else {
         app.total().max(0.001)
     };
     let w = inner.width as f64;
 
-    let parts: Vec<(f64, String, Style)> = segs
-        .iter()
-        .map(|s| match s {
-            Segment::Clip { path, length, .. } => (
-                secs(length),
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                Style::default().bg(Color::Cyan).fg(Color::Black),
-            ),
-            Segment::Gap { length } => (
-                secs(length),
-                "gap".to_string(),
-                Style::default().bg(Color::DarkGray).fg(Color::Black),
-            ),
-        })
-        .collect();
+    // Timeline position of source second 0 (strip mode): the preview
+    // offset. Playhead and edge map through it into strip seconds.
+    let strip_off = match &app.mode {
+        Mode::Extend(st) if strip.is_some() => st.preview_off,
+        _ => 0.0,
+    };
+
+    let parts: Vec<(f64, String, Style)> = if let Some((dur, ain, aout)) = strip {
+        // Source strip: unused material dimmed, current span highlighted.
+        let mut v = Vec::new();
+        if ain > 0.0 {
+            v.push((ain, String::new(), Style::default().bg(Color::DarkGray).fg(Color::Black)));
+        }
+        let label = match &app.mode {
+            Mode::Extend(st) => match st.armed {
+                Armed::Clip { id, .. } => format!("clip #{id}"),
+                Armed::TailGap | Armed::HeadGap => "gap".to_string(),
+            },
+            _ => String::new(),
+        };
+        v.push((aout - ain, label, Style::default().bg(Color::Cyan).fg(Color::Black)));
+        if aout < dur {
+            v.push((dur - aout, String::new(), Style::default().bg(Color::DarkGray).fg(Color::Black)));
+        }
+        v
+    } else {
+        segs
+            .iter()
+            .map(|s| match s {
+                Segment::Clip { path, length, .. } => (
+                    secs(length),
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    Style::default().bg(Color::Cyan).fg(Color::Black),
+                ),
+                Segment::Gap { length } => (
+                    secs(length),
+                    "gap".to_string(),
+                    Style::default().bg(Color::DarkGray).fg(Color::Black),
+                ),
+            })
+            .collect()
+    };
 
     // Track row: segments with boundary dividers. The playhead doesn't
     // live here in normal mode (it renders on the marker row below); in
@@ -1434,27 +1467,62 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         x = end_x;
     }
     let mut spans: Vec<Span> = Vec::new();
+    // In strip mode the playhead and the armed edge map through the
+    // preview offset into source seconds; the edge tick is static (it
+    // marks the span ends), the notch roams with the playhead.
+    let (ph_pos, edge_src) = match &app.mode {
+        Mode::Extend(st) if strip.is_some() => {
+            let e = st.edge_pos - strip_off;
+            (app.playhead - strip_off, Some(e))
+        }
+        _ => (app.playhead, None),
+    };
     if in_extend {
         // Notch the playhead into the row: split the containing part's
-        // text around a yellow marker (same left-hugging convention as
-        // every other timeline glyph).
-        let ph = marker_col(app.playhead, total, inner.width);
-        let notch = Style::default().fg(Color::Yellow);
+        // text around a marker (same left-hugging convention as every
+        // other timeline glyph). Yellow normally, white exactly at the
+        // armed edge. A static white edge tick marks the span ends; when
+        // both land in one cell the playhead wins (white there too).
+        let ph = marker_col(ph_pos, total, inner.width);
+        let at_edge = edge_src.map(|e| (ph_pos - e).abs() < 1e-9).unwrap_or(false);
+        let notch = Style::default().fg(if at_edge { Color::White } else { Color::Yellow });
+        let edge_mark = Style::default().fg(Color::White);
+        let edge_col = edge_src.map(|e| marker_col(e, total, inner.width));
         for (x0, text, style) in &cells {
             let chars: Vec<char> = text.chars().collect();
+            // Marks in this part, playhead last so it wins ties.
+            let mut marks: Vec<(usize, Style)> = Vec::new();
+            if let Some(ec) = edge_col {
+                let off = (ec as usize).saturating_sub(*x0 as usize);
+                if ec >= *x0 && off < chars.len() && ec != ph {
+                    marks.push((off, edge_mark));
+                }
+            }
             let off = (ph as usize).saturating_sub(*x0 as usize);
             if ph >= *x0 && off < chars.len() {
-                let before: String = chars[..off].iter().collect();
-                let after: String = chars[off + 1..].iter().collect();
-                if !before.is_empty() {
-                    spans.push(Span::styled(before, *style));
-                }
-                spans.push(Span::styled("▏".to_string(), notch));
-                if !after.is_empty() {
-                    spans.push(Span::styled(after, *style));
-                }
-            } else {
+                marks.push((off, notch));
+            }
+            if marks.is_empty() {
                 spans.push(Span::styled(text.clone(), *style));
+                continue;
+            }
+            let mut cur = 0;
+            for (m, (o, ms)) in marks.iter().enumerate() {
+                let chunk: String = chars[cur..*o].iter().collect();
+                if !chunk.is_empty() {
+                    spans.push(Span::styled(chunk, *style));
+                }
+                if m + 1 < marks.len() && marks[m + 1].0 == *o {
+                    cur = *o;
+                    continue; // tie: the playhead paints this cell
+                }
+                let glyph: String = chars[*o..(*o + 1).min(chars.len())].iter().collect();
+                spans.push(Span::styled(if glyph.is_empty() { "▏".to_string() } else { glyph }, *ms));
+                cur = o + 1;
+            }
+            let rest: String = chars[cur..].iter().collect();
+            if !rest.is_empty() {
+                spans.push(Span::styled(rest, *style));
             }
         }
     } else {
@@ -1474,21 +1542,32 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let at_end = app.eof;
     let mut marker_cells: Vec<(char, Style)> = vec![(' ', Style::default()); inner.width as usize];
     if let Mode::Extend(st) = &app.mode {
-        // Material extent first (dim, underneath), then the workable span.
-        if let Some((m0, m1)) = st.mat {
-            paint_run(&mut marker_cells, total, inner.width, m0, m1, '·', Style::default().fg(Color::DarkGray));
-        }
-        let hi_edge = st.hi.unwrap_or(f64::INFINITY);
-        paint_run(&mut marker_cells, total, inner.width, st.lo, hi_edge, '─', Style::default().fg(Color::Yellow));
-        let color = if on_boundary(&app.project, app.playhead) {
-            Color::White
+        // In-mode white rule: only at the armed edge (project cuts are
+        // meaningless in source space).
+        let white_here = (app.playhead - st.edge_pos).abs() < 1e-9;
+        let color = if white_here { Color::White } else { Color::Yellow };
+        if strip.is_some() {
+            // Strip scale: the clamped range translated through the
+            // preview offset; no material run (it spans the strip).
+            let hi_edge = st.hi.unwrap_or(f64::INFINITY);
+            paint_run(&mut marker_cells, total, inner.width, st.lo - strip_off, hi_edge - strip_off, '─', Style::default().fg(Color::Yellow));
+            let sph = marker_col(app.playhead - strip_off, total, inner.width);
+            marker_cells[sph as usize] = (
+                if at_end { '▕' } else { '▏' },
+                Style::default().fg(color),
+            );
         } else {
-            Color::Yellow
-        };
-        marker_cells[ph as usize] = (
-            if at_end { '▕' } else { '▏' },
-            Style::default().fg(color),
-        );
+            // Material extent first (dim, underneath), then the workable span.
+            if let Some((m0, m1)) = st.mat {
+                paint_run(&mut marker_cells, total, inner.width, m0, m1, '·', Style::default().fg(Color::DarkGray));
+            }
+            let hi_edge = st.hi.unwrap_or(f64::INFINITY);
+            paint_run(&mut marker_cells, total, inner.width, st.lo, hi_edge, '─', Style::default().fg(Color::Yellow));
+            marker_cells[ph as usize] = (
+                if at_end { '▕' } else { '▏' },
+                Style::default().fg(color),
+            );
+        }
     } else {
         let color = if on_boundary(&app.project, app.playhead) {
             Color::White
@@ -1517,6 +1596,26 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     }
     let playhead_row = Rect { y: inner.y + 1, height: 1, ..inner };
     f.render_widget(Paragraph::new(Line::from(marker)), playhead_row);
+}
+
+/// Source-strip geometry for clip-armed extend mode: the asset's full
+/// duration as the row scale plus the clip's *current* source span.
+/// Timeline positions map to source seconds via the preview offset
+/// (`src = playhead - preview_off`). None when gap-armed or the asset
+/// duration is unknown (those keep the project row).
+fn strip_geom(app: &App, st: &ExtendState) -> Option<(f64, f64, f64)> {
+    let id = match st.armed {
+        Armed::Clip { id, .. } => id,
+        _ => return None,
+    };
+    let track = app.project.timeline.video_track()?;
+    let clip = track.segments.iter().filter_map(|seg| match seg {
+        TimelineSegment::Clip(c) if c.id == id => Some(c),
+        _ => None,
+    }).next()?;
+    let asset = app.project.asset(clip.asset)?;
+    let dur = secs(&asset.duration()?);
+    Some((dur, secs(&clip.asset_in), secs(&clip.asset_out)))
 }
 
 /// Paint `glyph` with `style` over the cells spanning `[a, b)` in
@@ -1813,17 +1912,18 @@ mod tests {
     #[test]
     fn plan_extend_clip_bounds() {
         let p = asset_project();
-        // Tail of #1 at 3.0: lo = clip start, hi = min(gap end 5, 3 + (10-4)).
+        // Tail of #1 at 3.0: material-wide — lo is the far edge, hi is
+        // the asset end mapped (gap no longer binds).
         let plan = plan_extend(&p, 3.0, false).unwrap();
         assert_eq!(plan.armed, Armed::Clip { id: 1, head: false });
         assert_eq!(plan.edge_pos, 3.0);
-        assert_eq!((plan.lo, plan.hi), (0.0, Some(5.0)));
+        assert_eq!((plan.lo, plan.hi), (0.0, Some(9.0)));
         assert_eq!(plan.mat, Some((-1.0, 9.0)));
         match plan.preview {
             ExtendPreviewSpec::Clip { src_start, length, origin, .. } => {
-                assert_eq!(src_start, Seconds::from_integer(1));
-                assert_eq!(length, Seconds::from_integer(5));
-                assert_eq!(origin, 0.0);
+                assert_eq!(src_start, Seconds::from_integer(0));
+                assert_eq!(length, Seconds::from_integer(10));
+                assert_eq!(origin, -1.0);
             }
             _ => panic!("expected clip preview"),
         }
@@ -1833,12 +1933,21 @@ mod tests {
         // Head of #1 at 0.0: clamped at the origin despite material.
         let plan = plan_extend(&p, 0.0, false).unwrap();
         assert_eq!((plan.lo, plan.hi), (0.0, Some(3.0)));
-        // Unknown asset duration: no extension room, trim/delete only.
+        // Unknown asset duration: no extension room, trim/delete only,
+        // no material strip, span-mapped preview.
         let mut q = asset_project();
         q.media[0].probe.format.duration = None;
         let plan = plan_extend(&q, 3.0, false).unwrap();
         assert_eq!((plan.lo, plan.hi), (0.0, Some(3.0)));
-        assert_eq!(plan.mat, Some((-1.0, 3.0)));
+        assert_eq!(plan.mat, None);
+        match plan.preview {
+            ExtendPreviewSpec::Clip { src_start, length, origin, .. } => {
+                assert_eq!(src_start, Seconds::from_integer(1));
+                assert_eq!(length, Seconds::from_integer(3));
+                assert_eq!(origin, 0.0);
+            }
+            _ => panic!("expected clip preview"),
+        }
     }
 
     #[test]
@@ -1863,6 +1972,38 @@ mod tests {
         assert_eq!(plan.armed, Armed::HeadGap);
         assert_eq!((plan.lo, plan.hi), (0.0, Some(2.0)));
         assert_eq!(plan.mat, None);
+    }
+
+    #[test]
+    fn strip_geom_maps_clip_span_to_source() {
+        let p = asset_project(); // C1 [0..3) src 1..4 of a 10s asset
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 3.0;
+        // Armed tail of #1: strip is the whole 10s asset, used span 1..4.
+        let plan = plan_extend(&app.project, 3.0, false).unwrap();
+        app.mode = Mode::Extend(ExtendState {
+            armed: plan.armed,
+            edge_pos: plan.edge_pos,
+            ripple: false,
+            lo: plan.lo,
+            hi: plan.hi,
+            mat: plan.mat,
+            preview_off: 2.0, // edge(3) - src_at_edge(1)
+        });
+        let st = match &app.mode {
+            Mode::Extend(st) => st.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(strip_geom(&app, &st), Some((10.0, 1.0, 4.0)));
+        // Gap-armed: no strip.
+        let open = ExtendState { armed: Armed::TailGap, ..st };
+        assert_eq!(strip_geom(&app, &open), None);
+        // Unknown duration: no strip.
+        let mut q = asset_project();
+        q.media[0].probe.format.duration = None;
+        let app2 = App::new(q, PathBuf::from("t.json"));
+        let st2 = ExtendState { armed: Armed::Clip { id: 1, head: false }, ..st };
+        assert_eq!(strip_geom(&app2, &st2), None);
     }
 
     #[test]
@@ -1906,6 +2047,15 @@ mod tests {
         q.timeline.video_track_mut().unwrap().segments.truncate(1);
         let tail = Armed::Clip { id: 1, head: false };
         assert_eq!(plan_commit(&q, &tail, 3.0, 4.0), Ok(CommitKind::GrowTailPastEnd));
+        // Beyond the adjacent gap: absorb (both flags route here; run
+        // splits e-replace vs E-push).
+        assert_eq!(plan_commit(&p, &tail1, 3.0, 6.0), Ok(CommitKind::AbsorbTail));
+        assert_eq!(plan_commit(&p, &head2, 5.0, 1.0), Ok(CommitKind::AbsorbHead));
+        // Directly into the next clip: absorb as well.
+        let mut s = asset_project();
+        s.timeline.video_track_mut().unwrap().segments.remove(1);
+        let tail = Armed::Clip { id: 1, head: false };
+        assert_eq!(plan_commit(&s, &tail, 3.0, 4.0), Ok(CommitKind::AbsorbTail));
         // Virtual edges.
         let mut r = asset_project();
         r.timeline.video_track_mut().unwrap().segments.push(
@@ -1930,6 +2080,12 @@ mod tests {
         assert!(b.desc.contains("ripple"), "{}", b.desc);
         let b = run_commit_action(&app, &tail1, CommitKind::Delete, false).unwrap();
         assert_eq!(b.desc, "delete gap");
+        // Absorb splits by flag: e replaces covered content, E pushes it.
+        app.playhead = 6.0; // past the gap, inside clip #2
+        let b = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, false).unwrap();
+        assert!(b.desc.contains("absorbed"), "{}", b.desc);
+        let b = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, true).unwrap();
+        assert!(b.desc.contains("extend tail"), "{}", b.desc);
     }
 
     fn seg_clip(id: u32, dur: i64) -> TimelineSegment {
