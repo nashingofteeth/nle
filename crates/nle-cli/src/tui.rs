@@ -315,7 +315,13 @@ impl App {
                     _ => t,
                 };
                 let snapped = snap_to_frame(t, self.project.fps.as_ref());
-                self.playhead = snap_to_cut(snapped, &self.project);
+                self.playhead = match &self.mode {
+                    // Extend mode: stay within the armed range — the
+                    // material preview can't drive the playhead past the
+                    // segment's end (or before its start).
+                    Mode::Extend(st) => clamp_extend(st, snapped),
+                    _ => snap_to_cut(snapped, &self.project),
+                };
             }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
@@ -2481,6 +2487,25 @@ mod tests {
         assert_eq!(clamp_extend(&open, 1e9), 1e9);
     }
 
+    // Seek-clamping for a head: never past the segment's end (nor before
+    // the material/timeline start).
+    #[test]
+    fn extend_head_nav_clamps_at_segment_end() {
+        let fps = Seconds::new(30, 1);
+        let st = ExtendState {
+            armed: Armed::Clip { id: 1, head: true },
+            edge_pos: 0.0,
+            ripple: false,
+            lo: -1.0,
+            hi: Some(3.0),
+            mat: None,
+            preview_off: -1.0,
+        };
+        assert_eq!(snap_extend_target(Some(&fps), &st, 99.0), 3.0, "blocked at the end");
+        assert_eq!(snap_extend_target(Some(&fps), &st, -99.0), -1.0, "blocked at the start");
+        assert_eq!(snap_extend_target(Some(&fps), &st, 1.0), 1.0);
+    }
+
     // Extending a tail to the asset's end leaves the material bound
     // off-grid (blue.mp4's 6.006s). seek_to_mode used to park the playhead
     // there unsnapped while the commit snapped the cut to a frame, so the
@@ -3172,6 +3197,38 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(app.playhead, 5.0);
+    }
+
+    // While the extend preview plays, the playhead must stay within the
+    // armed range (a head can't run past the segment's end).
+    #[test]
+    fn sync_clamps_to_the_extend_range_while_playing() {
+        let mut p = project();
+        p.fps = Some(Seconds::new(30, 1));
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.mode = Mode::Extend(ExtendState {
+            armed: Armed::Clip { id: 1, head: true },
+            edge_pos: 0.0,
+            ripple: false,
+            lo: -1.0,
+            hi: Some(3.0),
+            mat: None,
+            preview_off: 0.0,
+        });
+        app.sync(&PlaybackState {
+            time_pos: Some(9.0),
+            paused: false,
+            file_loaded: true,
+            ..Default::default()
+        });
+        assert_eq!(app.playhead, 3.0, "clamped at the segment end");
+        app.sync(&PlaybackState {
+            time_pos: Some(-5.0),
+            paused: false,
+            file_loaded: true,
+            ..Default::default()
+        });
+        assert_eq!(app.playhead, -1.0, "clamped at the range start");
     }
 
     #[test]
