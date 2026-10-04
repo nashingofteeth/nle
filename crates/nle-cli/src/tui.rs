@@ -988,6 +988,54 @@ fn seek_clip_end(app: &mut App, player: &MpvPlayer, head: bool) {
     app.set_message(&format!("clip #{id} {}", if head { "start" } else { "end" }));
 }
 
+/// The clip and source frame under the playhead — the media anchor an
+/// edit should preserve. `None` over a gap (or past the end).
+fn clip_anchor(project: &Project, playhead: f64) -> Option<(u32, Seconds)> {
+    let track = project.timeline.video_track()?;
+    let t = grid_time(project, playhead);
+    let idx = track.index_at(t)?;
+    let c = match &track.segments[idx] {
+        TimelineSegment::Clip(c) => c,
+        TimelineSegment::Gap(_) => return None,
+    };
+    Some((c.id, c.asset_in + (t - track.start_of(idx))))
+}
+
+/// The timeline position of `source` in clip `id`, clamped to the clip's
+/// current extent. `None` when the clip is gone.
+fn resolve_anchor(project: &Project, id: u32, source: Seconds) -> Option<f64> {
+    let track = project.timeline.video_track()?;
+    let mut acc = Seconds::from_integer(0);
+    for seg in &track.segments {
+        if let TimelineSegment::Clip(c) = seg
+            && c.id == id
+        {
+            let pos = if source < c.asset_in {
+                acc
+            } else if source >= c.asset_out {
+                acc + c.duration()
+            } else {
+                acc + (source - c.asset_in)
+            };
+            return Some(secs(&pos));
+        }
+        acc += seg.duration();
+    }
+    None
+}
+
+/// After an edit, put the playhead back on the media frame it was on
+/// (`anchor`), so a trim that moves material under it keeps the same
+/// frame rather than the same timecode. No-op over a gap or a deleted
+/// clip.
+fn reanchor_playhead(app: &mut App, anchor: Option<(u32, Seconds)>) {
+    if let Some((id, source)) = anchor
+        && let Some(pos) = resolve_anchor(&app.project, id, source)
+    {
+        app.playhead = pos;
+    }
+}
+
 /// The playhead's position on the project's frame grid, as Seconds.
 fn grid_time(project: &Project, t: f64) -> Seconds {
     match project.fps.as_ref() {
@@ -1038,8 +1086,12 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
         }
     };
     let desc = batch.desc.clone();
+    // Keep the playhead on the frame it was showing, not the same
+    // timecode (a trim can move material under it).
+    let anchor = clip_anchor(&app.project, app.playhead);
     match app.history.apply(&mut app.project, batch) {
         Ok(()) => {
+            reanchor_playhead(app, anchor);
             app.set_message(&desc);
             persist_and_rebuild(app, player);
             true
@@ -2846,6 +2898,55 @@ mod tests {
         assert!(b.desc.contains("delete gap (ripple)"), "{}", b.desc);
         let b = trim_key(&p, 5.0, true, false).unwrap(); // o at C2's start
         assert!(b.desc.contains("delete clip #2"), "{}", b.desc);
+    }
+
+    // After an edit the playhead stays on the media frame it was showing,
+    // not the same timecode.
+    #[test]
+    fn playhead_reanchors_to_the_media_frame() {
+        // Ripple head trim: the frame under the playhead moves back, so
+        // the playhead follows it.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.0; // C1 [0..3) src 1..4 → source 2
+        let anchor = clip_anchor(&app.project, app.playhead);
+        assert_eq!(anchor, Some((1, Seconds::from_integer(2))));
+        let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
+        app.history.apply(&mut app.project, batch).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 0.0, "moved back by the trimmed second");
+
+        // Gap-left head trim: the clip's head moves to the playhead and a
+        // gap takes the trimmed material — the frame is unchanged.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.0;
+        let anchor = clip_anchor(&app.project, app.playhead);
+        let batch = edit::trim_in(&app.project, app.playhead).unwrap();
+        app.history.apply(&mut app.project, batch).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 1.0, "frame unchanged");
+
+        // Tail trim: material after the playhead is removed — unchanged.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.0;
+        let anchor = clip_anchor(&app.project, app.playhead);
+        let batch = edit::trim_out(&app.project, app.playhead).unwrap();
+        app.history.apply(&mut app.project, batch).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 1.0, "frame unchanged");
+
+        // Delete of the clip under the playhead: the anchor is gone, so
+        // the playhead falls back to its timecode.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.0;
+        let anchor = clip_anchor(&app.project, app.playhead);
+        let batch = edit::delete_under(&app.project, app.playhead).unwrap();
+        app.history.apply(&mut app.project, batch).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 1.0, "fallback when the clip is gone");
+
+        // Over a gap there's no anchor.
+        let app = App::new(asset_project(), PathBuf::from("t.json"));
+        assert_eq!(clip_anchor(&app.project, 4.0), None);
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {
