@@ -64,7 +64,7 @@ impl MpvPlayer {
         let socket_path = std::env::temp_dir().join(format!("nle-mpv-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&socket_path); // stale socket from a crash
 
-        let child = Command::new("mpv")
+        let mut child = Command::new("mpv")
             .args([
                 "--no-terminal",
                 "--idle=yes",           // stay alive before/after files
@@ -90,11 +90,30 @@ impl MpvPlayer {
             std::thread::sleep(Duration::from_millis(30));
         }
         if !socket_path.exists() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&socket_path);
             return Err(MpvError::SocketTimeout(socket_path));
         }
 
-        let stream = UnixStream::connect(&socket_path)?;
-        let reader_stream = stream.try_clone().map_err(|e| MpvError::Ipc(e.to_string()))?;
+        let stream = match UnixStream::connect(&socket_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(MpvError::Spawn(e));
+            }
+        };
+        let reader_stream = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&socket_path);
+                return Err(MpvError::Ipc(e.to_string()));
+            }
+        };
         let state = Arc::new(Mutex::new(PlaybackState::default()));
         let reader_state = Arc::clone(&state);
         let reader = std::thread::spawn(move || read_loop(reader_stream, reader_state));
