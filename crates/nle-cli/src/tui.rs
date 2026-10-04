@@ -876,16 +876,13 @@ fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPl
                 _ => return Err("gap vanished".to_string()),
             };
             let gap_start = secs(&track.start_of(index));
-            if gap_start <= 0.0 {
-                return Err("gap starts at the timeline start — nothing to extend over".to_string());
-            }
-            // Grow leftward only; the gap's own end bounds how far it can
-            // shrink back. mpv 0 maps to the timeline start so seeks stay
-            // non-negative.
+            // Gaps have no material, so the head reaches back without
+            // bound: extending it left inserts empty space (growing the
+            // gap), even past time 0. The gap's own end bounds shrinking.
             Ok(ExtendPlan {
                 armed,
                 edge_pos: gap_start,
-                lo: 0.0,
+                lo: f64::NEG_INFINITY,
                 hi: Some(gap_start + secs(&g.duration)),
                 mat: None,
                 preview: ExtendPreviewSpec::Black { origin: 0.0 },
@@ -1512,7 +1509,9 @@ fn seek_to_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, t: f64) {
     }
     let target = snap_extend_target(app.project.fps.as_ref(), st, t);
     app.playhead = target;
-    player.seek_absolute(target - st.preview_off + 0.004);
+    // mpv can't seek before its file start; the gap head can push the
+    // mapped position negative, so clamp (the preview is black anyway).
+    player.seek_absolute((target - st.preview_off + 0.004).max(0.0));
 }
 
 fn seek_rel_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, delta: f64) {
@@ -2384,6 +2383,60 @@ mod tests {
         term.draw(|f| render_timeline(f, Rect { x: 0, y: 0, width: 60, height: 4 }, &app)).unwrap();
     }
 
+    // A gap has no material, so its head extends without bound — including
+    // past time 0, where it inserts empty space.
+    #[test]
+    fn gap_head_extends_past_zero() {
+        // Insert a leading gap: [gap 2 @0..2][C1 2..5][gap 2 @5..7][C2 7..9]
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments.insert(
+            0,
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+        );
+        let head0 = Armed::GapHead { index: 0 };
+        let plan = plan_for_armed(&p, head0, 0.0).unwrap();
+        assert_eq!(plan.lo, f64::NEG_INFINITY, "unbounded leftward");
+        assert_eq!(plan.hi, Some(2.0));
+        assert_eq!(plan_commit(&p, &head0, 0.0, -1.0), Ok(CommitKind::GapHead));
+
+        for ripple in [false, true] {
+            let mut app = App::new(p.clone(), PathBuf::from("t.json"));
+            app.playhead = -1.0;
+            let batch = run_commit_action(&app, &head0, CommitKind::GapHead, ripple).unwrap();
+            let mut h = History::default();
+            h.apply(&mut app.project, batch).unwrap();
+            let segs = app.project.timeline.video_track().unwrap().segments.clone();
+            assert!(matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(3)));
+            assert_eq!(app.project.timeline.end(), Seconds::from_integer(10), "grew at the front");
+        }
+    }
+
+    // Rendering must survive a gap head armed below 0 (unbounded lo).
+    #[test]
+    fn gap_head_below_zero_renders() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments.insert(
+            0,
+            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+        );
+        let plan = plan_for_armed(&p, Armed::GapHead { index: 0 }, 0.0).unwrap();
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = -1.0;
+        app.mode = Mode::Extend(ExtendState {
+            armed: plan.armed,
+            edge_pos: plan.edge_pos,
+            ripple: false,
+            lo: plan.lo,
+            hi: plan.hi,
+            mat: plan.mat,
+            preview_off: 0.0,
+        });
+        let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
+        term.draw(|f| render_timeline(f, Rect { x: 0, y: 0, width: 60, height: 4 }, &app)).unwrap();
+    }
+
     #[test]
     fn plan_extend_virtual_edges() {
         let mut p = asset_project();
@@ -2628,9 +2681,10 @@ mod tests {
             Ok(CommitKind::GapTail)
         );
 
-        // Head plan: grow left only, bounded by the timeline start.
+        // Head plan: unbounded leftward (a gap has no material — extending
+        // the head inserts space, even past time 0).
         let head = plan_for_armed(&p, Armed::GapHead { index: 1 }, 3.0).unwrap();
-        assert_eq!((head.lo, head.hi), (0.0, Some(5.0)));
+        assert_eq!((head.lo, head.hi), (f64::NEG_INFINITY, Some(5.0)));
         assert_eq!(
             plan_commit(&p, &Armed::GapHead { index: 1 }, 3.0, 1.0),
             Ok(CommitKind::GapHead)
