@@ -1613,6 +1613,10 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(text.clone(), *style));
                 continue;
             }
+            // Offsets arrive in arbitrary order (the armed edge can be
+            // either span end), so sort ascending before walking them; a
+            // stable sort keeps the playhead last on ties so it wins.
+            marks.sort_by_key(|(o, _)| *o);
             let mut cur = 0;
             for (m, (o, ms)) in marks.iter().enumerate() {
                 let chunk: String = chars[cur..*o].iter().collect();
@@ -1623,8 +1627,10 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
                     cur = *o;
                     continue; // tie: the playhead paints this cell
                 }
-                let glyph: String = chars[*o..(*o + 1).min(chars.len())].iter().collect();
-                spans.push(Span::styled(if glyph.is_empty() { "▏".to_string() } else { glyph }, *ms));
+                // Both marks are vertical bars: the marker replaces the
+                // underlying glyph (which may be a divider or a label
+                // character) with a clear tick.
+                spans.push(Span::styled("▏".to_string(), *ms));
                 cur = o + 1;
             }
             let rest: String = chars[cur..].iter().collect();
@@ -2605,5 +2611,85 @@ mod tests {
         assert_eq!((s.as_str(), f), ("─", Color::Yellow));
         let (s, f, _) = sym(21, 2);
         assert_eq!((s.as_str(), f), (" ", Color::Reset));
+    }
+
+    // Regression: with the playhead roamed off the armed edge, the two
+    // span-end ticks arrive out of order (the armed edge can be the right
+    // end for a tail arm), which used to slice chars[cur..o] backwards
+    // and panic.
+    #[test]
+    fn extend_strip_roaming_playhead_renders() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let mut p = asset_project();
+        p.timeline = Timeline {
+            tracks: vec![Track {
+                kind: TrackKind::Video,
+                segments: vec![
+                    TimelineSegment::Clip(nle_core::Clip {
+                        id: 1,
+                        asset: 1,
+                        asset_in: Seconds::from_integer(1),
+                        asset_out: Seconds::from_integer(4),
+                    }),
+                    TimelineSegment::Clip(nle_core::Clip {
+                        id: 2,
+                        asset: 1,
+                        asset_in: Seconds::new(1, 2),
+                        asset_out: Seconds::new(7, 2),
+                    }),
+                ],
+            }],
+        };
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        let area = Rect { x: 0, y: 0, width: 60, height: 4 };
+
+        // Tail of #1 (edge 3.0, src out 4.0): the armed edge maps to
+        // strip second 4.0 (col 23) while the far end (src in 1.0) is at
+        // col 6 — descending. Playhead roamed to 2.0 (strip col 17).
+        app.playhead = 2.0;
+        app.mode = Mode::Extend(ExtendState {
+            armed: Armed::Clip { id: 1, head: false },
+            edge_pos: 3.0,
+            ripple: false,
+            lo: 0.0,
+            hi: Some(9.0),
+            mat: None,
+            preview_off: -1.0,
+        });
+        let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
+        term.draw(|f| render_timeline(f, area, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let sym = |x: u16, y: u16| -> (String, Color) {
+            let c = &buf[(x, y)];
+            (c.symbol().to_string(), c.fg)
+        };
+        assert_eq!(sym(7, 1), ("▏".to_string(), Color::White), "far-end tick");
+        assert_eq!(sym(24, 1), ("▏".to_string(), Color::White), "armed-edge tick");
+        assert_eq!(sym(18, 1), ("▏".to_string(), Color::Yellow), "roaming notch");
+
+        // Head of #2 (edge 3.0, src in 0.5): ascending ticks, notch roamed
+        // past both to 5.0 (strip col 15).
+        app.playhead = 5.0;
+        app.mode = Mode::Extend(ExtendState {
+            armed: Armed::Clip { id: 2, head: true },
+            edge_pos: 3.0,
+            ripple: false,
+            lo: 2.5,
+            hi: Some(6.0),
+            mat: None,
+            preview_off: 2.5,
+        });
+        let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
+        term.draw(|f| render_timeline(f, area, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let sym = |x: u16, y: u16| -> (String, Color) {
+            let c = &buf[(x, y)];
+            (c.symbol().to_string(), c.fg)
+        };
+        assert_eq!(sym(4, 1), ("▏".to_string(), Color::White), "armed-edge tick");
+        assert_eq!(sym(21, 1), ("▏".to_string(), Color::White), "far-end tick");
+        assert_eq!(sym(16, 1), ("▏".to_string(), Color::Yellow), "roaming notch");
     }
 }
