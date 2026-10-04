@@ -994,9 +994,12 @@ fn seek_clip_end(app: &mut App, player: &MpvPlayer, head: bool) {
 struct MediaAnchor {
     id: u32,
     source: Seconds,
-    /// The clip's timeline start before the edit — where a delete leaves
-    /// the seam between its neighbours.
+    /// The clip's timeline start before the edit — where a ripple delete
+    /// leaves the seam between its neighbours.
     start: f64,
+    /// The playhead before the edit — the offset a plain delete keeps
+    /// inside the gap it leaves.
+    at: f64,
 }
 
 fn clip_anchor(project: &Project, playhead: f64) -> Option<MediaAnchor> {
@@ -1011,6 +1014,7 @@ fn clip_anchor(project: &Project, playhead: f64) -> Option<MediaAnchor> {
         id: c.id,
         source: c.asset_in + (t - track.start_of(idx)),
         start: secs(&track.start_of(idx)),
+        at: secs(&t),
     })
 }
 
@@ -1039,12 +1043,27 @@ fn resolve_anchor(project: &Project, id: u32, source: Seconds) -> Option<f64> {
 
 /// After an edit, put the playhead back on the media frame it was on
 /// (`anchor`), so a trim that moves material under it keeps the same
-/// frame rather than the same timecode. If the clip is gone (a delete)
-/// the playhead lands at its old start — the cut between its neighbours.
+/// frame rather than the same timecode. If the clip is gone (a delete),
+/// fall back to `fallback_position`.
 fn reanchor_playhead(app: &mut App, anchor: Option<MediaAnchor>) {
     let Some(a) = anchor else { return };
-    let pos = resolve_anchor(&app.project, a.id, a.source).unwrap_or(a.start);
-    app.playhead = pos.clamp(0.0, app.total());
+    let pos = resolve_anchor(&app.project, a.id, a.source).unwrap_or_else(|| fallback_position(&app.project, &a));
+    let total = app.total();
+    app.playhead = pos.clamp(0.0, total);
+}
+
+/// Where the playhead lands when the anchored clip is gone. A plain
+/// delete replaces it with a gap of the same length, so keep the same
+/// offset (`at`); a ripple delete removes it and closes the gap, so land
+/// on the cut the neighbours now share (`start`).
+fn fallback_position(project: &Project, a: &MediaAnchor) -> f64 {
+    if let Some(track) = project.timeline.video_track()
+        && let Some(idx) = track.index_at(grid_time(project, a.at))
+        && matches!(track.segments[idx], TimelineSegment::Gap(_))
+    {
+        return a.at;
+    }
+    a.start
 }
 
 /// The playhead's position on the project's frame grid, as Seconds.
@@ -2925,7 +2944,8 @@ mod tests {
             Some(MediaAnchor {
                 id: 1,
                 source: Seconds::from_integer(2),
-                start: 0.0
+                start: 0.0,
+                at: 1.0
             })
         );
         let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
@@ -2952,15 +2972,15 @@ mod tests {
         reanchor_playhead(&mut app, anchor);
         assert_eq!(app.playhead, 1.0, "frame unchanged");
 
-        // Delete of the clip under the playhead: the anchor is gone, so
-        // the playhead lands at the deleted clip's old start.
+        // Delete of the clip under the playhead: a plain delete leaves a
+        // gap of the same length, so the playhead keeps its offset in it.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 1.0;
         let anchor = clip_anchor(&app.project, app.playhead);
         let batch = edit::delete_under(&app.project, app.playhead).unwrap();
         app.history.apply(&mut app.project, batch).unwrap();
         reanchor_playhead(&mut app, anchor);
-        assert_eq!(app.playhead, 0.0, "falls back to the old start");
+        assert_eq!(app.playhead, 1.0, "same position in the resulting gap");
 
         // Ripple delete between two clips: the playhead lands on the cut
         // the neighbours now share.
