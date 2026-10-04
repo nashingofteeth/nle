@@ -451,7 +451,11 @@ fn command_key(app: &mut App, buf: String, key: KeyEvent) {
             app.mode = Mode::Normal;
         }
         KeyCode::Esc => app.mode = Mode::Normal,
-        KeyCode::Backspace => app.mode = Mode::Command(buf[..buf.len().saturating_sub(1)].to_string()),
+        KeyCode::Backspace => {
+            let mut b = buf;
+            b.pop();
+            app.mode = Mode::Command(b)
+        }
         KeyCode::Char(c) => app.mode = Mode::Command(buf + &c.to_string()),
         _ => app.mode = Mode::Command(buf),
     }
