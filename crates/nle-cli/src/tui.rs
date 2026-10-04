@@ -596,10 +596,10 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('d') => app.pending = Pending::D,
         KeyCode::Char('y') => app.pending = Pending::Y,
         // ---- editing: uniform playhead-based ops (counts don't multiply) ----
-        KeyCode::Char('i') => { let _ = run_edit(app, player, edit::trim_in(&app.project, app.playhead)); }
-        KeyCode::Char('I') => { let _ = run_edit(app, player, edit::trim_in_ripple(&app.project, app.playhead)); }
-        KeyCode::Char('o') => { let _ = run_edit(app, player, edit::trim_out(&app.project, app.playhead)); }
-        KeyCode::Char('O') => { let _ = run_edit(app, player, edit::trim_out_ripple(&app.project, app.playhead)); }
+        KeyCode::Char('i') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, false, false)); }
+        KeyCode::Char('I') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, false, true)); }
+        KeyCode::Char('o') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, true, false)); }
+        KeyCode::Char('O') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, true, true)); }
         KeyCode::Char('s') => { let _ = run_edit(app, player, edit::split(&app.project, app.playhead)); }
         KeyCode::Char('D') => {
             edit_yank(app); // D yanks too
@@ -999,6 +999,29 @@ fn grid_time(project: &Project, t: f64) -> Seconds {
             Seconds::new(n, 1) / *fps
         }
         None => Seconds::from_integer(t.round() as i64),
+    }
+}
+
+/// `i`/`I`/`o`/`O` routing: on a gap every case ripples (the gap just
+/// shortens and the followers slide left); on a clip, `i`/`o` leave the
+/// trimmed material as a gap and `I`/`O` ripple.
+fn trim_key(project: &Project, ph: f64, out: bool, ripple: bool) -> Result<Batch, EditError> {
+    if edit::is_gap_at(project, ph) {
+        if out {
+            edit::ripple_gap_out(project, ph)
+        } else {
+            edit::ripple_gap_in(project, ph)
+        }
+    } else if out {
+        if ripple {
+            edit::trim_out_ripple(project, ph)
+        } else {
+            edit::trim_out(project, ph)
+        }
+    } else if ripple {
+        edit::trim_in_ripple(project, ph)
+    } else {
+        edit::trim_in(project, ph)
     }
 }
 
@@ -2628,6 +2651,24 @@ mod tests {
         // A clip tail grown past the end projects the new end.
         let (app, st) = make(true, Armed::Clip { id: 2, head: false }, 7.0, 8.0);
         assert_eq!(projected_total(&app, &st), 8.0);
+    }
+
+    // i/I/o/O on a gap all ripple; on a clip the case distinction stays.
+    #[test]
+    fn trim_key_ripples_on_gaps() {
+        let p = asset_project(); // [C1 0..3][gap 3..5][C2 5..7]
+        let a = trim_key(&p, 4.0, false, false).unwrap();
+        let b = trim_key(&p, 4.0, false, true).unwrap();
+        assert_eq!(a.ops, b.ops, "i and I match on a gap");
+        assert!(a.desc.contains("ripple trim gap in"), "{}", a.desc);
+        let c = trim_key(&p, 4.0, true, false).unwrap();
+        assert_eq!(c.ops, trim_key(&p, 4.0, true, true).unwrap().ops);
+        assert!(c.desc.contains("ripple trim gap out"), "{}", c.desc);
+        // On a clip, i (gap left behind) and I (ripple) differ.
+        assert_ne!(
+            trim_key(&p, 1.0, false, false).unwrap().ops,
+            trim_key(&p, 1.0, false, true).unwrap().ops
+        );
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {

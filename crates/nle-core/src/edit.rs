@@ -668,34 +668,8 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         });
     }
 
-    // The region loses `delta` from its front: remove fully-eaten gap
-    // segments (all at index `first` — removals pull the next one in),
-    // then shrink the first survivor.
-    let mut remaining = delta;
-    for k in first..=last {
-        let g_dur = match &track.segments[k] {
-            Segment::Gap(g) => g.duration,
-            Segment::Clip(_) => unreachable!("region is gaps"),
-        };
-        if g_dur > remaining {
-            // this gap partially donates: shrink it, and we're done
-            ops.push(EditOp::Replace {
-                track: ti,
-                index: first,
-                before: Segment::Gap(Gap { duration: g_dur }),
-                after: Segment::Gap(Gap { duration: g_dur - remaining }),
-            });
-            break;
-        }
-        // fully donated: removed — every removal lands at index `first`
-        // because the list shifts down after each one
-        ops.push(EditOp::Remove {
-            track: ti,
-            index: first,
-            segment: Segment::Gap(Gap { duration: g_dur }),
-        });
-        remaining -= g_dur;
-    }
+    // The region loses `delta` from its front.
+    ops.extend(shrink_gap_region(ti, &track.segments, first, last, delta, true));
     Ok(Batch {
         ops,
         desc: format!("trim gap in to {}", stamp(project, &t)),
@@ -788,32 +762,116 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
         });
     }
 
-    // The region loses `delta` from its back: remove fully-eaten gap
-    // segments walking backwards, then shrink the first survivor.
-    let remaining = delta;
-    for k in (first..=last).rev() {
-        let g = match &track.segments[k] {
-            Segment::Gap(g) => g.clone(),
-            Segment::Clip(_) => unreachable!("region is gaps"),
-        };
-        if g.duration > remaining {
-            ops.push(EditOp::Replace {
-                track: ti,
-                index: k,
-                before: Segment::Gap(g.clone()),
-                after: Segment::Gap(Gap { duration: g.duration - remaining }),
-            });
-            break;
-        }
-        ops.push(EditOp::Remove {
-            track: ti,
-            index: k,
-            segment: Segment::Gap(g),
-        });
-    }
+    // The region loses `delta` from its back.
+    ops.extend(shrink_gap_region(ti, &track.segments, first, last, delta, false));
     Ok(Batch {
         ops,
         desc: format!("trim gap out to {}", stamp(project, &t)),
+    })
+}
+
+/// Shrink a gap region `[first..=last]` by `delta`, eating from the front
+/// (`front`) or the back. Fully-eaten gap segments are removed and a
+/// survivor shortened; the net effect is the gap losing `delta` with the
+/// followers sliding left.
+fn shrink_gap_region(
+    ti: usize,
+    segs: &[Segment],
+    first: usize,
+    last: usize,
+    delta: Seconds,
+    front: bool,
+) -> Vec<EditOp> {
+    let mut ops = Vec::new();
+    if front {
+        let mut remaining = delta;
+        for seg in &segs[first..=last] {
+            let g_dur = match seg {
+                Segment::Gap(g) => g.duration,
+                Segment::Clip(_) => unreachable!("region is gaps"),
+            };
+            if g_dur > remaining {
+                ops.push(EditOp::Replace {
+                    track: ti,
+                    index: first,
+                    before: Segment::Gap(Gap { duration: g_dur }),
+                    after: Segment::Gap(Gap { duration: g_dur - remaining }),
+                });
+                break;
+            }
+            ops.push(EditOp::Remove {
+                track: ti,
+                index: first,
+                segment: Segment::Gap(Gap { duration: g_dur }),
+            });
+            remaining -= g_dur;
+        }
+    } else {
+        let mut remaining = delta;
+        for k in (first..=last).rev() {
+            let g = match &segs[k] {
+                Segment::Gap(g) => g.clone(),
+                Segment::Clip(_) => unreachable!("region is gaps"),
+            };
+            let dur = g.duration;
+            if dur > remaining {
+                ops.push(EditOp::Replace {
+                    track: ti,
+                    index: k,
+                    before: Segment::Gap(g.clone()),
+                    after: Segment::Gap(Gap { duration: dur - remaining }),
+                });
+                break;
+            }
+            ops.push(EditOp::Remove {
+                track: ti,
+                index: k,
+                segment: Segment::Gap(g),
+            });
+            remaining -= dur;
+        }
+    }
+    ops
+}
+
+/// Is the (snapped) playhead inside a gap?
+pub fn is_gap_at(project: &Project, playhead: f64) -> bool {
+    match snap(project, playhead) {
+        Ok(t) => gap_region_at(project, &t).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// `i`/`I` on a gap: ripple-trim the region's in-edge. Unlike `trim_in`,
+/// no neighbouring clip grows into the gap — it simply loses `delta` and
+/// the followers slide left.
+pub fn ripple_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let (ti, first, last, rs, _re) = gap_region_at(project, &t)?;
+    let delta = t - rs;
+    if delta <= Seconds::from_integer(0) {
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
+    }
+    let ops = shrink_gap_region(ti, &project.timeline.tracks[ti].segments, first, last, delta, true);
+    Ok(Batch {
+        ops,
+        desc: format!("ripple trim gap in to {}", stamp(project, &t)),
+    })
+}
+
+/// `o`/`O` on a gap: ripple-trim the region's out-edge, the mirror of
+/// `ripple_gap_in`.
+pub fn ripple_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    let t = snap(project, playhead)?;
+    let (ti, first, last, _rs, re) = gap_region_at(project, &t)?;
+    let delta = re - t;
+    if delta <= Seconds::from_integer(0) {
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
+    }
+    let ops = shrink_gap_region(ti, &project.timeline.tracks[ti].segments, first, last, delta, false);
+    Ok(Batch {
+        ops,
+        desc: format!("ripple trim gap out to {}", stamp(project, &t)),
     })
 }
 
@@ -1566,6 +1624,13 @@ pub fn extend_gap_head(
     };
     let gap_start = track.start_of(index);
     let gap_end = gap_start + g.duration;
+    if t > gap_start && t < gap_end {
+        // Inward trim of the head: ripple. A gap's start is the prefix sum
+        // of what precedes it, so it cannot move on its own — the gap just
+        // loses `delta` and the followers slide left (never growing the
+        // preceding clip).
+        return ripple_gap_in(project, playhead);
+    }
     if t >= gap_start {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
@@ -2666,6 +2731,40 @@ mod tests {
         assert_eq!(clip_by_id(&q, 1).duration(), Seconds::from_integer(2), "clip #1 kept");
         assert!(matches!(&q.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::from_integer(2)));
         assert_eq!(q.timeline.end(), Seconds::from_integer(6), "grew by 1");
+
+        // Inward (head moved right): ripples — the gap shortens and clip #1
+        // is untouched.
+        let mut r = fixture();
+        let mut h3 = History::default();
+        let batch = extend_gap_head(&r, 1, 2.5, false).unwrap();
+        assert!(batch.desc.contains("ripple trim gap in"), "{}", batch.desc);
+        h3.apply(&mut r, batch).unwrap();
+        assert_eq!(clip_by_id(&r, 1).duration(), Seconds::from_integer(2), "clip #1 kept");
+        assert_eq!(r.timeline.end(), Seconds::new(9, 2));
+    }
+
+    #[test]
+    fn ripple_gap_trims_shrink_without_growing_neighbours() {
+        // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
+        let mut p = fixture();
+        let mut h = History::default();
+        // In-edge at 2.5: remove 0.5 from the gap; clip #1 is untouched.
+        let batch = ripple_gap_in(&p, 2.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(2), "clip #1 intact");
+        assert!(matches!(&p.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::new(1, 2)));
+        assert_eq!(p.timeline.end(), Seconds::new(9, 2), "shrunk by 0.5");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+        // Out-edge at 2.5: same net shrink, from the back.
+        let batch = ripple_gap_out(&p, 2.5).unwrap();
+        h.apply(&mut p, batch).unwrap();
+        assert_eq!(clip_by_id(&p, 1).duration(), Seconds::from_integer(2));
+        assert_eq!(p.timeline.end(), Seconds::new(9, 2));
+        // Not on a gap → NoGap; at the gap's start → nothing to remove.
+        assert!(matches!(ripple_gap_in(&p, 0.5), Err(EditError::NoGap)));
+        let fresh = fixture();
+        assert!(matches!(ripple_gap_in(&fresh, 2.0), Err(EditError::NothingToTrim(_))));
     }
 
     #[test]
