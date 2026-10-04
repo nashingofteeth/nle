@@ -37,7 +37,7 @@ N=./target/release/nle        # or just `nle` if cargo-installed
 $N edit                       # TUI + mpv monitor; vim keys:
 #   transport: space play/pause · h/l ±1s · H/L ±5s · f/F frame step
 #   motion:    j/k next/prev cut · w/b next/prev clip · gg/G/0 ends
-#              3l = 3s (counts)
+#              < / > (, / .) clip start/end · 3l = 3s (counts)
 #   editing:   i/o trim in/out to playhead · s split at playhead
 #              dd delete (gap) · D delete + ripple · yy yank
 #              p paste-over (replace what's underneath) · P ripple-insert
@@ -47,7 +47,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              (bracket opens toward its side) ·
 #              navigate to the target (mpv shows the armed material) ·
 #              e commit (replaces what it crosses) · E flip ripple ·
-#              [ ] switch side in-mode · Esc cancel
+#              [ ] switch side in-mode · < > (, .) switch end in-mode ·
+#              Esc cancel
 #   misc:      r reload project from disk · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 

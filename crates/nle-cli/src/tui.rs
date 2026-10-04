@@ -626,6 +626,8 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('E') => enter_extend(app, player, true),
         KeyCode::Char('[') => enter_extend_side(app, player, Side::Right),
         KeyCode::Char(']') => enter_extend_side(app, player, Side::Left),
+        KeyCode::Char('<') | KeyCode::Char(',') => seek_clip_end(app, player, true),
+        KeyCode::Char('>') | KeyCode::Char('.') => seek_clip_end(app, player, false),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.history.redo(&mut app.project) {
                 Ok(desc) => {
@@ -924,6 +926,25 @@ fn clip_under(project: &Project, t: f64) -> Option<&Clip> {
     track.clip_at(grid_time(project, t))
 }
 
+/// The clip under `t` and the position of its head (start) or tail edge.
+/// Shared by the `<` / `>` handling in both modes.
+fn clip_edge_under(project: &Project, t: f64, head: bool) -> Option<(u32, f64)> {
+    let c = clip_under(project, t)?;
+    let (s, e) = clip_span(project, c.id)?;
+    Some((c.id, if head { s } else { e }))
+}
+
+/// `<` / `>` (and `,` / `.`) in Normal mode: move the playhead to the
+/// head or tail of the clip it is over.
+fn seek_clip_end(app: &mut App, player: &MpvPlayer, head: bool) {
+    let Some((id, edge)) = clip_edge_under(&app.project, app.playhead, head) else {
+        app.set_message("playhead is in a gap — clip start/end needs a clip");
+        return;
+    };
+    app.seek_to(player, edge);
+    app.set_message(&format!("clip #{id} {}", if head { "start" } else { "end" }));
+}
+
 /// The playhead's position on the project's frame grid, as Seconds.
 fn grid_time(project: &Project, t: f64) -> Seconds {
     match project.fps.as_ref() {
@@ -1161,6 +1182,33 @@ fn set_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
     }
 }
 
+/// `<` / `>` (and `,` / `.`) inside extend mode: re-anchor the armed edge
+/// to the head or tail of the clip being edited, keeping the ripple flag.
+fn flip_extend_edge(app: &mut App, player: &MpvPlayer, head: bool) {
+    let Some(st) = extend_state(app) else { return };
+    let Armed::Clip { id, .. } = st.armed else {
+        app.set_message("only a clip has two ends — head/tail needs a clip");
+        return;
+    };
+    let Some((s, e)) = clip_span(&app.project, id) else {
+        app.set_message(&format!("clip #{id} is gone"));
+        return;
+    };
+    if st.armed == (Armed::Clip { id, head }) {
+        return; // already on that end
+    }
+    let edge = if head { s } else { e };
+    match plan_for_armed(&app.project, Armed::Clip { id, head }, edge) {
+        Ok(plan) => {
+            // Anchor the playhead before handing the monitor over so the
+            // material preview opens on the armed source point.
+            app.playhead = edge;
+            apply_extend_plan(app, player, plan, st.ripple);
+        }
+        Err(m) => app.set_message(&m),
+    }
+}
+
 /// Leave extend mode: project timeline back on the monitor, playhead at
 /// `pos`.
 fn exit_extend(app: &mut App, player: &MpvPlayer, pos: f64, msg: &str) {
@@ -1385,6 +1433,8 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('e') => commit_extend(app, player),
         KeyCode::Char('[') => set_extend_side(app, player, Side::Right),
         KeyCode::Char(']') => set_extend_side(app, player, Side::Left),
+        KeyCode::Char('<') | KeyCode::Char(',') => flip_extend_edge(app, player, true),
+        KeyCode::Char('>') | KeyCode::Char('.') => flip_extend_edge(app, player, false),
         KeyCode::Char('E') => {
             let ripple = match &mut app.mode {
                 Mode::Extend(inner) => {
@@ -1893,9 +1943,9 @@ fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
     );
 
     let help = if matches!(app.mode, Mode::Extend(_)) {
-        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · [ ] side · Esc cancel"
+        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · [ ] side · < > end · Esc cancel"
     } else {
-        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
+        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · < > clip ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
     };
 
     let mut lines = vec![
@@ -2405,6 +2455,34 @@ mod tests {
         assert_eq!(armed_on_side(&q, 5.0, Side::Left), None, "gap on the left");
         // Nothing at a non-boundary.
         assert_eq!(armed_on_side(&q, 1.0, Side::Left), None);
+    }
+
+    // `<` / `>` (and `,` / `.`): head/tail of the clip under the playhead.
+    #[test]
+    fn clip_edge_under_finds_head_and_tail() {
+        let p = asset_project(); // C1 [0..3), gap [3..5), C2 [5..7)
+        assert_eq!(clip_edge_under(&p, 1.0, true), Some((1, 0.0)));
+        assert_eq!(clip_edge_under(&p, 1.0, false), Some((1, 3.0)));
+        assert_eq!(clip_edge_under(&p, 6.0, true), Some((2, 5.0)));
+        assert_eq!(clip_edge_under(&p, 6.0, false), Some((2, 7.0)));
+        assert_eq!(clip_edge_under(&p, 4.0, true), None, "in a gap");
+    }
+
+    // Extend mode: flipping the armed edge of the SAME clip re-plans its
+    // range against that end (no clip change).
+    #[test]
+    fn flip_extend_edge_replans_same_clip() {
+        let p = asset_project(); // C2 [5..7) src 0..2, asset 10s
+        let (s, e) = clip_span(&p, 2).unwrap();
+        assert_eq!((s, e), (5.0, 7.0));
+        // head -> tail: range becomes [start, end + tail room]
+        let tail = plan_for_armed(&p, Armed::Clip { id: 2, head: false }, e).unwrap();
+        assert_eq!(tail.lo, 5.0);
+        assert_eq!(tail.hi, Some(15.0)); // 7 + (10 - 2)
+        // tail -> head: range becomes [start - head room, end]
+        let head = plan_for_armed(&p, Armed::Clip { id: 2, head: true }, s).unwrap();
+        assert_eq!(head.lo, 5.0); // src in is 0: no head room
+        assert_eq!(head.hi, Some(7.0));
     }
 
     #[test]
