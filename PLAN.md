@@ -70,7 +70,8 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **M3** | Editing for real | ✅ done |
 | **M4** | Multi-track + separate audio tracks | ⏳ next |
 | **M5** | Transitions (`xfade`/`acrossfade`) + effects + proxy cache + thumbnails/waveforms | pending |
-| **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending || **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
+| **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending |
+| **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
 ### M3 — shipped (beyond the original scope)
 
@@ -124,6 +125,38 @@ preview is M5); video layers strictly by index, no position/opacity in M4.
 **Risks:** `overlay` eof/short-upper-layer timing (may need `setpts`/`tpad`);
 the ~80-call-site sweep; `amix` gain policy (`normalize=0`, no implicit
 attenuation); set expectations that the monitor shows the active track only.
+
+## M5 — transitions, effects, proxies (planned)
+
+**Goal:** richer edits beyond cuts — transitions between clips, per-clip
+effect filters, and a **proxy render cache** so the instant preview can show
+things mpv `edl://` can't (effects, composited multi-track, transitions);
+plus optional **thumbnails / waveforms** in the TUI.
+
+Scope:
+- **Transitions:** `xfade` (video) + `acrossfade` (audio) between adjacent
+  clips, with overlap semantics in the segment model (a transition consumes
+  time from both sides). Small set first (cross-dissolve, fade, wipe).
+- **Effects:** per-clip filter chains (color/scale/crop/speed, LUT, maybe
+  `eq`/`curves`) stored on the clip; applied in export and, where possible,
+  previewed. Speed change interacts with audio (`atempo`) and frame grid.
+- **Proxy cache:** for segments the EDL can't express (effects, >1 video
+  track, transitions), render a **proxy clip** once, cache by graph hash,
+  and feed the preview an EDL of proxies. Reuses the M6 hashing idea.
+- **TUI:** thumbnails on the timeline row and/or a waveform strip for audio
+  tracks; a bin/`fx` UI for the clip's effect list.
+
+**Depends on:** M4 (tracks/compositing must exist before composited
+previews make sense).
+
+**Decisions to settle when it starts:** transition model in the segment
+sequence (does a transition replace a gap, or sit between clips?); proxy
+format (all-intra, project geometry, `-crf` preset); effect storage shape
+and whether it's undoable (it should be — extend `Change`).
+
+**Risks:** transition timing/overlap math is exact-rational-hostile (frame
+snapping); proxy invalidation correctness (hash must cover everything the
+graph reads); speed + audio sync.
 
 ## M6 — export presets (planned)
 
