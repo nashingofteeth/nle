@@ -492,7 +492,7 @@ pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     let n = app.project.media.len();
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b') => app.pool_open = false,
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => app.pool_open = false,
         KeyCode::Char('j') | KeyCode::Down => {
             if n > 0 {
                 app.pool_sel = (app.pool_sel + 1).min(n - 1);
@@ -705,7 +705,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('m') => {
             app.pool_open = true;
             app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
-            app.set_message("media pool · j/k move · enter insert at playhead · d remove · esc close");
+            app.set_message("media pool · j/k move · enter insert · d remove · m/esc close");
         }
         KeyCode::Char('e') => enter_extend(app, player, false),
         KeyCode::Char('E') => enter_extend(app, player, true),
@@ -1895,21 +1895,22 @@ fn render_pool(f: &mut Frame, area: Rect, app: &App) {
         .project
         .media
         .iter()
-        .map(|a| {
+        .enumerate()
+        .map(|(i, a)| {
             let used = app.project.asset_usage(a.id);
             let usage = if used.is_empty() {
                 "unused".to_string()
             } else {
                 format!("used ×{}", used.len())
             };
-            let style = if a.id as usize == app.pool_sel {
+            let style = if i == app.pool_sel {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
                 Style::default()
             };
             ratatui::widgets::ListItem::new(Line::from(vec![
-                Span::styled(format!(" #{:<4}", a.id), style),
-                Span::styled(format!("{:<9} ", asset_line(a)), style),
+                Span::styled(format!("#{:<4}", a.id), style),
+                Span::styled(format!(" {:<9} ", asset_line(a)), style),
                 Span::styled(usage, style),
             ]))
         })
@@ -3192,15 +3193,35 @@ mod tests {
     fn media_pool_renders() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let mut p = asset_project();
+        // A second asset so list index (1) differs from asset id (2).
+        p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+        let mut app = App::new(p, PathBuf::from("t.json"));
         app.pool_open = true;
-        app.pool_sel = 0;
+        app.pool_sel = 1; // second row
+
         let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
         term.draw(|f| render(f, &app)).unwrap();
         let buf = term.backend().buffer().clone();
         let text: String = (0..20).map(|y| (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
         assert!(text.contains("media pool"), "{text}");
         assert!(text.contains("red.mp4"), "{text}");
+
+        // The highlighted (cyan-bg) POOL row must hold the SECOND asset
+        // (blue), not the first — index-based, not id-based. Find the pool
+        // block by its title row first.
+        let title_y = (0..20u16).find(|&y| {
+            let row: String = (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            row.contains("media pool")
+        }).expect("pool title present");
+        let cyan_pool_row = (title_y..20u16).find(|&y| {
+            (0..60).any(|x| buf[(x, y)].bg == Color::Cyan)
+        });
+        let row: String = cyan_pool_row
+            .map(|y| (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .unwrap_or_default();
+        assert!(row.contains("blue.mp4"), "highlight on the selected row: {row:?}");
+        assert!(!row.contains("red.mp4"), "not the first row: {row:?}");
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {
