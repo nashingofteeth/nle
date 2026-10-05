@@ -538,8 +538,7 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         // Preview transport (asset seconds).
-        KeyCode::Char(' ') => pool_toggle_play(app, player),
-        KeyCode::Char('h') => pool_seek_rel(app, player, -(mult as f64)),
+        KeyCode::Char(' ') => pool_toggle_play(app, player),        KeyCode::Char('h') => pool_seek_rel(app, player, -(mult as f64)),
         KeyCode::Char('l') => pool_seek_rel(app, player, mult as f64),
         KeyCode::Char('H') => pool_seek_rel(app, player, -5.0 * mult as f64),
         KeyCode::Char('L') => pool_seek_rel(app, player, 5.0 * mult as f64),
@@ -2070,10 +2069,14 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 // ------------------------------------------------------------ rendering
 
 fn render(f: &mut Frame, app: &App) {
-    let [status, timeline, info] = Layout::vertical([
+    // An always-visible hints + notices strip at the bottom; hidden when
+    // the terminal is too short to spare it (the timeline matters more).
+    let strip = if f.area().height >= 16 { 9 } else { 0 };
+    let [status, timeline, info, hints] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(4),
         Constraint::Min(0),
+        Constraint::Length(strip),
     ])
     .areas(f.area());
 
@@ -2084,6 +2087,58 @@ fn render(f: &mut Frame, app: &App) {
     } else {
         render_info(f, info, app);
     }
+    if strip > 0 {
+        render_hints(f, hints, app);
+    }
+}
+
+/// The always-on bottom strip: a mode-specific key cheat-sheet plus the
+/// latest notice/message.
+fn render_hints(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::bordered().title(" keys ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let mut lines: Vec<Line> = hints_for(app)
+        .into_iter()
+        .map(|h| Line::from(Span::styled(h, Style::default().fg(Color::DarkGray))))
+        .collect();
+    // Latest notice, visually separated from the cheat-sheet.
+    lines.push(Line::from(""));
+    let (msg, style) = if !app.message.is_empty() {
+        (app.message.clone(), Style::default().fg(Color::Yellow))
+    } else {
+        ("—".to_string(), Style::default().fg(Color::DarkGray))
+    };
+    lines.push(Line::from(Span::styled(msg, style)));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// The mode-specific key cheat-sheet (single source of truth for hints).
+fn hints_for(app: &App) -> Vec<&'static str> {
+    if let Mode::Command(_) = app.mode {
+        return vec!["type a command · enter run · esc cancel · :q quit"];
+    }
+    if matches!(app.mode, Mode::Extend(_)) {
+        return vec![
+            "extend mode — move the armed edge, then commit",
+            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends",
+            "e commit · E ripple on/off · [ ] side · < > (, .) end · Esc cancel",
+        ];
+    }
+    if app.pool_open {
+        return vec![
+            "media pool — the monitor previews the selected file",
+            "j/k assets · { } list ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
+            "space play · enter insert at playhead · d remove · u undo · m/esc close",
+        ];
+    }
+    vec![
+        "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
+        "motion     j/k cuts · w/b clips · < > (, .) clip start/end",
+        "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
+        "extend     e/E enter · [ ] side · m pool · u undo · r reload · : cmd · q quit",
+    ]
 }
 
 /// The pool takes over the info pane: asset list on the left, probe
@@ -2568,31 +2623,16 @@ fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
         app.history.depth()
     );
 
-    let help = if matches!(app.mode, Mode::Extend(_)) {
-        "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · [ ] side · < > end · Esc cancel"
-    } else {
-        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · < > clip ends · i/o trim clip/gap · I/O ripple-trim · s split · _ insert gap (count = frames) · dd/D del/gap · yy/p/P · m media pool · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
-    };
-
     let mut lines = vec![
         Line::from(first_line),
         Line::from(""),
         Line::from(Span::styled(stats, Style::default().fg(Color::Gray))),
-        Line::from(""),
-        Line::from(Span::styled(help.to_string(), Style::default().fg(Color::DarkGray))),
     ];
     if let Some(err) = &app.mpv_error {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("mpv: {err}"),
             Style::default().fg(Color::Red),
-        )));
-    }
-    if !app.message.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            app.message.clone(),
-            Style::default().fg(Color::Yellow),
         )));
     }
 
@@ -3652,6 +3692,35 @@ mod tests {
             .unwrap_or_default();
         assert!(row.contains("blue.mp4"), "highlight on the selected row: {row:?}");
         assert!(!row.contains("red.mp4"), "not the first row: {row:?}");
+    }
+
+    // The bottom strip shows a mode-specific cheat-sheet + the latest notice.
+    #[test]
+    fn hints_panel_shows_keys_and_notice() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let render_text = |app: &App| {
+            let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            term.draw(|f| render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..24)
+                .map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // Normal mode: the timeline cheat-sheet and the notice.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.set_message("extend tail of clip #1 (absorbed gap)");
+        let text = render_text(&app);
+        assert!(text.contains("edit"), "cheat-sheet present: {text}");
+        assert!(text.contains("absorbed gap"), "notice shown: {text}");
+
+        // Pool mode: the pool hint line replaces the timeline sheet.
+        app.pool_open = true;
+        let text = render_text(&app);
+        assert!(text.contains("media pool"), "{text}");
+        assert!(text.contains("enter insert"), "{text}");
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {

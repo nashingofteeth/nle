@@ -61,6 +61,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              enter inserts it, d removes, u undoes ·
 #              r reload project · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
+# The bottom "keys" panel always shows the current mode's cheat-sheet and the
+# latest notice.
 
 # Project workflow
 $N init
