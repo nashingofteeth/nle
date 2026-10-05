@@ -961,8 +961,24 @@ fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Resu
                 Ok(CommitKind::Delete)
             }
         }
-        Armed::GapTail { .. } => Ok(CommitKind::GapTail),
-        Armed::GapHead { .. } => Ok(CommitKind::GapHead),
+        Armed::GapTail { index } => {
+            if let Some((s, _)) = gap_span(project, *index)
+                && ph <= s + 1e-9
+            {
+                // At the gap's far end (its start): fully consumed — delete
+                // it, rippling shut.
+                return Ok(CommitKind::Delete);
+            }
+            Ok(CommitKind::GapTail)
+        }
+        Armed::GapHead { index } => {
+            if let Some((_, e)) = gap_span(project, *index)
+                && ph >= e - 1e-9
+            {
+                return Ok(CommitKind::Delete);
+            }
+            Ok(CommitKind::GapHead)
+        }
     }
 }
 
@@ -1554,14 +1570,16 @@ fn commit_batch(
             edit::extend_gap_head(project, *index, ph, ripple)
         }
         CommitKind::Delete => {
-            // The playhead reached the armed clip's opposite end, so the
-            // clip is fully consumed: delete IT, not whatever segment the
-            // boundary resolves to (that would hit the follower, or error
-            // at the track end).
-            if ripple {
-                edit::delete_clip_ripple_by_id(project, id)
-            } else {
-                edit::delete_clip_by_id(project, id)
+            // The playhead reached the armed segment's opposite end, so it
+            // is fully consumed: delete IT (rippling), not whatever segment
+            // the boundary resolves to. Gaps have no clip id — delete by
+            // index.
+            match armed {
+                Armed::GapTail { index } | Armed::GapHead { index } => {
+                    edit::delete_segment(project, *index, true)
+                }
+                _ if ripple => edit::delete_clip_ripple_by_id(project, id),
+                _ => edit::delete_clip_by_id(project, id),
             }
         }
         CommitKind::Noop => Err(EditError::NothingToTrim(format!("edge already at {}", ph))),
@@ -2690,6 +2708,26 @@ mod tests {
             plan_commit(&p, &Armed::GapHead { index: 1 }, 3.0, 3.0),
             Ok(CommitKind::Noop)
         );
+        // Committing at a gap's opposite end removes it (ripple), like a
+        // delete everywhere else.
+        assert_eq!(
+            plan_commit(&p, &Armed::GapTail { index: 1 }, 5.0, 3.0),
+            Ok(CommitKind::Delete),
+            "gap tail walked to its start"
+        );
+        assert_eq!(
+            plan_commit(&p, &Armed::GapHead { index: 1 }, 3.0, 5.0),
+            Ok(CommitKind::Delete),
+            "gap head walked to its end"
+        );
+        // Committing that delete ripples the gap shut.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 3.0;
+        let batch = run_commit_action(&app, &Armed::GapTail { index: 1 }, CommitKind::Delete, false).unwrap();
+        let mut h = History::default();
+        h.apply(&mut app.project, batch, 0).unwrap();
+        assert_eq!(app.project.timeline.end(), Seconds::from_integer(5), "gap removed, length shrank");
+        assert_eq!(app.project.timeline.video_track().unwrap().segments.len(), 2);
 
         // Head grow to 1.0: clip #1's tail is trimmed, the gap grows left.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
