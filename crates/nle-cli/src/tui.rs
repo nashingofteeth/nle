@@ -538,11 +538,7 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         // Preview transport (asset seconds).
-        KeyCode::Char(' ') => {
-            if app.loaded {
-                player.toggle_pause();
-            }
-        }
+        KeyCode::Char(' ') => pool_toggle_play(app, player),
         KeyCode::Char('h') => pool_seek_rel(app, player, -(mult as f64)),
         KeyCode::Char('l') => pool_seek_rel(app, player, mult as f64),
         KeyCode::Char('H') => pool_seek_rel(app, player, -5.0 * mult as f64),
@@ -562,8 +558,7 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 }
 
 /// Seek the pool preview to the selected asset's last frame.
-fn pool_seek_end(app: &mut App, player: &MpvPlayer) {
-    let d = app
+fn pool_seek_end(app: &mut App, player: &MpvPlayer) {    let d = app
         .project
         .media
         .get(app.pool_sel)
@@ -571,6 +566,21 @@ fn pool_seek_end(app: &mut App, player: &MpvPlayer) {
         .map(|d| secs(&d))
         .unwrap_or(0.0);
     pool_seek_abs(app, player, pool_last_frame(app, d));
+}
+
+/// Play/pause the pool preview; at the end of the file, restart from 0
+/// (mpv `--keep-open` holds at EOF, where a plain unpause would stick).
+fn pool_toggle_play(app: &mut App, player: &MpvPlayer) {
+    if !app.loaded {
+        return;
+    }
+    if app.eof {
+        app.pool_pos = 0.0;
+        player.seek_absolute(0.0);
+        player.set_pause(false);
+    } else {
+        player.toggle_pause();
+    }
 }
 
 /// Move the list selection by `delta` and load the new asset.
