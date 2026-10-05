@@ -1168,7 +1168,14 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
     // Keep the playhead on the frame it was showing, not the same
     // timecode (a trim can move material under it).
     let anchor = edit_anchor(&app.project, app.playhead);
-    let at_frame = frame_of(app.project.fps.as_ref(), app.playhead);
+    // Undo attribution: a normal edit is made from the playhead; an extend
+    // commit is made from where extend mode was entered (the armed edge),
+    // so undoing it returns there rather than to the commit target.
+    let from = match &app.mode {
+        Mode::Extend(st) => st.edge_pos,
+        _ => app.playhead,
+    };
+    let at_frame = frame_of(app.project.fps.as_ref(), from);
     match app.history.apply(&mut app.project, batch, at_frame) {
         Ok(()) => {
             reanchor_playhead(app, anchor);
@@ -2650,6 +2657,40 @@ mod tests {
         assert!(b.desc.contains("absorbed"), "{}", b.desc);
         let b = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, true).unwrap();
         assert!(b.desc.contains("extend tail"), "{}", b.desc);
+    }
+
+    // An extend commit records its undo position as where the mode was
+    // entered (the armed edge), not the playhead it moved to.
+    #[test]
+    fn extend_commit_undo_returns_to_entry() {
+        let p = asset_project(); // C1 tail armed at 3.0
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 3.0; // entered here
+        app.mode = Mode::Extend(ExtendState {
+            armed: Armed::Clip { id: 1, head: false },
+            edge_pos: 3.0,
+            ripple: false,
+            lo: 0.0,
+            hi: Some(9.0),
+            mat: None,
+            preview_off: -1.0,
+        });
+        // Commit with the playhead moved to 6.0, via the run_edit path.
+        app.playhead = 6.0;
+        let batch = run_commit_action(&app, &Armed::Clip { id: 1, head: false }, CommitKind::AbsorbTail, false).unwrap();
+        // Mirror run_edit's attribution: extend uses the entry edge.
+        let from = match &app.mode {
+            Mode::Extend(st) => st.edge_pos,
+            _ => app.playhead,
+        };
+        assert_eq!(from, 3.0);
+        let frame = frame_of(app.project.fps.as_ref(), from);
+        app.history.apply(&mut app.project, batch, frame).unwrap();
+        // Move away, then undo.
+        app.playhead = 1.0;
+        let outcome = app.history.undo(&mut app.project).unwrap();
+        app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
+        assert_eq!(app.playhead, 3.0, "back to where extend mode was entered");
     }
 
     // Any gap (here a middle one) can be armed at either edge and
