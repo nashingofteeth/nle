@@ -614,7 +614,7 @@ fn open_pool(app: &mut App, player: &MpvPlayer) {
     app.pool_open = true;
     app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
     load_pool_preview(app, player);
-    app.set_message("media pool · j/k assets · h/l seek · gg/G file ends · space play · enter insert · d remove · m close");
+    app.set_message("media");
 }
 
 /// Close the pool: reload the project timeline at the remembered playhead.
