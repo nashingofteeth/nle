@@ -4,6 +4,9 @@ Procedures and conventions established in this working session (M3 polish:
 extend mode, media pool, panels, playhead anchoring). See `PLAN.md` for the
 roadmap and `README.md` for usage.
 
+The user is **learning Rust through this project** (coming from JS/PHP):
+teach as you build — see "Learning Rust along the way" below.
+
 ## Keeping the docs current
 
 Three docs, three jobs: `README.md` = how to **use** it, `AGENTS.md` = how
@@ -27,6 +30,27 @@ file** and propose the exact wording. Good candidates:
 Keep entries short, concrete, and reproducible. Don't add anything the
 code already makes obvious, and don't document a one-off — wait until it's
 clearly a durable rule or preference.
+
+## Learning Rust along the way
+
+The user knows JS/PHP, not Rust — this project is how they're learning it.
+**Every implementation step should teach, not just ship.** In plans,
+explainers, and commit-adjacent notes:
+
+- Name the Rust concept the change exercises and why it applies here
+  (ownership/borrow, `Result`/`?`, enums + exhaustive `match`, traits,
+  lifetimes/NLL, `Arc<Mutex>`, closures/captures, `Drop`, `let-else`,
+  modes-as-enums, iterator combinators, `Option`/`then`/`flatten`).
+- Prefer the idiomatic construction and say what it replaces — e.g. making
+  illegal states unrepresentable vs. runtime checks; a pure `match` over a
+  stringly dispatch; splitting decide/apply with types.
+- Call out the **gotcha** when the compiler or clippy pushes back, and what
+  the error actually means (struct-literal parens, closure param
+  inference, `chars[cur..o]` panics, moved-out values, `#[cfg(test)]`).
+- Keep it concise and tied to the code at hand — a short, concrete
+  explainer beats a tutorial dump. Tie lessons to a real file/line.
+
+This is a durable expectation across all milestones, not a one-off.
 
 ## Verify before every commit
 
