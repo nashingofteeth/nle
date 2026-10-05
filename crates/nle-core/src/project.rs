@@ -36,6 +36,10 @@ pub enum ProjectError {
     Timeline(#[from] TimelineError),
     #[error("asset #{0}: {1}")]
     Asset(u32, String),
+    #[error("asset #{0} not found")]
+    AssetNotFound(u32),
+    #[error("asset #{0} is used by clip(s) {1:?} — remove them first")]
+    AssetInUse(u32, Vec<u32>),
 }
 
 /// Output sequence settings (set from the first clip, changeable later).
@@ -167,6 +171,35 @@ impl Project {
         self.media.iter().find(|a| a.path == path)
     }
 
+    /// Clip ids across the timeline that reference asset `id` (video track
+    /// now; all tracks once M4 lands).
+    pub fn asset_usage(&self, id: u32) -> Vec<u32> {
+        self.timeline
+            .tracks
+            .iter()
+            .flat_map(|t| t.segments.iter())
+            .filter_map(|s| match s {
+                Segment::Clip(c) if c.asset == id => Some(c.id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Remove an asset from the pool. Refuses while any clip references it
+    /// (the caller lists the clips); no clip is ever silently dropped.
+    pub fn remove_asset(&mut self, id: u32) -> Result<Asset, ProjectError> {
+        let used = self.asset_usage(id);
+        if !used.is_empty() {
+            return Err(ProjectError::AssetInUse(id, used));
+        }
+        let pos = self
+            .media
+            .iter()
+            .position(|a| a.id == id)
+            .ok_or(ProjectError::AssetNotFound(id))?;
+        Ok(self.media.remove(pos))
+    }
+
     fn next_asset_id(&self) -> u32 {
         self.media.iter().map(|a| a.id).max().unwrap_or(0) + 1
     }
@@ -260,6 +293,21 @@ mod tests {
         assert!(added1 && !added2);
         assert_eq!(id1, id2);
         assert_eq!(p.media.len(), 1);
+    }
+
+    #[test]
+    fn asset_usage_and_guarded_removal() {
+        let mut p = sample_project(); // two assets, both used by a clip
+        assert_eq!(p.asset_usage(1), vec![1]);
+        assert_eq!(p.asset_usage(2), vec![2]);
+        // In use: refuses, naming the clips.
+        assert!(matches!(p.remove_asset(1), Err(ProjectError::AssetInUse(1, ref v)) if v == &vec![1]));
+        assert_eq!(p.media.len(), 2);
+        // Unused: an imported-but-unplaced asset removes cleanly.
+        let (id, _) = p.add_asset("/x/spare.mp4".into(), probe_report("5", 320, 240, "30/1", false));
+        assert!(p.asset_usage(id).is_empty());
+        assert!(p.remove_asset(id).is_ok());
+        assert!(p.remove_asset(id).is_err(), "already gone");
     }
 
     #[test]

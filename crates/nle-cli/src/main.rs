@@ -66,6 +66,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Media pool: list assets and their usage
+    Media {
+        #[command(subcommand)]
+        action: MediaCmd,
+    },
     /// Render the timeline to a file
     Export {
         /// Output file
@@ -130,6 +135,18 @@ enum Cmd {
     },
 }
 
+/// Media-pool subcommands.
+#[derive(Subcommand)]
+enum MediaCmd {
+    /// List pooled assets and how many clips use each
+    Ls,
+    /// Remove an unused asset from the pool
+    Rm {
+        /// Asset id (from `nle media ls`)
+        id: u32,
+    },
+}
+
 /// CLI spelling of the encoder choices (clap needs ValueEnum to build
 /// an argument parser from it).
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -161,6 +178,7 @@ fn main() -> Result<()> {
         }
         Cmd::Remove { id } => cmd_remove(&cli.project, id),
         Cmd::Show { json } => cmd_show(&cli.project, json),
+        Cmd::Media { action } => cmd_media(&cli.project, action),
         Cmd::Export { output, encoder, crf, preset, bitrate } => {
             cmd_export(&cli.project, &output, encoder.into(), crf, &preset, &bitrate)
         }
@@ -419,6 +437,36 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_media(project_path: &Path, action: MediaCmd) -> Result<()> {
+    match action {
+        MediaCmd::Ls => {
+            let project = Project::load(project_path)?;
+            if project.media.is_empty() {
+                println!("media pool is empty — `nle import <file>`");
+                return Ok(());
+            }
+            println!("{} — {} asset(s)", project_path.display(), project.media.len());
+            for a in &project.media {
+                let used = project.asset_usage(a.id);
+                let usage = if used.is_empty() {
+                    "unused".to_string()
+                } else {
+                    format!("used by {used:?}")
+                };
+                println!("  #{:<4} {:<9} {}", a.id, asset_summary(a), usage);
+            }
+            Ok(())
+        }
+        MediaCmd::Rm { id } => {
+            let mut project = Project::load(project_path)?;
+            let removed = project.remove_asset(id)?;
+            project.save(project_path)?;
+            println!("✓ removed asset #{id} ({})", removed.path.display());
+            Ok(())
+        }
+    }
 }
 
 fn cmd_export(
