@@ -56,9 +56,10 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              start can prepend its head material past time 0 · the
 #              status shows the projected timeline length · Esc cancel
 #   misc:      m media pool — takes over the info pane: asset list
-#              (j/k) + probe metadata; the monitor previews the file
-#              (space play, h/l ±1s, f/F frame); enter inserts it, d
-#              removes, u undoes · r reload project · :q quit · q quit
+#              (j/k, { }) + probe metadata; the monitor previews the file
+#              (space play, h/l ±1s, f/F frame, gg/0 start, G/$ end);
+#              enter inserts it, d removes, u undoes ·
+#              r reload project · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 
 # Project workflow

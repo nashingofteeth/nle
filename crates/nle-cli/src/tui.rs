@@ -525,10 +525,14 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     let n = app.project.media.len();
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => close_pool(app, player),
+        // List motion (j/k), list ends ({ }).
         KeyCode::Char('j') | KeyCode::Down => pool_move(app, player, 1, n),
         KeyCode::Char('k') | KeyCode::Up => pool_move(app, player, -1, n),
-        KeyCode::Char('G') => pool_select(app, player, n.saturating_sub(1)),
-        KeyCode::Char('g') => pool_select(app, player, 0),
+        KeyCode::Char('{') => pool_select(app, player, 0),
+        KeyCode::Char('}') => pool_select(app, player, n.saturating_sub(1)),
+        // Preview ends (file, not list): gg / 0 = start, G / $ = end.
+        KeyCode::Char('g') => app.pending = Pending::G,
+        KeyCode::Char('G') | KeyCode::Char('$') => pool_seek_end(app, player),
         KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
         KeyCode::Char('d') => remove_from_pool(app, player),
         KeyCode::Char('u') => do_undo(app, player),
@@ -547,6 +551,26 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('F') => pool_step(app, player, -1),
         _ => {}
     }
+
+    // `gg` completes to the start of the file (mirrors normal mode).
+    if let (Pending::G, KeyCode::Char('g')) = (&app.pending, key.code) {
+        app.pending = Pending::None;
+        pool_seek_abs(app, player, 0.0);
+    } else if !matches!(key.code, KeyCode::Char('g') | KeyCode::Char('0'..='9')) {
+        app.pending = Pending::None;
+    }
+}
+
+/// Seek the pool preview to the selected asset's last frame.
+fn pool_seek_end(app: &mut App, player: &MpvPlayer) {
+    let d = app
+        .project
+        .media
+        .get(app.pool_sel)
+        .and_then(|a| a.duration())
+        .map(|d| secs(&d))
+        .unwrap_or(0.0);
+    pool_seek_abs(app, player, pool_last_frame(app, d));
 }
 
 /// Move the list selection by `delta` and load the new asset.
@@ -581,7 +605,7 @@ fn open_pool(app: &mut App, player: &MpvPlayer) {
     app.pool_open = true;
     app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
     load_pool_preview(app, player);
-    app.set_message("media pool · j/k assets · h/l seek · space play · enter insert · d remove · m close");
+    app.set_message("media pool · j/k assets · h/l seek · gg/G file ends · space play · enter insert · d remove · m close");
 }
 
 /// Close the pool: reload the project timeline at the remembered playhead.
