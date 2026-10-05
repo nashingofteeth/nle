@@ -4,11 +4,19 @@ Procedures and conventions established in this working session (M3 polish:
 extend mode, media pool, panels, playhead anchoring). See `PLAN.md` for the
 roadmap and `README.md` for usage.
 
-## Keeping this file current
+## Keeping the docs current
+
+Three docs, three jobs: `README.md` = how to **use** it, `AGENTS.md` = how
+to **work** on it, `PLAN.md` = where it's **going** (roadmap + status).
+
+**When a milestone lands, or a task changes the plan, propose an update to
+`PLAN.md` and ask before editing it.** Move the milestone's row and its
+status detail forward, note anything deferred, and keep the "next"
+pointer accurate — but don't rewrite the roadmap unilaterally.
 
 When you (an agent) come across something during work that a future agent
-would benefit from remembering, **ask the user before adding it here** and
-propose the exact wording. Good candidates:
+would benefit from remembering, **ask the user before adding it to this
+file** and propose the exact wording. Good candidates:
 
 - a **sensibility** — how the user wants things to feel or be weighed;
 - a **pitfall** — a trap that cost time or nearly slipped through;
