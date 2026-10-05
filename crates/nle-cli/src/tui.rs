@@ -268,10 +268,14 @@ pub struct App {
     pub eof: bool,
     pub mpv_error: Option<String>,
     pub exit_message: Option<String>,
-    /// Media-pool panel open (full-width, under the info pane).
+    /// Media-pool panel open (takes over the info pane).
     pub pool_open: bool,
     /// Selected row in the pool panel.
     pub pool_sel: usize,
+    /// Playhead position (seconds) in the pool's raw-file preview.
+    pub pool_pos: f64,
+    /// Timeline playhead to restore when the pool closes.
+    pool_resume: f64,
 }
 
 impl App {
@@ -296,6 +300,8 @@ impl App {
             exit_message: None,
             pool_open: false,
             pool_sel: 0,
+            pool_pos: 0.0,
+            pool_resume: 0.0,
         }
     }
 
@@ -316,18 +322,24 @@ impl App {
         // is the range start: translate back to timeline coordinates.
         if !st.paused && st.file_loaded
             && let Some(t) = st.time_pos {
-                let t = match &self.mode {
-                    Mode::Extend(st) => t + st.preview_off,
-                    _ => t,
-                };
-                let snapped = snap_to_frame(t, self.project.fps.as_ref());
-                self.playhead = match &self.mode {
-                    // Extend mode: stay within the armed range — the
-                    // material preview can't drive the playhead past the
-                    // segment's end (or before its start).
-                    Mode::Extend(st) => clamp_extend(st, snapped),
-                    _ => snap_to_cut(snapped, &self.project),
-                };
+                if self.pool_open {
+                    // The monitor is a raw pooled file: position is asset
+                    // seconds, no EDL translation.
+                    self.pool_pos = t;
+                } else {
+                    let t = match &self.mode {
+                        Mode::Extend(st) => t + st.preview_off,
+                        _ => t,
+                    };
+                    let snapped = snap_to_frame(t, self.project.fps.as_ref());
+                    self.playhead = match &self.mode {
+                        // Extend mode: stay within the armed range — the
+                        // material preview can't drive the playhead past the
+                        // segment's end (or before its start).
+                        Mode::Extend(st) => clamp_extend(st, snapped),
+                        _ => snap_to_cut(snapped, &self.project),
+                    };
+                }
             }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
@@ -488,26 +500,136 @@ pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     }
 }
 
-/// Media-pool panel keys: move, insert a clip from the asset, remove.
+/// Media-pool panel keys: move the list (loading each asset for preview),
+/// insert/remove, and seek/play the preview.
 fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
+    // Counts build for the seek keys (bare `0` = start of the file).
+    if let KeyCode::Char(c @ '0'..='9') = key.code {
+        if c == '0' && app.count.is_none() {
+            pool_seek_abs(app, player, 0.0);
+            return;
+        }
+        let d = c.to_digit(10).unwrap_or(0);
+        app.count = Some(app.count.unwrap_or(0) * 10 + d);
+        return;
+    }
+    let mult = app.count.take().unwrap_or(1);
+
     let n = app.project.media.len();
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => app.pool_open = false,
-        KeyCode::Char('j') | KeyCode::Down => {
-            if n > 0 {
-                app.pool_sel = (app.pool_sel + 1).min(n - 1);
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => app.pool_sel = app.pool_sel.saturating_sub(1),
-        KeyCode::Char('G') => app.pool_sel = n.saturating_sub(1),
-        KeyCode::Char('g') => app.pool_sel = 0,
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('m') => close_pool(app, player),
+        KeyCode::Char('j') | KeyCode::Down => pool_move(app, player, 1, n),
+        KeyCode::Char('k') | KeyCode::Up => pool_move(app, player, -1, n),
+        KeyCode::Char('G') => pool_select(app, player, n.saturating_sub(1)),
+        KeyCode::Char('g') => pool_select(app, player, 0),
         KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
         KeyCode::Char('d') => remove_from_pool(app, player),
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
+        // Preview transport (asset seconds).
+        KeyCode::Char(' ') => {
+            if app.loaded {
+                player.toggle_pause();
+            }
+        }
+        KeyCode::Char('h') => pool_seek_rel(app, player, -(mult as f64)),
+        KeyCode::Char('l') => pool_seek_rel(app, player, mult as f64),
+        KeyCode::Char('H') => pool_seek_rel(app, player, -5.0 * mult as f64),
+        KeyCode::Char('L') => pool_seek_rel(app, player, 5.0 * mult as f64),
+        KeyCode::Char('f') => pool_step(app, player, 1),
+        KeyCode::Char('F') => pool_step(app, player, -1),
         _ => {}
     }
 }
+
+/// Move the list selection by `delta` and load the new asset.
+fn pool_move(app: &mut App, player: &MpvPlayer, delta: i64, n: usize) {
+    if n == 0 {
+        return;
+    }
+    let cur = app.pool_sel.min(n - 1) as i64;
+    pool_select(app, player, (cur + delta).clamp(0, n as i64 - 1) as usize);
+}
+
+/// Select a list row and swap the monitor to that asset.
+fn pool_select(app: &mut App, player: &MpvPlayer, sel: usize) {
+    if sel == app.pool_sel && app.loaded {
+        return;
+    }
+    app.pool_sel = sel;
+    load_pool_preview(app, player);
+}
+
+/// Load the selected asset into the monitor as a raw file.
+fn load_pool_preview(app: &mut App, player: &MpvPlayer) {
+    if let Some(asset) = app.project.media.get(app.pool_sel) {
+        app.pool_pos = 0.0;
+        player.load(&asset.path.display().to_string(), Some(0.0));
+    }
+}
+
+/// Open the pool: remember the timeline playhead, preview the selection.
+fn open_pool(app: &mut App, player: &MpvPlayer) {
+    app.pool_resume = app.playhead;
+    app.pool_open = true;
+    app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
+    load_pool_preview(app, player);
+    app.set_message("media pool · j/k assets · h/l seek · space play · enter insert · d remove · m close");
+}
+
+/// Close the pool: reload the project timeline at the remembered playhead.
+fn close_pool(app: &mut App, player: &MpvPlayer) {
+    app.pool_open = false;
+    if let Ok(edl) = preview::build_edl(&app.project) {
+        player.load(&edl, Some(app.pool_resume.max(0.0)));
+    }
+    app.playhead = app.pool_resume;
+    app.set_message("timeline");
+}
+
+/// Seek the pool preview to an absolute asset time (clamped to duration).
+fn pool_seek_abs(app: &mut App, player: &MpvPlayer, t: f64) {
+    if !app.loaded {
+        return;
+    }
+    let d = app
+        .project
+        .media
+        .get(app.pool_sel)
+        .and_then(|a| a.duration())
+        .map(|d| secs(&d))
+        .unwrap_or(f64::INFINITY);
+    let target = t.clamp(0.0, d);
+    app.pool_pos = target;
+    player.seek_absolute(target);
+}
+
+fn pool_seek_rel(app: &mut App, player: &MpvPlayer, delta: f64) {
+    pool_seek_abs(app, player, app.pool_pos + delta);
+}
+
+/// Frame-step the pool preview (mpv's frame step; ±1/fps for the position).
+fn pool_step(app: &mut App, player: &MpvPlayer, dir: i64) {
+    if !app.loaded {
+        return;
+    }
+    let fps = app
+        .project
+        .media
+        .get(app.pool_sel)
+        .and_then(|a| a.fps())
+        .map(|f| secs(&f))
+        .unwrap_or(30.0);
+    app.pool_pos = (app.pool_pos + dir as f64 / fps).max(0.0);
+    for _ in 0..dir.abs() {
+        if dir > 0 {
+            player.frame_step();
+        } else {
+            player.frame_back_step();
+        }
+    }
+}
+
 
 /// Undo the last edit, restoring the playhead to where it was made.
 fn do_undo(app: &mut App, player: &MpvPlayer) {
@@ -730,11 +852,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             run_edit(app, player, edit::paste_ripple(&app.project, &clipboard, app.playhead));
         }
         KeyCode::Char('u') => do_undo(app, player),
-        KeyCode::Char('m') => {
-            app.pool_open = true;
-            app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
-            app.set_message("media pool · j/k move · enter insert · d remove · u undo · m/esc close");
-        }
+        KeyCode::Char('m') => open_pool(app, player),
         KeyCode::Char('e') => enter_extend(app, player, false),
         KeyCode::Char('E') => enter_extend(app, player, true),
         KeyCode::Char('[') => enter_extend_side(app, player, Side::Right),
@@ -1880,36 +1998,33 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 // ------------------------------------------------------------ rendering
 
 fn render(f: &mut Frame, app: &App) {
-    let [status, timeline, info, pool] = Layout::vertical([
+    let [status, timeline, info] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(4),
         Constraint::Min(0),
-        Constraint::Length(if app.pool_open { pool_height(app) } else { 0 }),
     ])
     .areas(f.area());
 
     render_status(f, status, app);
     render_timeline(f, timeline, app);
-    render_info(f, info, app);
     if app.pool_open {
-        render_pool(f, pool, app);
+        render_pool(f, info, app);
+    } else {
+        render_info(f, info, app);
     }
 }
 
-/// Rows the pool panel needs: a border + one line per asset, capped so it
-/// never eats the whole screen.
-fn pool_height(app: &App) -> u16 {
-    (app.project.media.len() as u16 + 2).clamp(3, 12)
-}
-
+/// The pool takes over the info pane: asset list on the left, probe
+/// metadata for the selection on the right.
 fn render_pool(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::List;
-    let block = Block::bordered().title(" media pool ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height == 0 {
-        return;
-    }
+    use ratatui::widgets::{List, Paragraph, Wrap};
+    let [list_area, meta_area] =
+        Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).areas(area);
+
+    // Left: the asset list.
+    let list_block = Block::bordered().title(" media pool ");
+    let list_inner = list_block.inner(list_area);
+    f.render_widget(list_block, list_area);
     let items: Vec<ratatui::widgets::ListItem> = app
         .project
         .media
@@ -1917,24 +2032,36 @@ fn render_pool(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, a)| {
             let used = app.project.asset_usage(a.id);
-            let usage = if used.is_empty() {
-                "unused".to_string()
-            } else {
-                format!("used ×{}", used.len())
-            };
+            let mark = if used.is_empty() { "○" } else { "●" };
             let style = if i == app.pool_sel {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
                 Style::default()
             };
             ratatui::widgets::ListItem::new(Line::from(vec![
-                Span::styled(format!("#{:<4}", a.id), style),
-                Span::styled(format!(" {:<9} ", asset_line(a)), style),
-                Span::styled(usage, style),
+                Span::styled(format!("{mark} #{:<3} ", a.id), style),
+                Span::styled(asset_line(a), style),
             ]))
         })
         .collect();
-    f.render_widget(List::new(items), inner);
+    f.render_widget(List::new(items), list_inner);
+
+    // Right: probe metadata for the selected asset.
+    let meta_block = Block::bordered().title(" metadata ");
+    let meta_inner = meta_block.inner(meta_area);
+    f.render_widget(meta_block, meta_area);
+    let lines = match app.project.media.get(app.pool_sel) {
+        Some(a) => asset_metadata(a),
+        None => vec!["(no asset selected)".to_string()],
+    };
+    let para = Paragraph::new(
+        lines
+            .into_iter()
+            .map(|l| Line::from(Span::styled(l, Style::default().fg(Color::Gray))))
+            .collect::<Vec<_>>(),
+    )
+    .wrap(Wrap { trim: false });
+    f.render_widget(para, meta_inner);
 }
 
 /// Plain-text summary for the pool row (path basename + duration).
@@ -1946,6 +2073,56 @@ fn asset_line(a: &nle_core::Asset) -> String {
         .unwrap_or_else(|| a.path.display().to_string());
     let dur = a.duration().map(|d| format!("{}s", secs(&d))).unwrap_or_default();
     format!("{name} {dur}")
+}
+
+/// Human-readable probe metadata for the metadata pane (all from the
+/// stored `RawProbe` — the file is never re-probed).
+fn asset_metadata(a: &nle_core::Asset) -> Vec<String> {
+    let p = &a.probe;
+    let mut out = vec![
+        format!("path   {}", a.path.display()),
+        format!("id     #{}", a.id),
+    ];
+    let fmt = &p.format;
+    out.push(format!("format {}", fmt.format_name));
+    if let Some(d) = a.duration() {
+        out.push(format!("dur    {}s", secs(&d)));
+    }
+    if let Some(sz) = fmt.size.as_deref() {
+        out.push(format!("size   {sz} bytes"));
+    }
+    if let Some(b) = fmt.bit_rate.as_deref() {
+        out.push(format!("bitrate {b}"));
+    }
+    if let Some((w, h)) = a.video_size() {
+        out.push(format!("size   {w}×{h}"));
+    }
+    if let Some(f) = a.fps() {
+        out.push(format!("fps    {}/{}", f.numer(), f.denom()));
+    }
+    out.push(String::new());
+    for s in &p.streams {
+        let kind = s.codec_type.as_deref().unwrap_or("?");
+        let codec = s.codec_name.as_deref().unwrap_or("?");
+        let mut line = format!("stream {} {kind}/{codec}", s.index);
+        if let Some(w) = s.width && let Some(h) = s.height {
+            line += &format!(" {w}×{h}");
+        }
+        if let Some(r) = &s.r_frame_rate {
+            line += &format!(" {r}fps");
+        }
+        if let Some(pf) = &s.pix_fmt {
+            line += &format!(" {pf}");
+        }
+        if let Some(sr) = s.sample_rate.as_deref() {
+            line += &format!(" {sr}Hz");
+        }
+        if let Some(ch) = s.channels {
+            line += &format!(" {ch}ch");
+        }
+        out.push(line);
+    }
+    out
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
@@ -1992,6 +2169,26 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     } else {
         style
     };
+
+    // In the pool the monitor shows a raw file, so the clock reads the
+    // asset position/duration and the mode tag says POOL.
+    if app.pool_open {
+        let (pos, dur) = match app.project.media.get(app.pool_sel) {
+            Some(a) => (app.pool_pos, a.duration().map(|d| secs(&d)).unwrap_or(0.0)),
+            None => (0.0, 0.0),
+        };
+        let fs = app.project.media.get(app.pool_sel).and_then(|a| a.fps());
+        let line = Line::from(vec![
+            Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {name} · "), style),
+            Span::styled(fmt_timecode(pos, fs.as_ref()), style.add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" / {} · ", fmt_timecode(dur, fs.as_ref())), style),
+            Span::styled(format!("{icon} · POOL{count}"), style),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     let line = Line::from(vec![
         Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {name} · "), style),
@@ -3301,7 +3498,19 @@ mod tests {
         }
     }
 
-    // The pool panel renders without panicking and lists assets.
+    // Metadata pane formats the stored probe (no re-probe).
+    #[test]
+    fn asset_metadata_lists_streams() {
+        let p = asset_project();
+        let a = p.asset(1).unwrap();
+        let md = asset_metadata(a).join("\n");
+        assert!(md.contains("red.mp4"), "{md}");
+        assert!(md.contains("320×240"), "{md}");
+        assert!(md.contains("h264"), "{md}");
+        assert!(md.contains("30/1"), "{md}");
+    }
+
+    // The pool renders list + metadata without panicking.
     #[test]
     fn media_pool_renders() {
         use ratatui::backend::TestBackend;
