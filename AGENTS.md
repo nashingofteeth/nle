@@ -4,6 +4,22 @@ Procedures and conventions established in this working session (M3 polish:
 extend mode, media pool, panels, playhead anchoring). See `PLAN.md` for the
 roadmap and `README.md` for usage.
 
+## Keeping this file current
+
+When you (an agent) come across something during work that a future agent
+would benefit from remembering, **ask the user before adding it here** and
+propose the exact wording. Good candidates:
+
+- a **sensibility** — how the user wants things to feel or be weighed;
+- a **pitfall** — a trap that cost time or nearly slipped through;
+- a **breakthrough** — a technique or insight that unblocked something;
+- a **clarification of alignment** — a decision or reading of intent that
+  wasn't obvious from the code (including "no, do it the other way").
+
+Keep entries short, concrete, and reproducible. Don't add anything the
+code already makes obvious, and don't document a one-off — wait until it's
+clearly a durable rule or preference.
+
 ## Verify before every commit
 
 Run this exact sequence; do not commit otherwise:
