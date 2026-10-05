@@ -471,8 +471,9 @@ fn secs_f64(t: &Seconds) -> f64 {
 }
 
 /// Frame label for user-facing notices (`f19`) so messages read in frames
-/// rather than long decimals. Without a frame rate it falls back to
-/// seconds. (Not for ffmpeg arguments — those stay numeric seconds.)
+/// rather than long decimals. 0-based (frame 0 is the first frame),
+/// matching the timecode and history. Without a frame rate it falls back
+/// to seconds. (Not for ffmpeg arguments — those stay numeric seconds.)
 fn stamp(project: &Project, t: &Seconds) -> String {
     match project.fps.as_ref() {
         Some(fps) => format!("f{}", (secs_f64(t) * secs_f64(fps)).round() as i64),

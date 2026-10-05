@@ -1793,15 +1793,6 @@ fn render(f: &mut Frame, app: &App) {
     render_info(f, info, app);
 }
 
-/// Current/total frame counts for display (1-based current, clamped to
-/// the last frame at the timeline's end).
-fn frame_counts(project: &Project, total: f64, playhead: f64) -> Option<(i64, i64)> {
-    let fps = project.fps.as_ref()?;
-    let total_frames = (total * secs(fps)).ceil().max(1.0) as i64;
-    let current = ((playhead * secs(fps)).floor() as i64 + 1).clamp(1, total_frames);
-    Some((current, total_frames))
-}
-
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let name = app
         .path
@@ -1841,10 +1832,6 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         }
         _ => (app.total(), false),
     };
-    let frames = match frame_counts(&app.project, total, app.playhead) {
-        Some((c, t)) => format!(" · f{c}/f{t}"),
-        None => String::new(),
-    };
     let total_style = if projected {
         style.add_modifier(Modifier::BOLD).fg(Color::Yellow)
     } else {
@@ -1858,10 +1845,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             style.add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(
-                " / {}{frames} · ",
-                fmt_timecode(total, app.project.fps.as_ref())
-            ),
+            format!(" / {} · ", fmt_timecode(total, app.project.fps.as_ref())),
             total_style,
         ),
         Span::styled(format!("{icon} · {mode}{count}"), style),
@@ -3298,19 +3282,13 @@ mod tests {
         assert_eq!(app.total(), 7.0);
     }
 
+    // Frame numbering is 0-based everywhere: timecode FF is 0-based.
     #[test]
-    fn frame_counts_are_clamped_and_1_based() {
-        let mut p = project(); // 7.0 @ 30fps → 210 frames
-        p.fps = Some(Seconds::new(30, 1));
-        let total = 7.0;
-        let mut app = App::new(p, PathBuf::from("t.json"));
-        app.playhead = 0.0;
-        assert_eq!(frame_counts(&app.project, total, 0.0), Some((1, 210)));
-        assert_eq!(frame_counts(&app.project, total, 8.2), Some((210, 210)));
-        assert_eq!(frame_counts(&app.project, total, total), Some((210, 210)));
-        app.project.fps = None;
-        assert_eq!(frame_counts(&app.project, 10.0, 5.0), None);
-        let _ = &mut app;
+    fn timecode_frames_are_zero_based() {
+        let fps = Seconds::new(30, 1);
+        assert_eq!(fmt_timecode(0.0, Some(&fps)), "00:00:00");
+        assert_eq!(fmt_timecode(1.0, Some(&fps)), "00:01:00");
+        assert_eq!(fmt_timecode(1.0 / 30.0, Some(&fps)), "00:00:01");
     }
 
     #[test]
