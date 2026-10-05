@@ -43,8 +43,8 @@ mpv blocks `lavfi://` inside EDL (hence black-file cache).
 ### Model decisions (settled)
 - **Segment model:** a track is a sequence of `Segment = Clip{..} | Gap(dur)`;
   clip start is a prefix sum; overlaps unrepresentable; trailing gap ordinary.
-- **No backward compatibility, by design:** format bumps reject old files;
-  never migrate — rebuild via `./demo.sh`.
+- **No backward compatibility** (detail in AGENTS.md): format bumps reject
+  old files; never migrate — rebuild via `./demo.sh`.
 - **Media pool** shared by id: `add_asset` / `asset_usage` / guarded `remove_asset`.
 - **Playhead anchoring:** normal edits follow the *media frame*; extend
   commits land on the *edge*; undo restores the *pre-edit* position; delete
@@ -53,20 +53,11 @@ mpv blocks `lavfi://` inside EDL (hence black-file cache).
 
 ## Keymap
 
-Transport/motion: `space` · `h`/`l` ±1s · `H`/`L` ±5s · `f`/`F` frame ·
-`j`/`k` cuts · `w`/`b` clips · `gg`/`G`/`0`/`$` ends · `<`/`>` (`,`/`.`)
-clip start/end · counts (`3l`).
-
-Editing: `i`/`o` trim (a gap always ripples) · `I`/`O` ripple-trim · at a
-segment edge `i`/`o` delete it · `s` split · `_` insert gap (count =
-frames) · `dd`/`D` delete/gap · `yy` yank · `p` paste-over · `P`
-ripple-insert · `u`/Ctrl-r undo.
-
-Extend: `e`/`E` enter (replace/ripple) · `[`/`]` side · `<`/`>` end ·
-commit `e`.
-
-Other: `m` media pool · `r` reload · `:` commands · `q` quit · `v` visual
-*(deferred)*.
+Canonical keymap lives in **README.md** (the user manual); keep it there
+and update it in place. Summary only, for orientation: transport/motion
+(`space`, `h/l/H/L`, `f/F`, `j/k`, `w/b`, `gg/G/0/$`, `< >`, counts),
+editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
+(`e/E`, `[ ]`, `< >`).
 
 ## Milestones
 

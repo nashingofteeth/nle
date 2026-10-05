@@ -3,15 +3,12 @@
 Terminal-native video editor: TUI dashboard + mpv monitor window, vim keys,
 FFmpeg underneath. Built for this machine only.
 
-## Status: M3 complete — M4 (multi-track + audio) next
+## Status
 
-Editing for real: the TUI drives the model directly — trim in/out, split,
-delete (gap or ripple), yank/paste, insert gap, **extend mode** (edge moves
-with replace/ripple), a **media pool** panel with file preview, and
-undo/redo — with auto-save and instant preview rebuilds on every edit.
-
-See `PLAN.md` for the roadmap and architecture; `AGENTS.md` for working
-conventions, the dependency policy, and the "compatibility: none" rule.
+**M3 complete — M4 (multi-track + audio) next.** The TUI drives the model
+directly: trim in/out, split, delete, yank/paste, insert gap, **extend
+mode**, a **media pool** with file preview, and undo/redo — auto-saved,
+instant preview. Full roadmap and current status: `PLAN.md`.
 
 ## Usage
 

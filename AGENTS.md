@@ -76,6 +76,12 @@ plainly.
 
 ## Domain rules fixed this session
 
+- **Compatibility: none, by design.** Private, single machine, single user,
+  not distributed — so no backward compatibility. `nle.json`,
+  `nle.history.json`, and cached artifacts may change shape any time; old
+  files are **rejected with a clear error** (never silently misread) and
+  the fix is "rebuild it" (`./demo.sh`). Bump the format version; don't
+  write migration code.
 - **Frames are 0-based everywhere** (`f0` = first frame; timecode `:FF`
   matches notices). A file/timeline of `dur` spans `[0, dur)`; the last
   representable position is `dur - 1/fps` — clamp seeks there.
@@ -150,16 +156,6 @@ a transitive tree for most needs).
   attack surface, not crates: they're invoked without a shell, option
   injection is blocked with `--` before every positional path, and mpv
   runs with an isolated config and its own IPC socket.
-
-## Compatibility: none, by design
-
-nle is a private application for one machine and one user; it is not
-distributed, so there is no backward compatibility to preserve. Project
-files (`nle.json`), history sidecars (`nle.history.json`), and cached
-artifacts may change shape at any time: old files are rejected with a
-clear error (never silently misread), and the fix is always "rebuild it"
-(`./demo.sh` regenerates the demo project). Don't write migration code;
-bump the format version and move on.
 
 ## Project-file internals (implementation note)
 
