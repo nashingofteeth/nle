@@ -118,3 +118,43 @@ plainly.
   duration; the pool clock snaps to `dur − 1/fps` at EOF.
 - Pool preview stops at the reachable source: a clip head previews
   `[0, aout]`, not the whole asset.
+
+## Layout & dependency policy (moved from README)
+
+| Crate | Job |
+|---|---|
+| `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops + undo history. No processes. |
+| `crates/nle-ffmpeg` | ffprobe/ffmpeg wrappers, filter-graph compiler. |
+| `crates/nle-cli` | The `nle` binary + TUI + mpv IPC client. |
+
+Low-dependency stance: **the current set is frozen.** No new runtime
+dependencies without explicit justification (a hand-rolled ~50 lines beats
+a transitive tree for most needs).
+
+- Direct deps (10): clap, anyhow, thiserror, serde, serde_json,
+  num-rational, tempfile, ratatui, crossterm (+3 internal crates).
+  Zero network code in the tree.
+- `Cargo.lock` is committed — builds are reproducible; upgrades are
+  deliberate events, not side effects.
+- After any dependency change: `cargo update` deliberately, then run
+  `cargo audit` (RustSec advisories) before committing.
+- External system binaries (`ffmpeg`, `ffprobe`, `mpv`) are the real
+  attack surface, not crates: they're invoked without a shell, option
+  injection is blocked with `--` before every positional path, and mpv
+  runs with an isolated config and its own IPC socket.
+
+## Compatibility: none, by design
+
+nle is a private application for one machine and one user; it is not
+distributed, so there is no backward compatibility to preserve. Project
+files (`nle.json`), history sidecars (`nle.history.json`), and cached
+artifacts may change shape at any time: old files are rejected with a
+clear error (never silently misread), and the fix is always "rebuild it"
+(`./demo.sh` regenerates the demo project). Don't write migration code;
+bump the format version and move on.
+
+## Project-file internals (implementation note)
+
+`nle.json` is plain JSON with exact rational times (`"30000/1001"`) —
+human-readable and drift-free. Times are `Rational64` throughout the
+model; floats appear only at ffmpeg/IPC boundaries.

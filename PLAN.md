@@ -79,8 +79,7 @@ Other: `m` media pool · `r` reload · `:` commands · `q` quit · `v` visual
 | **M3** | Editing for real | ✅ done |
 | **M4** | Multi-track + separate audio tracks | ⏳ next |
 | **M5** | Transitions (`xfade`/`acrossfade`) + effects + proxy cache + thumbnails/waveforms | pending |
-| **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending |
-| **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
+| **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending || **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
 ### M3 — shipped (beyond the original scope)
 
@@ -102,6 +101,12 @@ Other: `m` media pool · `r` reload · `:` commands · `q` quit · `v` visual
 
 See `M4` section below / discussion. Placeholder: multiple tracks (video +
 audio) in the model, TUI rows, and graph (`overlay`/`amix`/`adelay`).
+
+## M6 — export presets (planned)
+
+- `preview` — VAAPI hardware, near-instant, lower quality
+- `balanced` — libx264, good quality/speed trade
+- `max` — libx265 / SVT-AV1, slow, archival
 
 ## Open / deferred (post-M3)
 

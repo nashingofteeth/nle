@@ -8,26 +8,10 @@ FFmpeg underneath. Built for this machine only.
 Editing for real: the TUI drives the model directly — trim in/out, split,
 delete (gap or ripple), yank/paste, insert gap, **extend mode** (edge moves
 with replace/ripple), a **media pool** panel with file preview, and
-undo/redo — with auto-save and instant preview rebuilds on every edit. See
-`PLAN.md` for the full roadmap and architecture.
+undo/redo — with auto-save and instant preview rebuilds on every edit.
 
-## Compatibility: none, by design
-
-**nle is a private application for one machine and one user. It is not
-distributed, so there is no backward compatibility to preserve.**
-Project files (`nle.json`), history sidecars (`nle.history.json`), and
-cached artifacts may change shape at any time: old files are rejected
-with a clear error (never silently misread), and the fix is always
-"rebuild it" (`./demo.sh` regenerates the demo project). Don't write
-migration code; bump the format version and move on.
-
-## Layout
-
-| Crate | Job |
-|---|---|
-| `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops + undo history. No processes. |
-| `crates/nle-ffmpeg` | ffprobe/ffmpeg wrappers, filter-graph compiler. |
-| `crates/nle-cli` | The `nle` binary + TUI + mpv IPC client. |
+See `PLAN.md` for the roadmap and architecture; `AGENTS.md` for working
+conventions, the dependency policy, and the "compatibility: none" rule.
 
 ## Usage
 
@@ -85,29 +69,9 @@ $N edl                                 # debug: print the preview EDL URL
 ```
 
 Times accept plain seconds (`12.5`) or timecodes (`0:01:23.500`).
-The project file (`nle.json`) is plain JSON with exact rational times
-(`"30000/1001"`) — human-readable and drift-free.
-
-## Dependency policy
-
-Low-dependency stance: **the current set is frozen.** No new runtime
-dependencies without explicit justification (a hand-rolled ~50 lines beats
-a transitive tree for most needs).
-
-- Direct deps (10): clap, anyhow, thiserror, serde, serde_json,
-  num-rational, tempfile, ratatui, crossterm (+3 internal crates).
-  Zero network code in the tree.
-- `Cargo.lock` is committed — builds are reproducible; upgrades are
-  deliberate events, not side effects.
-- After any dependency change: `cargo update` deliberately, then run
-  `cargo audit` (RustSec advisories) before committing.
-- External system binaries (`ffmpeg`, `ffprobe`, `mpv`) are the real
-  attack surface, not crates: they're invoked without a shell, option
-  injection is blocked with `--` before every positional path, and mpv
-  runs with an isolated config and its own IPC socket.
+The project file (`nle.json`) is plain JSON — human-readable, vim-editable,
+and drift-free.
 
 ## Export presets (planned, M6)
 
-- `preview` — VAAPI hardware, near-instant, lower quality
-- `balanced` — libx264, good quality/speed trade
-- `max` — libx265 / SVT-AV1, slow, archival
+See `PLAN.md` — `preview` (VAAPI), `balanced` (x264), `max` (x265/SVT-AV1).
