@@ -2069,14 +2069,16 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 // ------------------------------------------------------------ rendering
 
 fn render(f: &mut Frame, app: &App) {
-    // An always-visible hints + notices strip at the bottom; hidden when
-    // the terminal is too short to spare it (the timeline matters more).
-    let strip = if f.area().height >= 16 { 9 } else { 0 };
-    let [status, timeline, info, hints] = Layout::vertical([
+    // Bottom panels: keys cheat-sheet, then a dedicated notice panel.
+    // Hidden when the terminal is too short to spare them.
+    let keys = if f.area().height >= 20 { 8 } else { 0 };
+    let notice = if f.area().height >= 20 { 3 } else { 0 };
+    let [status, timeline, info, keys_area, notice_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(4),
         Constraint::Min(0),
-        Constraint::Length(strip),
+        Constraint::Length(keys),
+        Constraint::Length(notice),
     ])
     .areas(f.area());
 
@@ -2087,31 +2089,40 @@ fn render(f: &mut Frame, app: &App) {
     } else {
         render_info(f, info, app);
     }
-    if strip > 0 {
-        render_hints(f, hints, app);
+    if keys > 0 {
+        render_hints(f, keys_area, app);
+    }
+    if notice > 0 {
+        render_notice(f, notice_area, app);
     }
 }
 
-/// The always-on bottom strip: a mode-specific key cheat-sheet plus the
-/// latest notice/message.
+/// The keys cheat-sheet (mode-specific; see `hints_for`).
 fn render_hints(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered().title(" keys ");
     let inner = block.inner(area);
     f.render_widget(block, area);
-
-    let mut lines: Vec<Line> = hints_for(app)
+    let lines: Vec<Line> = hints_for(app)
         .into_iter()
         .map(|h| Line::from(Span::styled(h, Style::default().fg(Color::DarkGray))))
         .collect();
-    // Latest notice, visually separated from the cheat-sheet.
-    lines.push(Line::from(""));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// The latest notice/message, in its own panel.
+fn render_notice(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::bordered().title(" notice ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
     let (msg, style) = if !app.message.is_empty() {
         (app.message.clone(), Style::default().fg(Color::Yellow))
     } else {
         ("—".to_string(), Style::default().fg(Color::DarkGray))
     };
-    lines.push(Line::from(Span::styled(msg, style)));
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(msg, style))).wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 /// The mode-specific key cheat-sheet (single source of truth for hints).
@@ -3694,9 +3705,9 @@ mod tests {
         assert!(!row.contains("red.mp4"), "not the first row: {row:?}");
     }
 
-    // The bottom strip shows a mode-specific cheat-sheet + the latest notice.
+    // The bottom panels: a keys cheat-sheet and a dedicated notice panel.
     #[test]
-    fn hints_panel_shows_keys_and_notice() {
+    fn hints_and_notice_panels_render() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let render_text = |app: &App| {
@@ -3709,10 +3720,12 @@ mod tests {
                 .join("\n")
         };
 
-        // Normal mode: the timeline cheat-sheet and the notice.
+        // Normal mode: the cheat-sheet and a separate notice panel.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.set_message("extend tail of clip #1 (absorbed gap)");
         let text = render_text(&app);
+        assert!(text.contains("keys"), "keys panel title: {text}");
+        assert!(text.contains("notice"), "notice panel title: {text}");
         assert!(text.contains("edit"), "cheat-sheet present: {text}");
         assert!(text.contains("absorbed gap"), "notice shown: {text}");
 
