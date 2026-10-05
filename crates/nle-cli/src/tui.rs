@@ -268,6 +268,10 @@ pub struct App {
     pub eof: bool,
     pub mpv_error: Option<String>,
     pub exit_message: Option<String>,
+    /// Media-pool panel open (full-width, under the info pane).
+    pub pool_open: bool,
+    /// Selected row in the pool panel.
+    pub pool_sel: usize,
 }
 
 impl App {
@@ -290,6 +294,8 @@ impl App {
             eof: false,
             mpv_error: None,
             exit_message: None,
+            pool_open: false,
+            pool_sel: 0,
         }
     }
 
@@ -475,8 +481,71 @@ pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         command_key(app, buf, key);
     } else if matches!(app.mode, Mode::Extend(_)) {
         extend_key(app, player, key);
+    } else if app.pool_open {
+        pool_key(app, player, key);
     } else {
         normal_key(app, player, key);
+    }
+}
+
+/// Media-pool panel keys: move, insert a clip from the asset, remove.
+fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
+    let n = app.project.media.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('b') => app.pool_open = false,
+        KeyCode::Char('j') | KeyCode::Down => {
+            if n > 0 {
+                app.pool_sel = (app.pool_sel + 1).min(n - 1);
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => app.pool_sel = app.pool_sel.saturating_sub(1),
+        KeyCode::Char('G') => app.pool_sel = n.saturating_sub(1),
+        KeyCode::Char('g') => app.pool_sel = 0,
+        KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
+        KeyCode::Char('d') => remove_from_pool(app, player),
+        _ => {}
+    }
+}
+
+/// Insert a clip from the selected pool asset at the playhead (ripple).
+fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
+    let Some(asset) = app.project.media.get(app.pool_sel) else {
+        app.set_message("no asset selected");
+        return;
+    };
+    let dur = asset.duration();
+    let snapshot = match dur {
+        Some(d) => TimelineSegment::Clip(Clip {
+            id: 0,
+            asset: asset.id,
+            asset_in: Seconds::from_integer(0),
+            asset_out: d,
+        }),
+        None => {
+            app.set_message("asset has no known duration");
+            return;
+        }
+    };
+    let _ = run_edit(app, player, edit::paste_ripple(&app.project, &snapshot, app.playhead));
+}
+
+/// Remove the selected asset from the pool (guard refuses if it's in use).
+fn remove_from_pool(app: &mut App, player: &MpvPlayer) {
+    let Some(asset) = app.project.media.get(app.pool_sel) else {
+        app.set_message("no asset selected");
+        return;
+    };
+    let id = asset.id;
+    match app.project.remove_asset(id) {
+        Ok(_) => {
+            app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
+            app.set_message(&format!("removed asset #{id}"));
+            if let Err(e) = app.project.save(&app.path) {
+                app.set_message(&format!("save failed: {e}"));
+            }
+            let _ = &player;
+        }
+        Err(e) => app.set_message(&e.to_string()),
     }
 }
 
@@ -561,8 +630,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             }
         }
         KeyCode::Char('h') => app.seek_rel(player, -(mult as f64)),
-        KeyCode::Char('l') => app.seek_rel(player, mult as f64),
-        KeyCode::Char('H') => app.seek_rel(player, -5.0 * mult as f64),
+        KeyCode::Char('l') => app.seek_rel(player, mult as f64),        KeyCode::Char('H') => app.seek_rel(player, -5.0 * mult as f64),
         KeyCode::Char('L') => app.seek_rel(player, 5.0 * mult as f64),
         KeyCode::Char('f') => {
             if app.guard_loaded() {
@@ -634,6 +702,11 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             }
             Err(e) => app.set_message(&e.to_string()),
         },
+        KeyCode::Char('m') => {
+            app.pool_open = true;
+            app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
+            app.set_message("media pool · j/k move · enter insert at playhead · d remove · esc close");
+        }
         KeyCode::Char('e') => enter_extend(app, player, false),
         KeyCode::Char('E') => enter_extend(app, player, true),
         KeyCode::Char('[') => enter_extend_side(app, player, Side::Right),
@@ -1788,16 +1861,71 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 // ------------------------------------------------------------ rendering
 
 fn render(f: &mut Frame, app: &App) {
-    let [status, timeline, info] = Layout::vertical([
+    let [status, timeline, info, pool] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(4),
         Constraint::Min(0),
+        Constraint::Length(if app.pool_open { pool_height(app) } else { 0 }),
     ])
     .areas(f.area());
 
     render_status(f, status, app);
     render_timeline(f, timeline, app);
     render_info(f, info, app);
+    if app.pool_open {
+        render_pool(f, pool, app);
+    }
+}
+
+/// Rows the pool panel needs: a border + one line per asset, capped so it
+/// never eats the whole screen.
+fn pool_height(app: &App) -> u16 {
+    (app.project.media.len() as u16 + 2).clamp(3, 12)
+}
+
+fn render_pool(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::List;
+    let block = Block::bordered().title(" media pool ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    let items: Vec<ratatui::widgets::ListItem> = app
+        .project
+        .media
+        .iter()
+        .map(|a| {
+            let used = app.project.asset_usage(a.id);
+            let usage = if used.is_empty() {
+                "unused".to_string()
+            } else {
+                format!("used ×{}", used.len())
+            };
+            let style = if a.id as usize == app.pool_sel {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            ratatui::widgets::ListItem::new(Line::from(vec![
+                Span::styled(format!(" #{:<4}", a.id), style),
+                Span::styled(format!("{:<9} ", asset_line(a)), style),
+                Span::styled(usage, style),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items), inner);
+}
+
+/// Plain-text summary for the pool row (path basename + duration).
+fn asset_line(a: &nle_core::Asset) -> String {
+    let name = a
+        .path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| a.path.display().to_string());
+    let dur = a.duration().map(|d| format!("{}s", secs(&d))).unwrap_or_default();
+    format!("{name} {dur}")
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
@@ -2152,7 +2280,7 @@ fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
     let help = if matches!(app.mode, Mode::Extend(_)) {
         "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · [ ] side · < > end · Esc cancel"
     } else {
-        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · < > clip ends · i/o trim clip/gap · I/O ripple-trim · s split · _ insert gap (count = frames) · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
+        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · < > clip ends · i/o trim clip/gap · I/O ripple-trim · s split · _ insert gap (count = frames) · dd/D del/gap · yy/p/P · m media pool · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
     };
 
     let mut lines = vec![
@@ -3015,6 +3143,64 @@ mod tests {
         let batch = edit::insert_gap(&app.project, app.playhead, 5).unwrap();
         app.history.apply(&mut app.project, batch, 0).unwrap();
         assert!(matches!(&app.project.timeline.video_track().unwrap().segments[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(2) + Seconds::new(5, 30)));
+    }
+
+    // Media pool: an asset used by a clip can't be removed; an unused one
+    // goes. Insert-from-pool is the shared ripple path (tested in core).
+    #[test]
+    fn media_pool_guarded_removal() {
+        let mut p = asset_project();
+        let (spare, _) = p.add_asset(
+            "/media/spare.mp4".into(),
+            RawProbe {
+                streams: vec![RawStream {
+                    index: 0,
+                    codec_type: Some("video".into()),
+                    codec_name: Some("h264".into()),
+                    width: Some(320),
+                    height: Some(240),
+                    r_frame_rate: Some("30/1".into()),
+                    ..Default::default()
+                }],
+                format: RawFormat { format_name: "mp4".into(), duration: Some("5".into()), ..Default::default() },
+            },
+        );
+        // Insert the spare as a clip (core path), then it's in use.
+        let snapshot = TimelineSegment::Clip(Clip {
+            id: 0,
+            asset: spare,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(5),
+        });
+        let batch = edit::paste_ripple(&p, &snapshot, 0.0).unwrap();
+        p.timeline = {
+            let mut q = p.clone();
+            edit::History::default().apply(&mut q, batch, 0).unwrap();
+            q.timeline
+        };
+        assert_eq!(p.asset_usage(spare).len(), 1);
+        assert!(p.remove_asset(spare).is_err(), "in use → refused");
+
+        // An unused import removes cleanly.
+        let (free, _) = p.add_asset("/media/free.mp4".into(), p.asset(spare).unwrap().probe.clone());
+        assert!(free != spare);
+        assert!(p.remove_asset(free).is_ok());
+    }
+
+    // The pool panel renders without panicking and lists assets.
+    #[test]
+    fn media_pool_renders() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.pool_open = true;
+        app.pool_sel = 0;
+        let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..20).map(|y| (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("media pool"), "{text}");
+        assert!(text.contains("red.mp4"), "{text}");
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {

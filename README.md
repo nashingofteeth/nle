@@ -55,7 +55,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              overwrites the neighbour, E inserts space · a clip at the
 #              start can prepend its head material past time 0 · the
 #              status shows the projected timeline length · Esc cancel
-#   misc:      r reload project from disk · :q quit · q quit
+#   misc:      m media pool (browse/insert/remove) ·
+#              r reload project from disk · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 
 # Project workflow
@@ -65,6 +66,8 @@ $N add intro.mp4 --in 2.5 --out 7      # trimmed clip at end of track
 $N add b-roll.mov --at 10              # creates a gap before it
 $N show                                # or --json for the raw EDL
 $N remove 2                            # by clip id from `show`
+$N media ls                            # pooled assets + usage
+$N media rm 3                          # drop an unused asset
 $N export -o final.mp4                 # libx264, frame-exact
 $N export -o fast.mp4 --encoder vaapi  # GPU (also: qsv)
 
