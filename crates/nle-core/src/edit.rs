@@ -1300,6 +1300,79 @@ pub fn paste(project: &Project, snapshot: &Segment, playhead: f64) -> Result<Bat
     Ok(Batch { ops, desc })
 }
 
+/// `_` — insert `frames` of gap at the playhead. Over a clip it splits
+/// the clip and inserts the gap between the halves (the tail slides
+/// right); over a gap it lengthens that gap; past the end the void plus
+/// the new gap. Everything grows by `frames`.
+pub fn insert_gap(project: &Project, playhead: f64, frames: i64) -> Result<Batch, EditError> {
+    if frames < 1 {
+        return Err(EditError::TooShort);
+    }
+    let t = snap(project, playhead)?;
+    let fps = project.fps.ok_or(EditError::NoFps)?;
+    let gap = Segment::Gap(Gap { duration: Seconds::new(frames, 1) / fps });
+    let ti = video_track_index(project)?;
+    let track = &project.timeline.tracks[ti];
+
+    // At/past the end: bridge the void (if any), then the new gap.
+    if track.segments.is_empty() || t >= track.end() {
+        let mut ops = Vec::new();
+        let mut index = track.segments.len();
+        let void = t - track.end();
+        if void > Seconds::from_integer(0) {
+            ops.push(EditOp::Insert { track: ti, index, segment: Segment::Gap(Gap { duration: void }) });
+            index += 1;
+        }
+        ops.push(EditOp::Insert { track: ti, index, segment: gap });
+        return Ok(Batch { ops, desc: format!("insert gap at {}", stamp(project, &t)) });
+    }
+
+    let si = track.index_at(t).ok_or(EditError::NoSegment)?;
+    let seg = track.segments[si].clone();
+    let seg_start = track.start_of(si);
+    let off = t - seg_start;
+
+    match &seg {
+        // Over a gap: add to it.
+        Segment::Gap(g) => Ok(Batch {
+            ops: replace_with_many(
+                ti,
+                si,
+                &seg,
+                vec![Segment::Gap(Gap { duration: g.duration + gap.duration() })],
+            ),
+            desc: format!("insert gap at {}", stamp(project, &t)),
+        }),
+        // Over a clip: split it at the playhead, gap between the halves.
+        Segment::Clip(c) => {
+            let at_edge = off <= Seconds::from_integer(0);
+            let pid = project.next_clip_id();
+            let mut pieces: Vec<Segment> = Vec::new();
+            if !at_edge {
+                pieces.push(Segment::Clip(Clip {
+                    id: c.id,
+                    asset: c.asset,
+                    asset_in: c.asset_in,
+                    asset_out: c.asset_in + off,
+                }));
+            }
+            pieces.push(gap);
+            // The tail keeps the id when the head is absent (insert-before),
+            // else gets a fresh one (a split).
+            pieces.push(Segment::Clip(Clip {
+                id: if at_edge { c.id } else { pid },
+                asset: c.asset,
+                asset_in: c.asset_in + off,
+                asset_out: c.asset_out,
+            }));
+            Ok(Batch {
+                ops: replace_with_many(ti, si, &seg, pieces),
+                desc: format!("insert gap at {}", stamp(project, &t)),
+            })
+        }
+    }
+}
+
 /// `P` — ripple paste: insert the clipboard at the playhead, splitting
 /// whatever is there (clip or gap) and growing the timeline by the
 /// payload's duration. A clipboard gap inserts empty space; a clipboard
@@ -2953,6 +3026,38 @@ mod tests {
         assert_eq!(segs.len(), 2, "clip #2 overwritten, no extra gap");
         assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(3)));
         assert_eq!(q.timeline.end(), Seconds::from_integer(5), "length held");
+    }
+
+    #[test]
+    fn insert_gap_splits_clip_adds_to_gap_and_grows() {
+        // [Clip #1 [0..2) src 1..3] [Gap 1 @2..3] [Clip #2 [3..5)]
+        let mut p = fixture();
+        let mut h = History::default();
+        // Over clip #1 at 1.0: split, insert 1 frame (30fps) between.
+        let batch = insert_gap(&p, 1.0, 1).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let segs = p.timeline.video_track().unwrap().segments.clone();
+        assert_eq!(segs.len(), 5, "clip split + gap inserted");
+        assert!(matches!(&segs[0], Segment::Clip(c) if c.id == 1 && c.duration() == Seconds::from_integer(1)));
+        assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::new(1, 30)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5) + Seconds::new(1, 30));
+        h.undo(&mut p).unwrap();
+
+        // Over the gap at 2.5: the gap grows by the count.
+        let batch = insert_gap(&p, 2.5, 15).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert!(matches!(&p.timeline.video_track().unwrap().segments[1], Segment::Gap(g) if g.duration == Seconds::new(3, 2)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5) + Seconds::new(1, 2));
+        h.undo(&mut p).unwrap();
+
+        // Past the end at 7.0: void gap + one frame.
+        let batch = insert_gap(&p, 7.0, 1).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(p.timeline.end(), Seconds::from_integer(7) + Seconds::new(1, 30));
+        h.undo(&mut p).unwrap();
+
+        // Zero/negative count refuses.
+        assert!(matches!(insert_gap(&p, 1.0, 0), Err(EditError::TooShort)));
     }
 
     #[test]

@@ -605,6 +605,9 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('o') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, true, false)); }
         KeyCode::Char('O') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, true, true)); }
         KeyCode::Char('s') => { let _ = run_edit(app, player, edit::split(&app.project, app.playhead)); }
+        KeyCode::Char('_') => {
+            let _ = run_edit(app, player, edit::insert_gap(&app.project, app.playhead, mult as i64));
+        }
         KeyCode::Char('D') => {
             edit_yank(app); // D yanks too
             run_edit(app, player, edit::delete_ripple(&app.project, app.playhead));
@@ -2140,7 +2143,7 @@ fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
     let help = if matches!(app.mode, Mode::Extend(_)) {
         "h/l move · f/F frame · j/k cuts · space play · e commit · E ripple · [ ] side · < > end · Esc cancel"
     } else {
-        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · < > clip ends · i/o trim clip/gap · I/O ripple-trim · s split · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
+        "space play · h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends · < > clip ends · i/o trim clip/gap · I/O ripple-trim · s split · _ insert gap (count = frames) · dd/D del/gap · yy/p/P · u/Ctrl-r undo · e/E extend · [ ] side · r reload · : cmd · q quit"
     };
 
     let mut lines = vec![
@@ -2938,6 +2941,17 @@ mod tests {
         let outcome = app.history.undo(&mut app.project).unwrap();
         app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
         assert_eq!(app.playhead, 1.0, "playhead returns to where the edit was");
+    }
+
+    // `_` inserts a gap of `count` frames at the playhead.
+    #[test]
+    fn insert_gap_key_uses_the_count() {
+        // Over the [3..5) gap: 5 frames grows it by 5/30 s.
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 4.0;
+        let batch = edit::insert_gap(&app.project, app.playhead, 5).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        assert!(matches!(&app.project.timeline.video_track().unwrap().segments[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(2) + Seconds::new(5, 30)));
     }
 
     fn clip_by_id(p: &Project, id: u32) -> nle_core::Clip {

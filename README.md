@@ -40,9 +40,10 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              < / > (, / .) clip start/end · 3l = 3s (counts)
 #   editing:   i/o trim in/out (I/O ripple; a gap always ripples) ·
 #              at a segment's edge i/o delete it, I/O or a gap ripples ·
-#              s split at playhead · dd delete (gap) · D delete + ripple
-#              yy yank clip/gap · p paste-over (replaces underneath) ·
-#              P ripple-insert · u / Ctrl-r undo/redo (auto-saved)
+#              s split at playhead · _ insert gap (count = frames) ·
+#              dd delete (gap) · D delete + ripple · yy yank clip/gap ·
+#              p paste-over (replaces underneath) · P ripple-insert ·
+#              u / Ctrl-r undo/redo (auto-saved)
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of
 #              a cut (bracket opens toward its side) ·
