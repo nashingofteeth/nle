@@ -90,8 +90,40 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 
 ## M4 — multi-track + audio (next)
 
-See `M4` section below / discussion. Placeholder: multiple tracks (video +
-audio) in the model, TUI rows, and graph (`overlay`/`amix`/`adelay`).
+**Goal:** one implicit video track → an ordered **list of tracks** (video +
+audio); TUI track rows and an **active track** for edits; export layers
+video (`overlay`) and mixes audio (`amix`). No effects/transitions (that's
+M5).
+
+**Where we start:** the shape already exists — `Timeline { tracks: Vec<Track> }`,
+`TrackKind::{Video, Audio}`, and the graph compiler already emits a
+per-segment video+audio pair and `concat`s. So M4 is mostly generalizing
+"the track" to "a track index" (~80 `video_track()` call sites) plus
+layering/mixing — not a rewrite.
+
+**Decisions (proposed):** track identity = index + kind (position-derived,
+matching the segment model); audio = **minimal now** (extra audio tracks;
+linked a/v detach later); `active_track` is TUI state; the instant monitor
+previews the **active** video track (mpv `edl://` can't compose — composite
+preview is M5); video layers strictly by index, no position/opacity in M4.
+
+**Sequencing (commit per step):**
+1. Model: track helpers (`track(ti)`, `video_tracks`, `add_track`) + a
+   `muted` flag + validate "≥1 video track". Pure, tested; call sites still
+   use `video_track()`.
+2. Edit ops: thread an explicit `track` index through `edit::*`; the TUI
+   passes `active_track`; single-track behaviour identical.
+3. Graph: per-track concat chains + `overlay` (video) + `amix` (audio);
+   **single-track graph byte-identical** (guards M0–M3 proofs).
+4. TUI: one row per track, active-track highlight, `t`/`T` to cycle.
+5. Preview: active-track EDL (+ `nle edl --track N`).
+6. Commands: `:track add video|audio`, `:track mute [N]`, `:track rm N`.
+7. `demo.sh` multi-track export proof (pixel/PSNR + ffprobe audio); update
+   this file's status.
+
+**Risks:** `overlay` eof/short-upper-layer timing (may need `setpts`/`tpad`);
+the ~80-call-site sweep; `amix` gain policy (`normalize=0`, no implicit
+attenuation); set expectations that the monitor shows the active track only.
 
 ## M6 — export presets (planned)
 
