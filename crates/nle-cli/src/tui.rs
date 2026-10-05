@@ -503,7 +503,33 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('g') => app.pool_sel = 0,
         KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
         KeyCode::Char('d') => remove_from_pool(app, player),
+        KeyCode::Char('u') => do_undo(app, player),
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         _ => {}
+    }
+}
+
+/// Undo the last edit, restoring the playhead to where it was made.
+fn do_undo(app: &mut App, player: &MpvPlayer) {
+    match app.history.undo(&mut app.project) {
+        Ok(outcome) => {
+            app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
+            app.set_message(&format!("undo: {}", outcome.desc));
+            persist_and_rebuild(app, player);
+        }
+        Err(e) => app.set_message(&e.to_string()),
+    }
+}
+
+/// Redo the last undone edit.
+fn do_redo(app: &mut App, player: &MpvPlayer) {
+    match app.history.redo(&mut app.project) {
+        Ok(outcome) => {
+            app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
+            app.set_message(&format!("redo: {}", outcome.desc));
+            persist_and_rebuild(app, player);
+        }
+        Err(e) => app.set_message(&e.to_string()),
     }
 }
 
@@ -694,18 +720,11 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             };
             run_edit(app, player, edit::paste_ripple(&app.project, &clipboard, app.playhead));
         }
-        KeyCode::Char('u') => match app.history.undo(&mut app.project) {
-            Ok(outcome) => {
-                app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
-                app.set_message(&format!("undo: {}", outcome.desc));
-                persist_and_rebuild(app, player);
-            }
-            Err(e) => app.set_message(&e.to_string()),
-        },
+        KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('m') => {
             app.pool_open = true;
             app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
-            app.set_message("media pool · j/k move · enter insert · d remove · m/esc close");
+            app.set_message("media pool · j/k move · enter insert · d remove · u undo · m/esc close");
         }
         KeyCode::Char('e') => enter_extend(app, player, false),
         KeyCode::Char('E') => enter_extend(app, player, true),
@@ -713,16 +732,7 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char(']') => enter_extend_side(app, player, Side::Left),
         KeyCode::Char('<') | KeyCode::Char(',') => seek_clip_end(app, player, true),
         KeyCode::Char('>') | KeyCode::Char('.') => seek_clip_end(app, player, false),
-        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            match app.history.redo(&mut app.project) {
-                Ok(outcome) => {
-                    app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
-                    app.set_message(&format!("redo: {}", outcome.desc));
-                    persist_and_rebuild(app, player);
-                }
-                Err(e) => app.set_message(&e.to_string()),
-            }
-        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         // ---- navigation/transport (unchanged) ----
         KeyCode::Char('G') | KeyCode::Char('$') => app.seek_to(player, app.total()),
         KeyCode::Char('r') => app.reload_requested = true,
@@ -3186,6 +3196,31 @@ mod tests {
         let (free, _) = p.add_asset("/media/free.mp4".into(), p.asset(spare).unwrap().probe.clone());
         assert!(free != spare);
         assert!(p.remove_asset(free).is_ok());
+    }
+
+    // Inserting an asset from the pool is recorded in history and undoes.
+    #[test]
+    fn media_pool_insert_is_undoable() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 0.0;
+        app.pool_sel = 0; // first asset
+        let end_before = app.project.timeline.end();
+
+        // Same call insert_from_pool makes, minus the player hook.
+        let snapshot = TimelineSegment::Clip(Clip {
+            id: 0,
+            asset: app.project.media[0].id,
+            asset_in: Seconds::from_integer(0),
+            asset_out: app.project.media[0].duration().unwrap(),
+        });
+        let batch = edit::paste_ripple(&app.project, &snapshot, app.playhead).unwrap();
+        let frame = frame_of(app.project.fps.as_ref(), 0.0);
+        app.history.apply(&mut app.project, batch, frame).unwrap();
+        assert!(app.project.timeline.end() > end_before, "insert grew the timeline");
+
+        let outcome = app.history.undo(&mut app.project).unwrap();
+        assert_eq!(app.project.timeline.end(), end_before, "undo removed the insert");
+        assert_eq!(frame_to_secs(app.project.fps.as_ref(), outcome.playhead), 0.0);
     }
 
     // The pool panel renders without panicking and lists assets.
