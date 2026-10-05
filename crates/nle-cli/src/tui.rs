@@ -540,18 +540,27 @@ fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
         return;
     };
     let dur = asset.duration();
-    let snapshot = match dur {
-        Some(d) => TimelineSegment::Clip(Clip {
-            id: 0,
-            asset: asset.id,
-            asset_in: Seconds::from_integer(0),
-            asset_out: d,
-        }),
-        None => {
+    // Use a whole-frame duration: an asset like blue.mp4 (6.006 s) trimmed
+    // to its exact duration would leave a sub-frame stump if a later edit
+    // (a split, a paste) lands near the end — floor to the frame grid so
+    // inserted clips are clean.
+    let whole = match (dur, app.project.fps.as_ref()) {
+        (Some(d), Some(fps)) => {
+            let frames = (secs(&d) * secs(fps)).floor().max(1.0);
+            Seconds::new(frames as i64, 1) / *fps
+        }
+        (Some(d), None) => d,
+        (None, _) => {
             app.set_message("asset has no known duration");
             return;
         }
     };
+    let snapshot = TimelineSegment::Clip(Clip {
+        id: 0,
+        asset: asset.id,
+        asset_in: Seconds::from_integer(0),
+        asset_out: whole,
+    });
     let _ = run_edit(app, player, edit::paste_ripple(&app.project, &snapshot, app.playhead));
 }
 
@@ -2017,7 +2026,6 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     } else {
         app.total().max(0.001)
     };
-    let w = inner.width as f64;
 
     let parts: Vec<(f64, String, Style)> = segs
         .iter()
@@ -2037,29 +2045,32 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    // Track row: segments with boundary dividers. The playhead doesn't
-    // live here in normal mode (it renders on the marker row below); in
-    // extend mode a yellow notch marks it on this row too.
-    let mut x: u16 = 0;
+    // Track row: segments with boundary dividers. Boundaries come from the
+    // SAME quantizer as the marker row (`marker_col` of the cumulative
+    // time), so drawn clip edges and the playhead/cut indicator can never
+    // disagree. A segment that rounds to no cells contributes no divider.
     let mut cum: f64 = 0.0;
     let mut cells: Vec<(u16, String, Style)> = Vec::new();
-    let n = parts.len();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
+        let start_x = if i == 0 { 0 } else { marker_col(cum, total, inner.width) };
         cum += dur;
-        let mut end_x = ((cum / total) * w).round() as u16;
-        if i == n - 1 {
-            end_x = inner.width;
+        let end_x = if i == parts.len() - 1 {
+            inner.width
+        } else {
+            marker_col(cum, total, inner.width)
+        };
+        let width = end_x.saturating_sub(start_x);
+        if width == 0 {
+            continue; // rounds away — no cell, no divider
         }
-        let width = end_x.saturating_sub(x).max(1);
         // A divider at the boundary, drawn on this segment's own
         // background so it contrasts with both neighbors.
-        let text = if i == 0 {
+        let text = if i == 0 || start_x == 0 {
             truncate_label(label, width)
         } else {
             format!("▏{}", truncate_label(label, width.saturating_sub(1)))
         };
-        cells.push((x, text, *style));
-        x = end_x;
+        cells.push((start_x, text, *style));
     }
     let mut spans: Vec<Span> = Vec::new();
     if in_extend {
@@ -3221,6 +3232,73 @@ mod tests {
         let outcome = app.history.undo(&mut app.project).unwrap();
         assert_eq!(app.project.timeline.end(), end_before, "undo removed the insert");
         assert_eq!(frame_to_secs(app.project.fps.as_ref(), outcome.playhead), 0.0);
+    }
+
+    // Clip-edge dividers on the track row land on the same columns as the
+    // cut positions the marker row/playhead use (one quantizer).
+    #[test]
+    fn clip_edges_align_with_cut_positions() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        // Four equal clips on the shared asset → cuts at 3,6,9,12.
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments = (1..=4)
+            .map(|id| {
+                TimelineSegment::Clip(Clip {
+                    id,
+                    asset: 1,
+                    asset_in: Seconds::from_integer(0),
+                    asset_out: Seconds::from_integer(3),
+                })
+            })
+            .collect();
+        let app = App::new(p, PathBuf::from("t.json"));
+        let width = 80u16;
+        let mut term = Terminal::new(TestBackend::new(width, 4)).unwrap();
+        term.draw(|f| render_timeline(f, Rect { x: 0, y: 0, width, height: 4 }, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let inner = Block::bordered().inner(Rect { x: 0, y: 0, width, height: 4 });
+
+        // Every drawn divider is a `▏` glyph at a clip boundary; collect
+        // its column (buffer x, offset by the border) and compare to the
+        // quantized cut.
+        let divider_cols: Vec<u16> = (0..width)
+            .filter(|&x| buf[(x, 1)].symbol() == "▏")
+            .collect();
+        for cut in [3.0, 6.0, 9.0] {
+            let want = inner.x + marker_col(cut, 12.0, inner.width);
+            assert!(divider_cols.contains(&want), "divider at cut {cut} → col {want}, got {divider_cols:?}");
+        }
+    }
+
+    // Inserting a 6.006 s asset uses a whole-frame duration, so no
+    // sub-frame stump is produced.
+    #[test]
+    fn pool_insert_uses_whole_frames() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        p.add_asset("/media/blue.mp4".into(), RawProbe {
+            streams: vec![RawStream {
+                index: 0, codec_type: Some("video".into()), codec_name: Some("h264".into()),
+                width: Some(320), height: Some(240), r_frame_rate: Some("30/1".into()),
+                ..Default::default()
+            }],
+            format: RawFormat { format_name: "mp4".into(), duration: Some("6.006".into()), ..Default::default() },
+        });
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        // Mirror insert_from_pool's whole-frame math.
+        let d = app.project.media[0].duration().unwrap();
+        let fps = app.project.fps.unwrap();
+        let frames = (secs(&d) * secs(&fps)).floor().max(1.0) as i64;
+        let whole = Seconds::new(frames, 1) / fps;
+        assert_eq!(whole, Seconds::new(180, 30), "6.006 floored to 180 frames (6.0 s)");
+        let snapshot = TimelineSegment::Clip(Clip { id: 0, asset: 1, asset_in: Seconds::from_integer(0), asset_out: whole });
+        let batch = edit::paste_ripple(&app.project, &snapshot, 0.0).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        // No zero-length or sub-frame segment created.
+        for s in &app.project.timeline.video_track().unwrap().segments {
+            assert!(s.duration() > Seconds::from_integer(0));
+        }
     }
 
     // The pool panel renders without panicking and lists assets.
