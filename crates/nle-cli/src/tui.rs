@@ -2069,16 +2069,16 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 // ------------------------------------------------------------ rendering
 
 fn render(f: &mut Frame, app: &App) {
-    // Bottom panels: keys cheat-sheet, then a dedicated notice panel.
+    // Bottom panels: keys cheat-sheet, then a dedicated message panel.
     // Hidden when the terminal is too short to spare them.
     let keys = if f.area().height >= 20 { 8 } else { 0 };
-    let notice = if f.area().height >= 20 { 3 } else { 0 };
-    let [status, timeline, info, keys_area, notice_area] = Layout::vertical([
+    let msg_h = if f.area().height >= 20 { 3 } else { 0 };
+    let [status, timeline, info, keys_area, msg_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(4),
         Constraint::Min(0),
         Constraint::Length(keys),
-        Constraint::Length(notice),
+        Constraint::Length(msg_h),
     ])
     .areas(f.area());
 
@@ -2092,8 +2092,8 @@ fn render(f: &mut Frame, app: &App) {
     if keys > 0 {
         render_hints(f, keys_area, app);
     }
-    if notice > 0 {
-        render_notice(f, notice_area, app);
+    if msg_h > 0 {
+        render_message(f, msg_area, app);
     }
 }
 
@@ -2109,9 +2109,9 @@ fn render_hints(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// The latest notice/message, in its own panel.
-fn render_notice(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" notice ");
+/// The latest message/feedback line, in its own panel.
+fn render_message(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::bordered().title(" message ");
     let inner = block.inner(area);
     f.render_widget(block, area);
     let (msg, style) = if !app.message.is_empty() {
@@ -3725,7 +3725,7 @@ mod tests {
         app.set_message("extend tail of clip #1 (absorbed gap)");
         let text = render_text(&app);
         assert!(text.contains("keys"), "keys panel title: {text}");
-        assert!(text.contains("notice"), "notice panel title: {text}");
+        assert!(text.contains("message"), "message panel title: {text}");
         assert!(text.contains("edit"), "cheat-sheet present: {text}");
         assert!(text.contains("absorbed gap"), "notice shown: {text}");
 
