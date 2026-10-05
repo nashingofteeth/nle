@@ -326,8 +326,7 @@ impl App {
                     // The monitor is a raw pooled file: position is asset
                     // seconds, no EDL translation.
                     self.pool_pos = t;
-                } else {
-                    let t = match &self.mode {
+                } else {                    let t = match &self.mode {
                         Mode::Extend(st) => t + st.preview_off,
                         _ => t,
                     };
@@ -345,6 +344,14 @@ impl App {
         self.loaded = st.file_loaded;
         self.dead = st.dead;
         self.eof = st.eof;
+        // Pool at EOF: pin the clock to the last frame so it doesn't read
+        // a couple frames short of the file's probe duration.
+        if self.pool_open
+            && st.eof
+            && let Some(d) = self.project.media.get(self.pool_sel).and_then(|a| a.duration())
+        {
+            self.pool_pos = pool_last_frame(self, secs(&d));
+        }
         if let Some(e) = &st.last_error {
             self.mpv_error = Some(e.clone());
         }
@@ -599,9 +606,25 @@ fn pool_seek_abs(app: &mut App, player: &MpvPlayer, t: f64) {
         .and_then(|a| a.duration())
         .map(|d| secs(&d))
         .unwrap_or(f64::INFINITY);
-    let target = t.clamp(0.0, d);
+    // The last *frame* sits one frame before the duration; seeking to the
+    // exact end lands past the final frame (mpv holds there and reports a
+    // couple frames short). Clamp to the last frame's timestamp.
+    let last = pool_last_frame(app, d);
+    let target = t.clamp(0.0, last);
     app.pool_pos = target;
     player.seek_absolute(target);
+}
+
+/// Timestamp of the selected asset's last frame (`duration − 1 frame`).
+fn pool_last_frame(app: &App, dur: f64) -> f64 {
+    let fps = app
+        .project
+        .media
+        .get(app.pool_sel)
+        .and_then(|a| a.fps())
+        .map(|f| secs(&f))
+        .unwrap_or(30.0);
+    (dur - 1.0 / fps).max(0.0)
 }
 
 fn pool_seek_rel(app: &mut App, player: &MpvPlayer, delta: f64) {
@@ -3496,6 +3519,14 @@ mod tests {
         for s in &app.project.timeline.video_track().unwrap().segments {
             assert!(s.duration() > Seconds::from_integer(0));
         }
+    }
+
+    // The pool clock's last frame is one frame before the asset duration.
+    #[test]
+    fn pool_last_frame_is_one_before_duration() {
+        let app = App::new(asset_project(), PathBuf::from("t.json"));
+        // 30 fps, 10 s asset → last frame at 10 - 1/30.
+        assert!((pool_last_frame(&app, 10.0) - (10.0 - 1.0 / 30.0)).abs() < 1e-9);
     }
 
     // Metadata pane formats the stored probe (no re-probe).
