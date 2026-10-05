@@ -1447,8 +1447,11 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
     };
     let desc = batch.desc.clone();
     // Keep the playhead on the frame it was showing, not the same
-    // timecode (a trim can move material under it).
-    let anchor = edit_anchor(&app.project, app.playhead);
+    // timecode (a trim can move material under it). An extend commit is
+    // the exception: land on the edge we extended to (the playhead is
+    // already the target), not one frame short of a fresh tail.
+    let in_extend = matches!(app.mode, Mode::Extend(_));
+    let anchor = (!in_extend).then(|| edit_anchor(&app.project, app.playhead)).flatten();
     // Undo attribution: a normal edit is made from the playhead; an extend
     // commit is made from where extend mode was entered (the armed edge),
     // so undoing it returns there rather than to the commit target.
@@ -3161,6 +3164,36 @@ mod tests {
         let outcome = app.history.undo(&mut app.project).unwrap();
         app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
         assert_eq!(app.playhead, 3.0, "back to where extend mode was entered");
+    }
+
+    // After committing a tail extend the playhead lands on the new clip
+    // end (the edge we extended to), for both ripple and absorb.
+    #[test]
+    fn tail_extend_commit_lands_on_the_new_end() {
+        for (kind, ripple) in [(CommitKind::AbsorbTail, false), (CommitKind::AbsorbTail, true)] {
+            let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+            app.playhead = 6.0; // extend C1's tail [0..3) out to 6.0
+            app.mode = Mode::Extend(ExtendState {
+                armed: Armed::Clip { id: 1, head: false },
+                edge_pos: 3.0,
+                ripple,
+                lo: 0.0,
+                hi: Some(9.0),
+                mat: None,
+                preview_off: -1.0,
+            });
+            let target = app.playhead;
+            let batch = run_commit_action(&app, &Armed::Clip { id: 1, head: false }, kind, ripple).unwrap();
+            // Mirror run_edit's extend attribution (the armed edge).
+            let frame = frame_of(app.project.fps.as_ref(), 3.0);
+            app.history.apply(&mut app.project, batch, frame).unwrap();
+            let end = {
+                let track = app.project.timeline.video_track().unwrap();
+                let si = track.clip_index(1).unwrap();
+                secs(&(track.start_of(si) + track.segments[si].duration()))
+            };
+            assert_eq!(end, target, "clip end == committed target (ripple={ripple})");
+        }
     }
 
     // Any gap (here a middle one) can be armed at either edge and
