@@ -631,11 +631,23 @@ fn pool_seek_rel(app: &mut App, player: &MpvPlayer, delta: f64) {
     pool_seek_abs(app, player, app.pool_pos + delta);
 }
 
-/// Frame-step the pool preview (mpv's frame step; ±1/fps for the position).
+/// Frame-step the pool preview: move on the asset's frame grid and seek
+/// frame-exactly (same model-authoritative approach as normal mode).
 fn pool_step(app: &mut App, player: &MpvPlayer, dir: i64) {
     if !app.loaded {
         return;
     }
+    let (target, _fps) = pool_step_target(app, dir);
+    app.pool_pos = target;
+    // Nudge a hair into the frame so a frame-exact seek lands ON it, not
+    // the previous frame (same trick normal mode uses).
+    player.seek_absolute(target + 0.004);
+}
+
+/// The frame-grid target of a pool step (`dir` frames) and the asset fps.
+/// Pure: snaps to the grid so repeated steps don't drift; clamps to
+/// `[0, last frame]`.
+fn pool_step_target(app: &App, dir: i64) -> (f64, f64) {
     let fps = app
         .project
         .media
@@ -643,14 +655,17 @@ fn pool_step(app: &mut App, player: &MpvPlayer, dir: i64) {
         .and_then(|a| a.fps())
         .map(|f| secs(&f))
         .unwrap_or(30.0);
-    app.pool_pos = (app.pool_pos + dir as f64 / fps).max(0.0);
-    for _ in 0..dir.abs() {
-        if dir > 0 {
-            player.frame_step();
-        } else {
-            player.frame_back_step();
-        }
-    }
+    let dur = app
+        .project
+        .media
+        .get(app.pool_sel)
+        .and_then(|a| a.duration())
+        .map(|d| secs(&d))
+        .unwrap_or(f64::INFINITY);
+    let last = pool_last_frame(app, dur);
+    let cur = (app.pool_pos * fps).round() as i64;
+    let idx = (cur + dir).clamp(0, (last * fps).round() as i64);
+    (idx as f64 / fps, fps)
 }
 
 
@@ -3519,6 +3534,34 @@ mod tests {
         for s in &app.project.timeline.video_track().unwrap().segments {
             assert!(s.duration() > Seconds::from_integer(0));
         }
+    }
+
+    // Frame steps advance on the asset's grid and clamp to its last frame.
+    #[test]
+    fn pool_step_moves_one_frame_and_clamps() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.pool_open = true;
+        let fps = app.project.media[0].fps().unwrap();
+        let f = secs(&fps);
+        app.pool_pos = 0.0;
+        // Three forward steps land exactly 3 frames in (snapped, no drift).
+        for _ in 0..3 {
+            let (t, _) = pool_step_target(&app, 1);
+            app.pool_pos = t;
+        }
+        assert!((app.pool_pos - 3.0 / f).abs() < 1e-9);
+        // Back two → one frame in.
+        let (t, _) = pool_step_target(&app, -1);
+        app.pool_pos = t;
+        let (t, _) = pool_step_target(&app, -1);
+        assert!((t - 1.0 / f).abs() < 1e-9);
+        // Clamps at 0 and at the last frame.
+        let (t0, _) = pool_step_target(&app, -99);
+        assert_eq!(t0, 0.0);
+        let last = pool_last_frame(&app, 10.0);
+        app.pool_pos = last;
+        let (tl, _) = pool_step_target(&app, 99);
+        assert!((tl - last).abs() < 1e-9, "clamped to the last frame");
     }
 
     // The pool clock's last frame is one frame before the asset duration.
