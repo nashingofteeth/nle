@@ -137,6 +137,9 @@ plainly.
 - `chars[cur..o]` panics if `cur > o` — sort mark offsets first.
 - `#[cfg(test)]` a helper used only by tests, or clippy warns dead-code.
 - `(!cond).then(|| …).flatten()` for an optional-when-condition value.
+- `thiserror` tuple variants: mixing `{0}` with a bare `{}` in `#[error]` is
+  "ambiguous reference to positional arguments by number" — name the extra
+  arg (`expected = CONST`) instead.
 - Two writers of one invariant (`sync` vs `seek`) — clamp at **every**
   write, not just the "obvious" one.
 
