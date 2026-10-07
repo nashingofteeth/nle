@@ -722,7 +722,7 @@ fn do_undo(app: &mut App, player: &MpvPlayer) {
         Ok(outcome) => {
             app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
             app.set_message(&format!("undo: {}", outcome.desc));
-            persist_and_rebuild(app, player);
+            persist_and_refresh(app, player);
         }
         Err(e) => app.set_message(&e.to_string()),
     }
@@ -734,7 +734,7 @@ fn do_redo(app: &mut App, player: &MpvPlayer) {
         Ok(outcome) => {
             app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
             app.set_message(&format!("redo: {}", outcome.desc));
-            persist_and_rebuild(app, player);
+            persist_and_refresh(app, player);
         }
         Err(e) => app.set_message(&e.to_string()),
     }
@@ -771,21 +771,19 @@ fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
     let _ = run_edit(app, player, edit::paste_ripple(&app.project, &snapshot, app.playhead));
 }
 
-/// Remove the selected asset from the pool (guard refuses if it's in use).
+/// Remove the selected asset from the pool, undoably (the guard refuses if
+/// it's in use), then refresh the pool preview.
 fn remove_from_pool(app: &mut App, player: &MpvPlayer) {
     let Some(asset) = app.project.media.get(app.pool_sel) else {
         app.set_message("no asset selected");
         return;
     };
     let id = asset.id;
-    match app.project.remove_asset(id) {
-        Ok(_) => {
-            app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
-            app.set_message(&format!("removed asset #{id}"));
-            if let Err(e) = app.project.save(&app.path) {
-                app.set_message(&format!("save failed: {e}"));
-            }
-            let _ = &player;
+    let playhead = frame_of(app.project.fps.as_ref(), app.playhead);
+    match app.history.remove_asset(&mut app.project, id, playhead) {
+        Ok(desc) => {
+            app.set_message(&desc);
+            persist_and_refresh(app, player);
         }
         Err(e) => app.set_message(&e.to_string()),
     }
@@ -1478,7 +1476,7 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
         Ok(()) => {
             reanchor_playhead(app, anchor);
             app.set_message(&desc);
-            persist_and_rebuild(app, player);
+            persist_and_refresh(app, player);
             true
         }
         Err(e) => {
@@ -1488,11 +1486,12 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
     }
 }
 
-/// Atomic save + preview rebuild. Called after every successful edit
-/// (and undo/redo) — no manual save state to get wrong. The undo history
-/// sidecar is written alongside the project, and the preview reloads
-/// with the playhead position baked into the load (no race).
-fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
+/// Atomic save + view refresh. Called after every successful edit (and
+/// undo/redo) — no manual save state to get wrong. The undo history sidecar
+/// is written alongside the project, then the monitor is reloaded for
+/// whichever view is showing: the pool's raw file when the pool is open, or
+/// the timeline EDL (with the playhead baked into the load) otherwise.
+fn persist_and_refresh(app: &mut App, player: &MpvPlayer) {
     if let Err(e) = app.project.save(&app.path) {
         app.set_message(&format!("save failed: {e}"));
         return;
@@ -1500,9 +1499,18 @@ fn persist_and_rebuild(app: &mut App, player: &MpvPlayer) {
     if let Err(e) = app.history.save(&history_path(&app.path)) {
         app.set_message(&format!("history save failed: {e}"));
     }
-    match preview::build_edl(&app.project) {
-        Ok(edl) => player.load(&edl, Some(app.playhead)),
-        Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
+    if app.pool_open {
+        // A remove/undo changed the list; keep the selection in range and
+        // reload the (possibly different) asset. Doing this here is why an
+        // undo while the pool is open no longer kicks the monitor to the
+        // timeline.
+        app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
+        load_pool_preview(app, player);
+    } else {
+        match preview::build_edl(&app.project) {
+            Ok(edl) => player.load(&edl, Some(app.playhead)),
+            Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
+        }
     }
 }
 
