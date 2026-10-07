@@ -203,6 +203,7 @@ pub enum Mode {
     Normal,
     Command(String),
     Extend(ExtendState),
+    Pool(PoolState),
 }
 
 /// Which boundary is armed in extend mode: a clip edge, or a gap edge.
@@ -232,6 +233,16 @@ pub struct ExtendState {
     pub hi: Option<f64>,
     pub mat: Option<(f64, f64)>,
     pub preview_off: f64,
+}
+
+/// Media-pool panel state: the selected row, the preview clock (asset
+/// seconds), and the timeline playhead to restore on close. A `Mode` variant
+/// so "pool is open" and its selection can't drift apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PoolState {
+    pub sel: usize,
+    pub pos: f64,
+    pub resume: f64,
 }
 
 /// Which two-key sequence is waiting for its second keystroke (`gg`, `dd`, `yy`).
@@ -270,14 +281,6 @@ pub struct App {
     pub eof: bool,
     pub mpv_error: Option<String>,
     pub exit_message: Option<String>,
-    /// Media-pool panel open (takes over the info pane).
-    pub pool_open: bool,
-    /// Selected row in the pool panel.
-    pub pool_sel: usize,
-    /// Playhead position (seconds) in the pool's raw-file preview.
-    pub pool_pos: f64,
-    /// Timeline playhead to restore when the pool closes.
-    pool_resume: f64,
 }
 
 impl App {
@@ -300,10 +303,6 @@ impl App {
             eof: false,
             mpv_error: None,
             exit_message: None,
-            pool_open: false,
-            pool_sel: 0,
-            pool_pos: 0.0,
-            pool_resume: 0.0,
         }
     }
 
@@ -326,10 +325,10 @@ impl App {
             && st.file_loaded
             && let Some(t) = st.time_pos
         {
-            if self.pool_open {
+            if is_pool(self) {
                 // The monitor is a raw pooled file: position is asset
                 // seconds, no EDL translation.
-                self.pool_pos = t;
+                set_pool_pos(self, t);
             } else {
                 let t = match &self.mode {
                     Mode::Extend(st) => t + st.preview_off,
@@ -351,15 +350,12 @@ impl App {
         self.eof = st.eof;
         // Pool at EOF: pin the clock to the last frame so it doesn't read
         // a couple frames short of the file's probe duration.
-        if self.pool_open
-            && st.eof
-            && let Some(d) = self
-                .project
-                .media
-                .get(self.pool_sel)
-                .and_then(|a| a.duration())
-        {
-            self.pool_pos = pool_last_frame(self, secs(&d));
+        if is_pool(self) && st.eof {
+            let sel = pool_sel(self).unwrap_or(0);
+            if let Some(d) = self.project.media.get(sel).and_then(|a| a.duration()) {
+                let last = pool_last_frame(self, secs(&d));
+                set_pool_pos(self, last);
+            }
         }
         if let Some(e) = &st.last_error {
             self.mpv_error = Some(e.clone());
@@ -498,6 +494,47 @@ fn reload_project(app: &mut App, player: &MpvPlayer) -> anyhow::Result<()> {
 
 // ------------------------------------------------------------ keys
 
+/// Pool-state accessors. `Mode::Pool` is `Copy`, so these take/return owned
+/// values and each borrow ends at the statement. That is what lets pool
+/// handlers stay `&mut App` while also touching `project`/`history` — a helper
+/// returning `&mut PoolState` would borrow all of `App` and collide.
+fn is_pool(app: &App) -> bool {
+    matches!(app.mode, Mode::Pool(_))
+}
+
+fn pool_sel(app: &App) -> Option<usize> {
+    match &app.mode {
+        Mode::Pool(p) => Some(p.sel),
+        _ => None,
+    }
+}
+
+fn set_pool_sel(app: &mut App, sel: usize) {
+    if let Mode::Pool(p) = &mut app.mode {
+        p.sel = sel;
+    }
+}
+
+fn pool_pos(app: &App) -> f64 {
+    match &app.mode {
+        Mode::Pool(p) => p.pos,
+        _ => 0.0,
+    }
+}
+
+fn set_pool_pos(app: &mut App, pos: f64) {
+    if let Mode::Pool(p) = &mut app.mode {
+        p.pos = pos;
+    }
+}
+
+fn pool_resume(app: &App) -> f64 {
+    match &app.mode {
+        Mode::Pool(p) => p.resume,
+        _ => 0.0,
+    }
+}
+
 pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     if matches!(app.mode, Mode::Command(_)) {
         let buf = match std::mem::replace(&mut app.mode, Mode::Normal) {
@@ -507,7 +544,7 @@ pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         command_key(app, buf, key);
     } else if matches!(app.mode, Mode::Extend(_)) {
         extend_key(app, player, key);
-    } else if app.pool_open {
+    } else if is_pool(app) {
         pool_key(app, player, key);
     } else {
         normal_key(app, player, key);
@@ -583,7 +620,7 @@ fn pool_seek_end(app: &mut App, player: &MpvPlayer) {
     let d = app
         .project
         .media
-        .get(app.pool_sel)
+        .get(pool_sel(app).unwrap_or(0))
         .and_then(|a| a.duration())
         .map(|d| secs(&d))
         .unwrap_or(0.0);
@@ -597,7 +634,7 @@ fn pool_toggle_play(app: &mut App, player: &MpvPlayer) {
         return;
     }
     if app.eof {
-        app.pool_pos = 0.0;
+        set_pool_pos(app, 0.0);
         player.seek_absolute(0.0);
         player.set_pause(false);
     } else {
@@ -610,43 +647,48 @@ fn pool_move(app: &mut App, player: &MpvPlayer, delta: i64, n: usize) {
     if n == 0 {
         return;
     }
-    let cur = app.pool_sel.min(n - 1) as i64;
+    let cur = pool_sel(app).unwrap_or(0).min(n - 1) as i64;
     pool_select(app, player, (cur + delta).clamp(0, n as i64 - 1) as usize);
 }
 
 /// Select a list row and swap the monitor to that asset.
 fn pool_select(app: &mut App, player: &MpvPlayer, sel: usize) {
-    if sel == app.pool_sel && app.loaded {
+    if pool_sel(app) == Some(sel) && app.loaded {
         return;
     }
-    app.pool_sel = sel;
+    set_pool_sel(app, sel);
     load_pool_preview(app, player);
 }
 
 /// Load the selected asset into the monitor as a raw file.
 fn load_pool_preview(app: &mut App, player: &MpvPlayer) {
-    if let Some(asset) = app.project.media.get(app.pool_sel) {
-        app.pool_pos = 0.0;
-        player.load(&asset.path.display().to_string(), Some(0.0));
-    }
+    let Some(sel) = pool_sel(app) else { return };
+    let Some(path) = app.project.media.get(sel).map(|a| a.path.clone()) else {
+        return;
+    };
+    set_pool_pos(app, 0.0);
+    player.load(&path.display().to_string(), Some(0.0));
 }
 
-/// Open the pool: remember the timeline playhead, preview the selection.
+/// Open the pool: remember the timeline playhead, preview the first asset.
 fn open_pool(app: &mut App, player: &MpvPlayer) {
-    app.pool_resume = app.playhead;
-    app.pool_open = true;
-    app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
+    app.mode = Mode::Pool(PoolState {
+        sel: 0,
+        pos: 0.0,
+        resume: app.playhead,
+    });
     load_pool_preview(app, player);
     app.set_message("media");
 }
 
 /// Close the pool: reload the project timeline at the remembered playhead.
 fn close_pool(app: &mut App, player: &MpvPlayer) {
-    app.pool_open = false;
+    let resume = pool_resume(app);
+    app.mode = Mode::Normal;
     if let Ok(edl) = preview::build_edl(&app.project) {
-        player.load(&edl, Some(app.pool_resume.max(0.0)));
+        player.load(&edl, Some(resume.max(0.0)));
     }
-    app.playhead = app.pool_resume;
+    app.playhead = resume;
     app.set_message("timeline");
 }
 
@@ -658,7 +700,7 @@ fn pool_seek_abs(app: &mut App, player: &MpvPlayer, t: f64) {
     let d = app
         .project
         .media
-        .get(app.pool_sel)
+        .get(pool_sel(app).unwrap_or(0))
         .and_then(|a| a.duration())
         .map(|d| secs(&d))
         .unwrap_or(f64::INFINITY);
@@ -667,7 +709,7 @@ fn pool_seek_abs(app: &mut App, player: &MpvPlayer, t: f64) {
     // couple frames short). Clamp to the last frame's timestamp.
     let last = pool_last_frame(app, d);
     let target = t.clamp(0.0, last);
-    app.pool_pos = target;
+    set_pool_pos(app, target);
     player.seek_absolute(target);
 }
 
@@ -676,7 +718,7 @@ fn pool_last_frame(app: &App, dur: f64) -> f64 {
     let fps = app
         .project
         .media
-        .get(app.pool_sel)
+        .get(pool_sel(app).unwrap_or(0))
         .and_then(|a| a.fps())
         .map(|f| secs(&f))
         .unwrap_or(30.0);
@@ -684,7 +726,7 @@ fn pool_last_frame(app: &App, dur: f64) -> f64 {
 }
 
 fn pool_seek_rel(app: &mut App, player: &MpvPlayer, delta: f64) {
-    pool_seek_abs(app, player, app.pool_pos + delta);
+    pool_seek_abs(app, player, pool_pos(app) + delta);
 }
 
 /// Frame-step the pool preview: move on the asset's frame grid and seek
@@ -694,7 +736,7 @@ fn pool_step(app: &mut App, player: &MpvPlayer, dir: i64) {
         return;
     }
     let (target, _fps) = pool_step_target(app, dir);
-    app.pool_pos = target;
+    set_pool_pos(app, target);
     // Nudge a hair into the frame so a frame-exact seek lands ON it, not
     // the previous frame (same trick normal mode uses).
     player.seek_absolute(target + 0.004);
@@ -704,22 +746,23 @@ fn pool_step(app: &mut App, player: &MpvPlayer, dir: i64) {
 /// Pure: snaps to the grid so repeated steps don't drift; clamps to
 /// `[0, last frame]`.
 fn pool_step_target(app: &App, dir: i64) -> (f64, f64) {
+    let sel = pool_sel(app).unwrap_or(0);
     let fps = app
         .project
         .media
-        .get(app.pool_sel)
+        .get(sel)
         .and_then(|a| a.fps())
         .map(|f| secs(&f))
         .unwrap_or(30.0);
     let dur = app
         .project
         .media
-        .get(app.pool_sel)
+        .get(sel)
         .and_then(|a| a.duration())
         .map(|d| secs(&d))
         .unwrap_or(f64::INFINITY);
     let last = pool_last_frame(app, dur);
-    let cur = (app.pool_pos * fps).round() as i64;
+    let cur = (pool_pos(app) * fps).round() as i64;
     let idx = (cur + dir).clamp(0, (last * fps).round() as i64);
     (idx as f64 / fps, fps)
 }
@@ -750,7 +793,7 @@ fn do_redo(app: &mut App, player: &MpvPlayer) {
 
 /// Insert a clip from the selected pool asset at the playhead (ripple).
 fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
-    let Some(asset) = app.project.media.get(app.pool_sel) else {
+    let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
         app.set_message("no asset selected");
         return;
     };
@@ -786,7 +829,7 @@ fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
 /// Remove the selected asset from the pool, undoably (the guard refuses if
 /// it's in use), then refresh the pool preview.
 fn remove_from_pool(app: &mut App, player: &MpvPlayer) {
-    let Some(asset) = app.project.media.get(app.pool_sel) else {
+    let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
         app.set_message("no asset selected");
         return;
     };
@@ -1592,12 +1635,15 @@ fn persist_and_refresh(app: &mut App, player: &MpvPlayer) {
     if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
         app.set_message(&format!("history save failed: {e}"));
     }
-    if app.pool_open {
+    if is_pool(app) {
         // A remove/undo changed the list; keep the selection in range and
         // reload the (possibly different) asset. Doing this here is why an
         // undo while the pool is open no longer kicks the monitor to the
         // timeline.
-        app.pool_sel = app.pool_sel.min(app.project.media.len().saturating_sub(1));
+        let sel = pool_sel(app)
+            .unwrap_or(0)
+            .min(app.project.media.len().saturating_sub(1));
+        set_pool_sel(app, sel);
         load_pool_preview(app, player);
     } else {
         match preview::build_edl(&app.project) {
@@ -2257,7 +2303,7 @@ fn render(f: &mut Frame, app: &App) {
 
     render_status(f, status, app);
     render_timeline(f, timeline, app);
-    if app.pool_open {
+    if is_pool(app) {
         render_pool(f, info, app);
     } else {
         render_info(f, info, app);
@@ -2310,7 +2356,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
             "e commit · E ripple on/off · [ ] side · < > (, .) end · Esc cancel",
         ];
     }
-    if app.pool_open {
+    if is_pool(app) {
         return vec![
             "media pool — the monitor previews the selected file",
             "j/k assets · { } list ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
@@ -2344,7 +2390,7 @@ fn render_pool(f: &mut Frame, area: Rect, app: &App) {
         .map(|(i, a)| {
             let used = app.project.asset_usage(a.id);
             let mark = if used.is_empty() { "○" } else { "●" };
-            let style = if i == app.pool_sel {
+            let style = if i == pool_sel(app).unwrap_or(0) {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
                 Style::default()
@@ -2361,7 +2407,7 @@ fn render_pool(f: &mut Frame, area: Rect, app: &App) {
     let meta_block = Block::bordered().title(" metadata ");
     let meta_inner = meta_block.inner(meta_area);
     f.render_widget(meta_block, meta_area);
-    let lines = match app.project.media.get(app.pool_sel) {
+    let lines = match app.project.media.get(pool_sel(app).unwrap_or(0)) {
         Some(a) => asset_metadata(a),
         None => vec!["(no asset selected)".to_string()],
     };
@@ -2467,6 +2513,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                 "EXTEND".to_string()
             }
         }
+        Mode::Pool(_) => "POOL".to_string(),
     };
     let count = app.count.map(|c| format!("{c}")).unwrap_or_default();
 
@@ -2488,12 +2535,13 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 
     // In the pool the monitor shows a raw file, so the clock reads the
     // asset position/duration and the mode tag says POOL.
-    if app.pool_open {
-        let (pos, dur) = match app.project.media.get(app.pool_sel) {
-            Some(a) => (app.pool_pos, a.duration().map(|d| secs(&d)).unwrap_or(0.0)),
+    if is_pool(app) {
+        let sel = pool_sel(app).unwrap_or(0);
+        let (pos, dur) = match app.project.media.get(sel) {
+            Some(a) => (pool_pos(app), a.duration().map(|d| secs(&d)).unwrap_or(0.0)),
             None => (0.0, 0.0),
         };
-        let fs = app.project.media.get(app.pool_sel).and_then(|a| a.fps());
+        let fs = app.project.media.get(sel).and_then(|a| a.fps());
         let line = Line::from(vec![
             Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
             Span::styled(format!(" {name} · "), style),
@@ -4026,12 +4074,21 @@ mod tests {
         assert!(p.remove_asset(free).is_ok());
     }
 
+    /// Put the app in the pool panel with `sel` selected (no player needed).
+    fn open_pool_mode(app: &mut App, sel: usize) {
+        app.mode = Mode::Pool(PoolState {
+            sel,
+            pos: 0.0,
+            resume: 0.0,
+        });
+    }
+
     // Inserting an asset from the pool is recorded in history and undoes.
     #[test]
     fn media_pool_insert_is_undoable() {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 0.0;
-        app.pool_sel = 0; // first asset
+        open_pool_mode(&mut app, 0); // first asset
         let end_before = app.project.timeline.end();
 
         // Same call insert_from_pool makes, minus the player hook.
@@ -4172,26 +4229,26 @@ mod tests {
     #[test]
     fn pool_step_moves_one_frame_and_clamps() {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        app.pool_open = true;
+        open_pool_mode(&mut app, 0);
         let fps = app.project.media[0].fps().unwrap();
         let f = secs(&fps);
-        app.pool_pos = 0.0;
+        set_pool_pos(&mut app, 0.0);
         // Three forward steps land exactly 3 frames in (snapped, no drift).
         for _ in 0..3 {
             let (t, _) = pool_step_target(&app, 1);
-            app.pool_pos = t;
+            set_pool_pos(&mut app, t);
         }
-        assert!((app.pool_pos - 3.0 / f).abs() < 1e-9);
+        assert!((pool_pos(&app) - 3.0 / f).abs() < 1e-9);
         // Back two → one frame in.
         let (t, _) = pool_step_target(&app, -1);
-        app.pool_pos = t;
+        set_pool_pos(&mut app, t);
         let (t, _) = pool_step_target(&app, -1);
         assert!((t - 1.0 / f).abs() < 1e-9);
         // Clamps at 0 and at the last frame.
         let (t0, _) = pool_step_target(&app, -99);
         assert_eq!(t0, 0.0);
         let last = pool_last_frame(&app, 10.0);
-        app.pool_pos = last;
+        set_pool_pos(&mut app, last);
         let (tl, _) = pool_step_target(&app, 99);
         assert!((tl - last).abs() < 1e-9, "clamped to the last frame");
     }
@@ -4225,8 +4282,7 @@ mod tests {
         // A second asset so list index (1) differs from asset id (2).
         p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
         let mut app = App::new(p, PathBuf::from("t.json"));
-        app.pool_open = true;
-        app.pool_sel = 1; // second row
+        open_pool_mode(&mut app, 1); // second row
 
         let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
         term.draw(|f| render(f, &app)).unwrap();
@@ -4292,7 +4348,7 @@ mod tests {
         assert!(text.contains("absorbed gap"), "notice shown: {text}");
 
         // Pool mode: the pool hint line replaces the timeline sheet.
-        app.pool_open = true;
+        open_pool_mode(&mut app, 0);
         let text = render_text(&app);
         assert!(text.contains("media pool"), "{text}");
         assert!(text.contains("enter insert"), "{text}");
