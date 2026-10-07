@@ -4,7 +4,6 @@
 //! instant EDL preview. Project file, media pool, timeline, and export
 //! landed in M0/M1.
 
-#[cfg(feature = "tui")]
 mod log;
 #[cfg(feature = "tui")]
 mod mpv;
@@ -298,6 +297,7 @@ fn cmd_init(path: &Path, force: bool) -> Result<()> {
 fn save_and_reset_history(project: &Project, path: &Path) -> Result<()> {
     project.save(path)?;
     let _ = std::fs::remove_file(edit::History::sidecar_path(path));
+    log::line(&format!("saved {} (undo history reset)", path.display()));
     Ok(())
 }
 
@@ -550,6 +550,11 @@ fn cmd_export(
         preset: preset.to_string(),
         bitrate: bitrate.to_string(),
     };
+    log::line(&format!(
+        "export -> {} ({:?})",
+        output.display(),
+        spec.encoder
+    ));
     let plan = nle_ffmpeg::export(&project, &spec)?;
     let actual = nle_ffmpeg::probe(output)?;
     let shown = actual
@@ -729,6 +734,13 @@ fn cmd_trim(
         preset: preset.to_string(),
         bitrate: bitrate.to_string(),
     };
+    log::line(&format!(
+        "trim {} -> {} [{}..{}]",
+        input.display(),
+        output.display(),
+        format_seconds(&start),
+        format_seconds(&end)
+    ));
     nle_ffmpeg::trim(&spec)?;
     // Report the ACTUAL duration of what we wrote, not what we asked for —
     // stream copy lands within a frame or two of the request.

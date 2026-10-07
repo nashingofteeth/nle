@@ -44,5 +44,16 @@ for t in 1 4.5 6.5 8; do
 done
 rm -f pixel.raw
 
+echo "== log check (NLE_LOG end-to-end) =="
+LOG="$(pwd)/nle-log-check.txt"
+rm -f "$LOG" log-check.json
+NLE_LOG="$LOG" $N --project log-check.json init --force >/dev/null
+if [ -s "$LOG" ] && grep -q "undo history reset" "$LOG"; then
+  printf "  ✓ NLE_LOG wrote: %s\n" "$(sed -n '1p' "$LOG")"
+else
+  echo "  ✗ NLE_LOG produced no log"; exit 1
+fi
+rm -f "$LOG" log-check.json
+
 echo
 echo "Play with it:  cd demo-sandbox && ../../target/release/nle show"

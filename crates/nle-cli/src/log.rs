@@ -8,6 +8,7 @@
 //! Zero-dependency on purpose (the dep set is frozen): a
 //! `OnceLock<Option<Mutex<File>>>` opened on first use.
 
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
@@ -17,15 +18,19 @@ static SINK: OnceLock<Option<Mutex<File>>> = OnceLock::new();
 
 /// The log file, opened once from `NLE_LOG`. `None` when unset or unopenable.
 fn sink() -> &'static Option<Mutex<File>> {
-    SINK.get_or_init(|| {
-        let path = std::env::var_os("NLE_LOG")?;
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()
-            .map(Mutex::new)
-    })
+    SINK.get_or_init(|| open_sink(std::env::var_os("NLE_LOG")))
+}
+
+/// Open the log file in append mode, or `None`. Split from `sink` so it is
+/// testable without touching the process-wide env/`OnceLock`.
+fn open_sink(path: Option<OsString>) -> Option<Mutex<File>> {
+    let path = path?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()
+        .map(Mutex::new)
 }
 
 /// Append a line to `NLE_LOG`, if set. Never fails the caller.
@@ -78,6 +83,38 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with('['), "{text}");
         assert!(text.contains("] hello"), "{text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_sink_none_is_a_no_op() {
+        assert!(open_sink(None).is_none());
+    }
+
+    #[test]
+    fn open_sink_unopenable_is_none() {
+        // A directory cannot be opened for append, so logging stays quiet.
+        assert!(open_sink(Some(std::env::temp_dir().into())).is_none());
+    }
+
+    #[test]
+    fn open_sink_appends() {
+        let path = std::env::temp_dir().join(format!("nle-log-sink-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let sink = open_sink(Some(path.clone().into())).expect("opened");
+        {
+            let mut file = sink.lock().unwrap();
+            emit(&mut file, "first").unwrap();
+        }
+        // Reopening appends rather than truncating.
+        let again = open_sink(Some(path.clone().into())).expect("reopened");
+        {
+            let mut file = again.lock().unwrap();
+            emit(&mut file, "second").unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("] first"), "{text}");
+        assert!(text.contains("] second"), "{text}");
         let _ = std::fs::remove_file(&path);
     }
 }
