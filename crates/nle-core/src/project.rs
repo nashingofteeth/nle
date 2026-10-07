@@ -30,7 +30,7 @@ pub enum ProjectError {
     Io(#[from] std::io::Error),
     #[error("invalid project file: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("project version {0} is not supported (this build reads v1)")]
+    #[error("project version {0} is not supported (this build reads v{expected})", expected = PROJECT_VERSION)]
     Version(u32),
     #[error(transparent)]
     Timeline(#[from] TimelineError),
@@ -74,8 +74,6 @@ impl Asset {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
-    /// Project file format — v2 is the segment model. (v1 files are not
-    /// readable; the only v1 project was the regenerable demo.)
     /// Project file format — v2 is the segment model. (v1 files are not
     /// readable; the only v1 project was the regenerable demo.)
     version: u32,
@@ -355,5 +353,14 @@ mod tests {
         let path = dir.path().join("nle.json");
         std::fs::write(&path, "{\"version\": 1}").unwrap();
         assert!(matches!(Project::load(&path), Err(ProjectError::Version(1))));
+    }
+
+    #[test]
+    fn version_error_names_the_supported_version() {
+        let msg = ProjectError::Version(1).to_string();
+        // The message must name the version THIS build reads (the constant),
+        // not a stale hardcoded one.
+        assert!(msg.contains(&format!("v{PROJECT_VERSION}")), "{msg}");
+        assert!(msg.contains("version 1"), "{msg}");
     }
 }
