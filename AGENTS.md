@@ -106,6 +106,11 @@ plainly.
   files are **rejected with a clear error** (never silently misread) and
   the fix is "rebuild it" (`./demo.sh`). Bump the format version; don't
   write migration code.
+- **Out-of-band project writes must reset the undo sidecar.** Any path that
+  saves `nle.json` without going through the TUI's `History` (CLI
+  `init`/`import`/`add`/`remove`/`media rm`) re-baselines the project, so it
+  deletes `nle.history.json` via `save_and_reset_history`. Otherwise the
+  next TUI session refuses every undo with "history entry does not apply".
 - **Frames are 0-based everywhere** (`f0` = first frame; timecode `:FF`
   matches notices). A file/timeline of `dur` spans `[0, dur)`; the last
   representable position is `dur - 1/fps` — clamp seeks there.
