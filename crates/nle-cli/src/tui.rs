@@ -1946,6 +1946,16 @@ fn seek_rel_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, delta: f64
     seek_to_mode(app, player, st, target);
 }
 
+/// Frame index a frame-step from `playhead` lands on, clamped to the armed
+/// range. `lo` may be negative (head material prepended past time 0) — do
+/// not re-floor it here.
+fn extend_step_index(lo: f64, hi: Option<f64>, fps: Seconds, playhead: f64, dir: i64, mult: u32) -> i64 {
+    let f = secs(&fps);
+    let lo_i = (lo * f).round() as i64;
+    let hi_i = hi.map(|h| (h * f).round() as i64).unwrap_or(i64::MAX);
+    ((playhead * f).round() as i64 + dir * mult as i64).clamp(lo_i, hi_i)
+}
+
 /// Mode-aware frame step: the frame index is clamped to the range, and
 /// mpv only steps when the model actually moved (no divergence).
 fn step_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, dir: i64, mult: u32) {
@@ -1953,11 +1963,8 @@ fn step_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, dir: i64, mult
         return;
     }
     let Some(fps) = app.project.fps.as_ref() else { return };
-    let f = secs(fps);
-    let lo_i = (st.lo * f).round() as i64;
-    let hi_i = st.hi.map(|h| (h * f).round() as i64).unwrap_or(i64::MAX);
-    let idx = ((app.playhead * f).round() as i64 + dir * mult as i64).clamp(lo_i, hi_i);
-    let next = (idx.max(0) as f64) / f;
+    let idx = extend_step_index(st.lo, st.hi, *fps, app.playhead, dir, mult);
+    let next = idx as f64 / secs(fps);
     if next != app.playhead {
         app.playhead = next;
         for _ in 0..mult {
@@ -2988,6 +2995,22 @@ mod tests {
         assert_eq!(snap_extend_target(Some(&fps), &st, 99.0), 3.0, "blocked at the end");
         assert_eq!(snap_extend_target(Some(&fps), &st, -99.0), -1.0, "blocked at the start");
         assert_eq!(snap_extend_target(Some(&fps), &st, 1.0), 1.0);
+    }
+
+    // Frame-stepping an armed head must reach negative positions when the
+    // range allows it (a clip at the timeline start prepends head material);
+    // the old code floored the index at 0.
+    #[test]
+    fn extend_step_reaches_a_negative_head_range() {
+        let fps = Seconds::new(30, 1);
+        assert_eq!(extend_step_index(-1.0, Some(3.0), fps, 0.0, -1, 1), -1);
+        assert_eq!(extend_step_index(-1.0, Some(3.0), fps, -1.0, -1, 1), -30, "clamps at lo");
+        assert_eq!(
+            extend_step_index(f64::NEG_INFINITY, Some(2.0), fps, 0.0, -1, 1),
+            -1,
+            "unbounded gap head"
+        );
+        assert_eq!(extend_step_index(0.0, Some(2.0), fps, 2.0, 1, 5), 60, "clamps at hi");
     }
 
     // Extending a tail to the asset's end leaves the material bound
