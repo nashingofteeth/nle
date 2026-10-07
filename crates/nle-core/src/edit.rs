@@ -1384,6 +1384,15 @@ pub fn insert_gap(project: &Project, playhead: f64, frames: i64) -> Result<Batch
     let ti = video_track_index(project)?;
     let track = &project.timeline.tracks[ti];
 
+    // A gap ending exactly at the playhead absorbs the insert rather than
+    // spawning a second, adjacent gap (the rule `paste` already uses). This
+    // also covers a trailing gap at the track end. Ripple growth = followers
+    // shift right, which is what inserting frames means.
+    if let Some(mut batch) = extend_gap_ending_at(project, playhead, gap.duration(), true)? {
+        batch.desc = format!("insert gap at {}", stamp(project, &t));
+        return Ok(batch);
+    }
+
     // At/past the end: bridge the void (if any), then the new gap.
     if track.segments.is_empty() || t >= track.end() {
         let mut ops = Vec::new();
@@ -3128,6 +3137,36 @@ mod tests {
 
         // Zero/negative count refuses.
         assert!(matches!(insert_gap(&p, 1.0, 0), Err(EditError::TooShort)));
+    }
+
+    // `_` at a gap's far edge (or a clip head just after a gap) grows that
+    // gap instead of spawning a second, adjacent one.
+    #[test]
+    fn insert_gap_merges_into_an_adjacent_gap() {
+        // [Clip #1 [0..2)] [Gap 1 @2..3] [Clip #2 [3..5)]: `_` at C2's head.
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = insert_gap(&p, 3.0, 5).unwrap();
+        assert!(batch.desc.contains("insert gap"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        let segs = p.timeline.video_track().unwrap().segments.clone();
+        assert_eq!(segs.len(), 3, "no extra gap segment");
+        assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1) + Seconds::new(5, 30)));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5) + Seconds::new(5, 30), "followers shifted");
+        h.undo(&mut p).unwrap();
+        assert_eq!(p.timeline.video_track().unwrap().segments.len(), 3);
+
+        // Trailing gap: `_` at the track end grows it, no new segment.
+        let mut q = fixture();
+        q.timeline.video_track_mut().unwrap().segments.push(Segment::Gap(Gap {
+            duration: Seconds::from_integer(3),
+        })); // trailing [5..8)
+        let mut h = History::default();
+        let batch = insert_gap(&q, 8.0, 1).unwrap();
+        h.apply(&mut q, batch, 0).unwrap();
+        let segs = q.timeline.video_track().unwrap().segments.clone();
+        assert_eq!(segs.len(), 4, "no extra gap segment");
+        assert!(matches!(&segs[3], Segment::Gap(g) if g.duration == Seconds::from_integer(3) + Seconds::new(1, 30)));
     }
 
     #[test]
