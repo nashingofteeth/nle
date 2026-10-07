@@ -507,6 +507,12 @@ pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     }
 }
 
+/// Whether `code` completes the pending `gg` motion. Pure so the pool and
+/// normal modes share one rule — and it is testable without a live mpv.
+fn completes_gg(pending: Pending, code: KeyCode) -> bool {
+    matches!((pending, code), (Pending::G, KeyCode::Char('g')))
+}
+
 /// Media-pool panel keys: move the list (loading each asset for preview),
 /// insert/remove, and seek/play the preview.
 fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
@@ -521,6 +527,15 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         return;
     }
     let mult = app.count.take().unwrap_or(1);
+
+    // Second key of the `gg` sequence (mirrors normal mode). This must run
+    // BEFORE the match below sets the pending state, or a lone `g` would
+    // complete itself.
+    if completes_gg(app.pending, key.code) {
+        app.pending = Pending::None;
+        pool_seek_abs(app, player, 0.0);
+        return;
+    }
 
     let n = app.project.media.len();
     match key.code {
@@ -548,10 +563,9 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
     }
 
     // `gg` completes to the start of the file (mirrors normal mode).
-    if let (Pending::G, KeyCode::Char('g')) = (&app.pending, key.code) {
-        app.pending = Pending::None;
-        pool_seek_abs(app, player, 0.0);
-    } else if !matches!(key.code, KeyCode::Char('g') | KeyCode::Char('0'..='9')) {
+    // Only `g` carries a pending sequence; any other key clears it. (Digits
+    // return above, so they never reach here.)
+    if !matches!(key.code, KeyCode::Char('g')) {
         app.pending = Pending::None;
     }
 }
@@ -3541,6 +3555,14 @@ mod tests {
         let batch = edit::insert_gap(&app.project, app.playhead, 5).unwrap();
         app.history.apply(&mut app.project, batch, 0).unwrap();
         assert!(matches!(&app.project.timeline.video_track().unwrap().segments[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(2) + Seconds::new(5, 30)));
+    }
+
+    // The pool's `gg` needs both keys: a lone `g` only arms the sequence.
+    #[test]
+    fn completes_gg_needs_both_keys() {
+        assert!(completes_gg(Pending::G, KeyCode::Char('g')));
+        assert!(!completes_gg(Pending::None, KeyCode::Char('g')));
+        assert!(!completes_gg(Pending::G, KeyCode::Char('G')));
     }
 
     // Media pool: an asset used by a clip can't be removed; an unused one
