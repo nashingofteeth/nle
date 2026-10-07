@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use nle_core::{format_seconds, Seconds};
+use nle_core::{Seconds, format_seconds};
 use thiserror::Error;
 
 /// This machine's encode engines. Intel UHD 630 supports both hardware
@@ -160,7 +160,12 @@ pub fn build_args(spec: &TrimSpec) -> Result<Vec<String>, TrimError> {
             a.push("-vf".into());
             a.push("format=nv12,hwupload".into());
         }
-        a.extend(video_encode_args(spec.encoder, spec.crf, &spec.preset, &spec.bitrate));
+        a.extend(video_encode_args(
+            spec.encoder,
+            spec.crf,
+            &spec.preset,
+            &spec.bitrate,
+        ));
         a.push("-c:a".into());
         a.push("aac".into());
         a.push("-b:a".into());
@@ -236,7 +241,10 @@ mod tests {
         assert!(line.contains("format=nv12,hwupload"), "{line}");
         assert!(line.contains("-c:v h264_vaapi"), "{line}");
         // device init must appear before -i
-        assert!(line.find("-init_hw_device").unwrap() < line.find(" -i ").unwrap(), "{line}");
+        assert!(
+            line.find("-init_hw_device").unwrap() < line.find(" -i ").unwrap(),
+            "{line}"
+        );
     }
 
     #[test]

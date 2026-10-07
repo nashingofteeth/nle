@@ -12,11 +12,11 @@ pub mod time;
 pub mod timeline;
 
 pub use edit::{
-    absorb_outward, delete_clip_by_id, delete_ripple, delete_under, extend_edge, extend_gap_end,
-    paste, paste_ripple, split, trim_in, trim_in_ripple, trim_out, trim_out_ripple, Atom, Batch,
-    Change, EditError, EditOp, History,
+    Atom, Batch, Change, EditError, EditOp, History, absorb_outward, delete_clip_by_id,
+    delete_ripple, delete_under, extend_edge, extend_gap_end, paste, paste_ripple, split, trim_in,
+    trim_in_ripple, trim_out, trim_out_ripple,
 };
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use project::{Asset, Project, ProjectError, VideoSettings};
-pub use time::{format_seconds, parse_rate, parse_time, Seconds};
+pub use time::{Seconds, format_seconds, parse_rate, parse_time};
 pub use timeline::{Clip, Timeline, TimelineError, Track, TrackKind};

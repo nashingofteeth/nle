@@ -9,11 +9,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
-use ratatui::Frame;
 
 use nle_core::edit;
 use nle_core::timeline::Segment as TimelineSegment;
@@ -78,7 +78,9 @@ fn gap_under(project: &Project, t: f64) -> Option<(Seconds, Seconds)> {
         first -= 1;
     }
     let mut last = si;
-    while last + 1 < track.segments.len() && matches!(track.segments[last + 1], TimelineSegment::Gap(_)) {
+    while last + 1 < track.segments.len()
+        && matches!(track.segments[last + 1], TimelineSegment::Gap(_))
+    {
         last += 1;
     }
     let start = track.start_of(first);
@@ -320,26 +322,29 @@ impl App {
         //
         // In extend mode mpv plays the material preview, whose position 0
         // is the range start: translate back to timeline coordinates.
-        if !st.paused && st.file_loaded
-            && let Some(t) = st.time_pos {
-                if self.pool_open {
-                    // The monitor is a raw pooled file: position is asset
-                    // seconds, no EDL translation.
-                    self.pool_pos = t;
-                } else {                    let t = match &self.mode {
-                        Mode::Extend(st) => t + st.preview_off,
-                        _ => t,
-                    };
-                    let snapped = snap_to_frame(t, self.project.fps.as_ref());
-                    self.playhead = match &self.mode {
-                        // Extend mode: stay within the armed range — the
-                        // material preview can't drive the playhead past the
-                        // segment's end (or before its start).
-                        Mode::Extend(st) => clamp_extend(st, snapped),
-                        _ => snap_to_cut(snapped, &self.project),
-                    };
-                }
+        if !st.paused
+            && st.file_loaded
+            && let Some(t) = st.time_pos
+        {
+            if self.pool_open {
+                // The monitor is a raw pooled file: position is asset
+                // seconds, no EDL translation.
+                self.pool_pos = t;
+            } else {
+                let t = match &self.mode {
+                    Mode::Extend(st) => t + st.preview_off,
+                    _ => t,
+                };
+                let snapped = snap_to_frame(t, self.project.fps.as_ref());
+                self.playhead = match &self.mode {
+                    // Extend mode: stay within the armed range — the
+                    // material preview can't drive the playhead past the
+                    // segment's end (or before its start).
+                    Mode::Extend(st) => clamp_extend(st, snapped),
+                    _ => snap_to_cut(snapped, &self.project),
+                };
             }
+        }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
         self.dead = st.dead;
@@ -348,7 +353,11 @@ impl App {
         // a couple frames short of the file's probe duration.
         if self.pool_open
             && st.eof
-            && let Some(d) = self.project.media.get(self.pool_sel).and_then(|a| a.duration())
+            && let Some(d) = self
+                .project
+                .media
+                .get(self.pool_sel)
+                .and_then(|a| a.duration())
         {
             self.pool_pos = pool_last_frame(self, secs(&d));
         }
@@ -400,7 +409,9 @@ impl App {
     /// to the sequence. mpv steps its own (drifted) neighbor — close
     /// enough that the next step lands on the frame we display.
     fn step_playhead(&mut self, dir: i64) {
-        let Some(fps) = self.project.fps.as_ref() else { return };
+        let Some(fps) = self.project.fps.as_ref() else {
+            return;
+        };
         let f = secs(fps);
         let last = ((self.total() * f).ceil() as i64 - 1).max(0);
         let idx = ((self.playhead * f).round() as i64 + dir).clamp(0, last);
@@ -455,9 +466,10 @@ pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result
 
         if event::poll(Duration::from_millis(50))?
             && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press {
-                    handle_key(&mut app, &player, key);
-                }
+            && key.kind == KeyEventKind::Press
+        {
+            handle_key(&mut app, &player, key);
+        }
 
         if st.dead {
             app.exit_message = Some("mpv monitor closed — exiting".to_string());
@@ -548,7 +560,8 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         // Preview transport (asset seconds).
-        KeyCode::Char(' ') => pool_toggle_play(app, player),        KeyCode::Char('h') => pool_seek_rel(app, player, -(mult as f64)),
+        KeyCode::Char(' ') => pool_toggle_play(app, player),
+        KeyCode::Char('h') => pool_seek_rel(app, player, -(mult as f64)),
         KeyCode::Char('l') => pool_seek_rel(app, player, mult as f64),
         KeyCode::Char('H') => pool_seek_rel(app, player, -5.0 * mult as f64),
         KeyCode::Char('L') => pool_seek_rel(app, player, 5.0 * mult as f64),
@@ -566,7 +579,8 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 }
 
 /// Seek the pool preview to the selected asset's last frame.
-fn pool_seek_end(app: &mut App, player: &MpvPlayer) {    let d = app
+fn pool_seek_end(app: &mut App, player: &MpvPlayer) {
+    let d = app
         .project
         .media
         .get(app.pool_sel)
@@ -710,7 +724,6 @@ fn pool_step_target(app: &App, dir: i64) -> (f64, f64) {
     (idx as f64 / fps, fps)
 }
 
-
 /// Undo the last edit, restoring the playhead to where it was made.
 fn do_undo(app: &mut App, player: &MpvPlayer) {
     match app.history.undo(&mut app.project) {
@@ -763,7 +776,11 @@ fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
         asset_in: Seconds::from_integer(0),
         asset_out: whole,
     });
-    let _ = run_edit(app, player, edit::paste_ripple(&app.project, &snapshot, app.playhead));
+    let _ = run_edit(
+        app,
+        player,
+        edit::paste_ripple(&app.project, &snapshot, app.playhead),
+    );
 }
 
 /// Remove the selected asset from the pool, undoably (the guard refuses if
@@ -865,7 +882,8 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
             }
         }
         KeyCode::Char('h') => app.seek_rel(player, -(mult as f64)),
-        KeyCode::Char('l') => app.seek_rel(player, mult as f64),        KeyCode::Char('H') => app.seek_rel(player, -5.0 * mult as f64),
+        KeyCode::Char('l') => app.seek_rel(player, mult as f64),
+        KeyCode::Char('H') => app.seek_rel(player, -5.0 * mult as f64),
         KeyCode::Char('L') => app.seek_rel(player, 5.0 * mult as f64),
         KeyCode::Char('f') => {
             if app.guard_loaded() {
@@ -903,13 +921,43 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
         KeyCode::Char('d') => app.pending = Pending::D,
         KeyCode::Char('y') => app.pending = Pending::Y,
         // ---- editing: uniform playhead-based ops (counts don't multiply) ----
-        KeyCode::Char('i') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, false, false)); }
-        KeyCode::Char('I') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, false, true)); }
-        KeyCode::Char('o') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, true, false)); }
-        KeyCode::Char('O') => { let _ = run_edit(app, player, trim_key(&app.project, app.playhead, true, true)); }
-        KeyCode::Char('s') => { let _ = run_edit(app, player, edit::split(&app.project, app.playhead)); }
+        KeyCode::Char('i') => {
+            let _ = run_edit(
+                app,
+                player,
+                trim_key(&app.project, app.playhead, false, false),
+            );
+        }
+        KeyCode::Char('I') => {
+            let _ = run_edit(
+                app,
+                player,
+                trim_key(&app.project, app.playhead, false, true),
+            );
+        }
+        KeyCode::Char('o') => {
+            let _ = run_edit(
+                app,
+                player,
+                trim_key(&app.project, app.playhead, true, false),
+            );
+        }
+        KeyCode::Char('O') => {
+            let _ = run_edit(
+                app,
+                player,
+                trim_key(&app.project, app.playhead, true, true),
+            );
+        }
+        KeyCode::Char('s') => {
+            let _ = run_edit(app, player, edit::split(&app.project, app.playhead));
+        }
         KeyCode::Char('_') => {
-            let _ = run_edit(app, player, edit::insert_gap(&app.project, app.playhead, mult as i64));
+            let _ = run_edit(
+                app,
+                player,
+                edit::insert_gap(&app.project, app.playhead, mult as i64),
+            );
         }
         KeyCode::Char('D') => {
             edit_yank(app); // D yanks too
@@ -920,14 +968,22 @@ fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
                 app.set_message("clipboard empty — yy first");
                 return;
             };
-            run_edit(app, player, edit::paste(&app.project, &clipboard, app.playhead));
+            run_edit(
+                app,
+                player,
+                edit::paste(&app.project, &clipboard, app.playhead),
+            );
         }
         KeyCode::Char('P') => {
             let Some(clipboard) = app.clipboard.clone() else {
                 app.set_message("clipboard empty — yy first");
                 return;
             };
-            run_edit(app, player, edit::paste_ripple(&app.project, &clipboard, app.playhead));
+            run_edit(
+                app,
+                player,
+                edit::paste_ripple(&app.project, &clipboard, app.playhead),
+            );
         }
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('m') => open_pool(app, player),
@@ -1000,7 +1056,13 @@ fn resolve_armed(project: &Project, t: f64) -> Result<(Armed, f64), String> {
         if (acc - t).abs() < eps {
             match seg {
                 TimelineSegment::Clip(c) => {
-                    return Ok((Armed::Clip { id: c.id, head: true }, acc));
+                    return Ok((
+                        Armed::Clip {
+                            id: c.id,
+                            head: true,
+                        },
+                        acc,
+                    ));
                 }
                 TimelineSegment::Gap(_) => {
                     return Ok((Armed::GapHead { index: i }, acc));
@@ -1015,9 +1077,16 @@ fn resolve_armed(project: &Project, t: f64) -> Result<(Armed, f64), String> {
     for seg in &track.segments {
         acc += secs(&seg.duration());
         if let TimelineSegment::Clip(c) = seg
-            && (acc - t).abs() < eps {
-                return Ok((Armed::Clip { id: c.id, head: false }, acc));
-            }
+            && (acc - t).abs() < eps
+        {
+            return Ok((
+                Armed::Clip {
+                    id: c.id,
+                    head: false,
+                },
+                acc,
+            ));
+        }
     }
     // Pass 3: gap ends (the trailing gap at the timeline end).
     let mut acc = 0.0;
@@ -1048,9 +1117,10 @@ fn clip_span(project: &Project, id: u32) -> Option<(f64, f64)> {
     for seg in &track.segments {
         let dur = secs(&seg.duration());
         if let TimelineSegment::Clip(c) = seg
-            && c.id == id {
-                return Some((acc, acc + dur));
-            }
+            && c.id == id
+        {
+            return Some((acc, acc + dur));
+        }
         acc += dur;
     }
     None
@@ -1071,8 +1141,15 @@ struct ExtendPlan {
 
 enum ExtendPreviewSpec {
     /// Asset path + asset-relative start/length + timeline origin.
-    Clip { path: std::path::PathBuf, src_start: Seconds, length: Seconds, origin: f64 },
-    Black { origin: f64 },
+    Clip {
+        path: std::path::PathBuf,
+        src_start: Seconds,
+        length: Seconds,
+        origin: f64,
+    },
+    Black {
+        origin: f64,
+    },
 }
 
 fn plan_extend(project: &Project, playhead: f64, ripple: bool) -> Result<ExtendPlan, String> {
@@ -1085,7 +1162,10 @@ fn plan_extend(project: &Project, playhead: f64, ripple: bool) -> Result<ExtendP
 /// `plan_extend` so extend mode can re-arm to the other side of a shared
 /// cut without re-resolving from a playhead.
 fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPlan, String> {
-    let track = project.timeline.video_track().ok_or_else(|| "empty timeline".to_string())?;
+    let track = project
+        .timeline
+        .video_track()
+        .ok_or_else(|| "empty timeline".to_string())?;
 
     match armed {
         Armed::Clip { id, head } => {
@@ -1118,7 +1198,11 @@ fn plan_for_armed(project: &Project, armed: Armed, edge: f64) -> Result<ExtendPl
                 (lo, Some(e), dur_opt.map(|d| (s - ain, s + (d - ain))))
             } else {
                 // Tail material reaches forward to the asset end.
-                (s, Some(dur_opt.map(|d| e + (d - aout)).unwrap_or(e)), dur_opt.map(|d| (e - aout, e + (d - aout))))
+                (
+                    s,
+                    Some(dur_opt.map(|d| e + (d - aout)).unwrap_or(e)),
+                    dur_opt.map(|d| (e - aout, e + (d - aout))),
+                )
             };
             // Preview: the whole asset file, so every reachable position
             // shows real frames. mpv 0 maps to the timeline position of
@@ -1197,14 +1281,22 @@ fn approx(a: f64, b: f64) -> bool {
 
 /// Route a commit from the armed edge and playhead. Positions use the
 /// live track layout (unchanged while the mode is active).
-fn plan_commit(project: &Project, armed: &Armed, edge_pos: f64, ph: f64) -> Result<CommitKind, String> {
+fn plan_commit(
+    project: &Project,
+    armed: &Armed,
+    edge_pos: f64,
+    ph: f64,
+) -> Result<CommitKind, String> {
     if approx(ph, edge_pos) {
         return Ok(CommitKind::Noop);
     }
     match armed {
         Armed::Clip { id, head } => {
             let (s, e) = clip_span(project, *id).ok_or_else(|| "clip vanished".to_string())?;
-            let track = project.timeline.video_track().ok_or_else(|| "clip vanished".to_string())?;
+            let track = project
+                .timeline
+                .video_track()
+                .ok_or_else(|| "clip vanished".to_string())?;
             let si = track
                 .segments
                 .iter()
@@ -1294,7 +1386,10 @@ fn seek_clip_end(app: &mut App, player: &MpvPlayer, head: bool) {
         return;
     };
     app.seek_to(player, edge);
-    app.set_message(&format!("clip #{id} {}", if head { "start" } else { "end" }));
+    app.set_message(&format!(
+        "clip #{id} {}",
+        if head { "start" } else { "end" }
+    ));
 }
 
 /// The clip and source frame under the playhead — the media anchor an
@@ -1338,7 +1433,9 @@ fn edit_anchor(project: &Project, playhead: f64) -> Option<Anchor> {
             start: secs(&track.start_of(idx)),
             at: secs(&t),
         })),
-        TimelineSegment::Gap(_) => Some(Anchor::Gap(GapAnchor { start: secs(&track.start_of(idx)) })),
+        TimelineSegment::Gap(_) => Some(Anchor::Gap(GapAnchor {
+            start: secs(&track.start_of(idx)),
+        })),
     }
 }
 
@@ -1378,9 +1475,8 @@ fn resolve_anchor(project: &Project, id: u32, source: Seconds) -> Option<f64> {
 fn reanchor_playhead(app: &mut App, anchor: Option<Anchor>) {
     let Some(anchor) = anchor else { return };
     let pos = match anchor {
-        Anchor::Media(a) => {
-            resolve_anchor(&app.project, a.id, a.source).unwrap_or_else(|| fallback_position(&app.project, &a))
-        }
+        Anchor::Media(a) => resolve_anchor(&app.project, a.id, a.source)
+            .unwrap_or_else(|| fallback_position(&app.project, &a)),
         // A gap is only ever deleted (rippling), so land on the seam it
         // left between its neighbours.
         Anchor::Gap(g) => g.start,
@@ -1458,7 +1554,9 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
     // the exception: land on the edge we extended to (the playhead is
     // already the target), not one frame short of a fresh tail.
     let in_extend = matches!(app.mode, Mode::Extend(_));
-    let anchor = (!in_extend).then(|| edit_anchor(&app.project, app.playhead)).flatten();
+    let anchor = (!in_extend)
+        .then(|| edit_anchor(&app.project, app.playhead))
+        .flatten();
     // Undo attribution: a normal edit is made from the playhead; an extend
     // commit is made from where extend mode was entered (the armed edge),
     // so undoing it returns there rather than to the commit target.
@@ -1598,7 +1696,9 @@ fn snap_extend_target(fps: Option<&Seconds>, st: &ExtendState, t: f64) -> f64 {
 
 fn armed_desc(armed: &Armed) -> String {
     match armed {
-        Armed::Clip { id, head } => format!("{} of clip #{id}", if *head { "head" } else { "tail" }),
+        Armed::Clip { id, head } => {
+            format!("{} of clip #{id}", if *head { "head" } else { "tail" })
+        }
         Armed::GapTail { .. } => "gap end".to_string(),
         Armed::GapHead { .. } => "gap start".to_string(),
     }
@@ -1624,7 +1724,12 @@ fn enter_extend(app: &mut App, player: &MpvPlayer, ripple: bool) {
 /// the mode. Shared by entry and by swapping sides at a shared cut.
 fn apply_extend_plan(app: &mut App, player: &MpvPlayer, plan: ExtendPlan, ripple: bool) {
     let (url, origin) = match &plan.preview {
-        ExtendPreviewSpec::Clip { path, src_start, length, origin } => {
+        ExtendPreviewSpec::Clip {
+            path,
+            src_start,
+            length,
+            origin,
+        } => {
             let pv = preview::build_clip_preview(path, *src_start, *length, *origin);
             (pv.url, pv.origin)
         }
@@ -1646,7 +1751,10 @@ fn apply_extend_plan(app: &mut App, player: &MpvPlayer, plan: ExtendPlan, ripple
     };
     player.load(&url, Some((app.playhead - origin).max(0.0)));
     let flag = if ripple { " · RIPPLE" } else { "" };
-    app.set_message(&format!("extend {}{flag} — navigate, e to commit", armed_desc(&plan.armed)));
+    app.set_message(&format!(
+        "extend {}{flag} — navigate, e to commit",
+        armed_desc(&plan.armed)
+    ));
     app.mode = Mode::Extend(ExtendState {
         armed: plan.armed,
         edge_pos: plan.edge_pos,
@@ -1680,10 +1788,22 @@ fn armed_on_side(project: &Project, t: f64, side: Side) -> Option<(Armed, f64)> 
         match seg {
             TimelineSegment::Clip(c) => match side {
                 Side::Left if (end - t).abs() < eps => {
-                    return Some((Armed::Clip { id: c.id, head: false }, end));
+                    return Some((
+                        Armed::Clip {
+                            id: c.id,
+                            head: false,
+                        },
+                        end,
+                    ));
                 }
                 Side::Right if (start - t).abs() < eps => {
-                    return Some((Armed::Clip { id: c.id, head: true }, start));
+                    return Some((
+                        Armed::Clip {
+                            id: c.id,
+                            head: true,
+                        },
+                        start,
+                    ));
                 }
                 _ => {}
             },
@@ -1754,16 +1874,17 @@ fn set_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
 /// and its position. `None` when the segment is gone.
 fn flip_target(project: &Project, armed: Armed, head: bool) -> Option<(Armed, f64)> {
     match armed {
-        Armed::Clip { id, .. } => {
-            clip_span(project, id).map(|(s, e)| (Armed::Clip { id, head }, if head { s } else { e }))
+        Armed::Clip { id, .. } => clip_span(project, id)
+            .map(|(s, e)| (Armed::Clip { id, head }, if head { s } else { e })),
+        Armed::GapHead { index } | Armed::GapTail { index } => {
+            gap_span(project, index).map(|(s, e)| {
+                if head {
+                    (Armed::GapHead { index }, s)
+                } else {
+                    (Armed::GapTail { index }, e)
+                }
+            })
         }
-        Armed::GapHead { index } | Armed::GapTail { index } => gap_span(project, index).map(|(s, e)| {
-            if head {
-                (Armed::GapHead { index }, s)
-            } else {
-                (Armed::GapTail { index }, e)
-            }
-        }),
     }
 }
 
@@ -1804,7 +1925,12 @@ fn exit_extend(app: &mut App, player: &MpvPlayer, pos: f64, msg: &str) {
 
 /// Map a commit kind to its edit op. The playhead does the routing: it
 /// sits wherever navigation left it, and each op reads positionally.
-fn run_commit_action(app: &App, armed: &Armed, kind: CommitKind, ripple: bool) -> Result<Batch, EditError> {
+fn run_commit_action(
+    app: &App,
+    armed: &Armed,
+    kind: CommitKind,
+    ripple: bool,
+) -> Result<Batch, EditError> {
     commit_batch(&app.project, app.playhead, armed, kind, ripple)
 }
 
@@ -1853,9 +1979,7 @@ fn commit_batch(
                 edit::trim_in(project, ph)
             }
         }
-        CommitKind::GrowTailPastEnd => {
-            edit::extend_edge(project, id, head, ph)
-        }
+        CommitKind::GrowTailPastEnd => edit::extend_edge(project, id, head, ph),
         // Absorb: e replaces everything covered (gaps removed, clips
         // trimmed/removed); E pushes everything aside via plain extend.
         CommitKind::AbsorbTail | CommitKind::AbsorbHead => {
@@ -1933,7 +2057,11 @@ fn commit_extend(app: &mut App, player: &MpvPlayer) {
         exit_extend(app, player, st.edge_pos, "edge already there");
         return;
     }
-    if run_edit(app, player, run_commit_action(app, &st.armed, kind, st.ripple)) {
+    if run_edit(
+        app,
+        player,
+        run_commit_action(app, &st.armed, kind, st.ripple),
+    ) {
         app.mode = Mode::Normal;
     }
 }
@@ -1966,7 +2094,14 @@ fn seek_rel_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, delta: f64
 /// Frame index a frame-step from `playhead` lands on, clamped to the armed
 /// range. `lo` may be negative (head material prepended past time 0) — do
 /// not re-floor it here.
-fn extend_step_index(lo: f64, hi: Option<f64>, fps: Seconds, playhead: f64, dir: i64, mult: u32) -> i64 {
+fn extend_step_index(
+    lo: f64,
+    hi: Option<f64>,
+    fps: Seconds,
+    playhead: f64,
+    dir: i64,
+    mult: u32,
+) -> i64 {
     let f = secs(&fps);
     let lo_i = (lo * f).round() as i64;
     let hi_i = hi.map(|h| (h * f).round() as i64).unwrap_or(i64::MAX);
@@ -1979,7 +2114,9 @@ fn step_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, dir: i64, mult
     if !app.guard_loaded() {
         return;
     }
-    let Some(fps) = app.project.fps.as_ref() else { return };
+    let Some(fps) = app.project.fps.as_ref() else {
+        return;
+    };
     let idx = extend_step_index(st.lo, st.hi, *fps, app.playhead, dir, mult);
     let next = idx as f64 / secs(fps);
     if next != app.playhead {
@@ -2074,21 +2211,30 @@ fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
                 }
                 _ => return,
             };
-            app.set_message(if ripple { "extend: ripple ON" } else { "extend: preserve" });
+            app.set_message(if ripple {
+                "extend: ripple ON"
+            } else {
+                "extend: preserve"
+            });
         }
         KeyCode::Esc => cancel_extend(app, player),
         KeyCode::Char('q') => cancel_extend(app, player),
-        KeyCode::Char(':') | KeyCode::Char('r') | KeyCode::Char('u')
-        | KeyCode::Char('i') | KeyCode::Char('I') | KeyCode::Char('o') | KeyCode::Char('O')
-        | KeyCode::Char('s') | KeyCode::Char('p') | KeyCode::Char('P')
-        | KeyCode::Char('d') | KeyCode::Char('y') => extend_inert(app),
+        KeyCode::Char(':')
+        | KeyCode::Char('r')
+        | KeyCode::Char('u')
+        | KeyCode::Char('i')
+        | KeyCode::Char('I')
+        | KeyCode::Char('o')
+        | KeyCode::Char('O')
+        | KeyCode::Char('s')
+        | KeyCode::Char('p')
+        | KeyCode::Char('P')
+        | KeyCode::Char('d')
+        | KeyCode::Char('y') => extend_inert(app),
         _ => {}
     }
 
-    if !matches!(
-        code,
-        KeyCode::Char('g') | KeyCode::Char('0'..='9')
-    ) {
+    if !matches!(code, KeyCode::Char('g') | KeyCode::Char('0'..='9')) {
         app.pending = Pending::None;
     }
 }
@@ -2236,7 +2382,10 @@ fn asset_line(a: &nle_core::Asset) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| a.path.display().to_string());
-    let dur = a.duration().map(|d| format!("{}s", secs(&d))).unwrap_or_default();
+    let dur = a
+        .duration()
+        .map(|d| format!("{}s", secs(&d)))
+        .unwrap_or_default();
     format!("{name} {dur}")
 }
 
@@ -2270,7 +2419,9 @@ fn asset_metadata(a: &nle_core::Asset) -> Vec<String> {
         let kind = s.codec_type.as_deref().unwrap_or("?");
         let codec = s.codec_name.as_deref().unwrap_or("?");
         let mut line = format!("stream {} {kind}/{codec}", s.index);
-        if let Some(w) = s.width && let Some(h) = s.height {
+        if let Some(w) = s.width
+            && let Some(h) = s.height
+        {
             line += &format!(" {w}×{h}");
         }
         if let Some(r) = &s.r_frame_rate {
@@ -2346,7 +2497,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         let line = Line::from(vec![
             Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
             Span::styled(format!(" {name} · "), style),
-            Span::styled(fmt_timecode(pos, fs.as_ref()), style.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                fmt_timecode(pos, fs.as_ref()),
+                style.add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!(" / {} · ", fmt_timecode(dur, fs.as_ref())), style),
             Span::styled(format!("{icon} · POOL{count}"), style),
         ]);
@@ -2414,7 +2568,11 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     let mut cum: f64 = 0.0;
     let mut cells: Vec<(u16, String, Style)> = Vec::new();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
-        let start_x = if i == 0 { 0 } else { marker_col(cum, total, inner.width) };
+        let start_x = if i == 0 {
+            0
+        } else {
+            marker_col(cum, total, inner.width)
+        };
         cum += dur;
         let end_x = if i == parts.len() - 1 {
             inner.width
@@ -2483,27 +2641,41 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     if let Mode::Extend(st) = &app.mode {
         // In-mode white rule: only at the armed edge.
         let white_here = (app.playhead - st.edge_pos).abs() < 1e-9;
-        let color = if white_here { Color::White } else { Color::Yellow };
+        let color = if white_here {
+            Color::White
+        } else {
+            Color::Yellow
+        };
         // Material extent first (dim, underneath), then the workable span.
         if let Some((m0, m1)) = st.mat {
-            paint_run(&mut marker_cells, total, inner.width, m0, m1, '·', Style::default().fg(Color::DarkGray));
+            paint_run(
+                &mut marker_cells,
+                total,
+                inner.width,
+                m0,
+                m1,
+                '·',
+                Style::default().fg(Color::DarkGray),
+            );
         }
         let hi_edge = st.hi.unwrap_or(f64::INFINITY);
-        paint_run(&mut marker_cells, total, inner.width, st.lo, hi_edge, '─', Style::default().fg(Color::Yellow));
-        marker_cells[ph as usize] = (
-            if at_end { '▕' } else { '▏' },
-            Style::default().fg(color),
+        paint_run(
+            &mut marker_cells,
+            total,
+            inner.width,
+            st.lo,
+            hi_edge,
+            '─',
+            Style::default().fg(Color::Yellow),
         );
+        marker_cells[ph as usize] = (if at_end { '▕' } else { '▏' }, Style::default().fg(color));
     } else {
         let color = if on_boundary(&app.project, app.playhead) {
             Color::White
         } else {
             Color::Red
         };
-        marker_cells[ph as usize] = (
-            if at_end { '▕' } else { '▏' },
-            Style::default().fg(color),
-        );
+        marker_cells[ph as usize] = (if at_end { '▕' } else { '▏' }, Style::default().fg(color));
     }
     let mut marker: Vec<Span> = Vec::new();
     let mut run = String::new();
@@ -2520,13 +2692,25 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     if let Some(s) = run_style {
         marker.push(Span::styled(run, s));
     }
-    let playhead_row = Rect { y: inner.y + 1, height: 1, ..inner };
+    let playhead_row = Rect {
+        y: inner.y + 1,
+        height: 1,
+        ..inner
+    };
     f.render_widget(Paragraph::new(Line::from(marker)), playhead_row);
 }
 
 /// Paint `glyph` with `style` over the cells spanning `[a, b)` in
 /// timeline seconds (`b` may exceed the row — it clamps).
-fn paint_run(cells: &mut [(char, Style)], total: f64, width: u16, a: f64, b: f64, glyph: char, style: Style) {
+fn paint_run(
+    cells: &mut [(char, Style)],
+    total: f64,
+    width: u16,
+    a: f64,
+    b: f64,
+    glyph: char,
+    style: Style,
+) {
     if width == 0 || b <= a {
         return;
     }
@@ -2547,98 +2731,103 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
         Mode::Extend(st) => extend_status(app, st),
         _ => clip_line(app, t),
     };
-fn clip_line(app: &App, t: f64) -> String {
-    clip_under(&app.project, t)
-        .map(|c| {
-            let asset = app
-                .project
-                .asset(c.asset)
-                .map(|a| a.path.display().to_string())
-                .unwrap_or_else(|| "?".into());
-            let fps = app.project.fps.as_ref();
-            let (seg_start, seg_end) = {
-                let track = app.project.timeline.video_track().unwrap();
-                let si = track.index_at(grid_time(&app.project, t)).unwrap();
-                let s = track.start_of(si);
-                (s, s + track.segments[si].duration())
-            };
-            let clip_fps = app
-                .project
-                .asset(c.asset)
-                .and_then(|a| a.fps())
-                .map(|f| format!(" · {:.2}fps", secs(&f)))
-                .unwrap_or_default();
-            format!(
-                "clip #{}  {}   {} – {} · len {}{clip_fps}   (src {} – {})",
-                c.id,
-                asset,
-                fmt_timecode(secs(&seg_start), fps),
-                fmt_timecode(secs(&seg_end), fps),
-                fmt_timecode(secs(&c.duration()), fps),
-                fmt_timecode(secs(&c.asset_in), fps),
-                fmt_timecode(secs(&c.asset_out), fps)
-            )
-        })
-        .unwrap_or_else(|| match gap_under(&app.project, t) {
-            Some((gs, ge)) => {
+    fn clip_line(app: &App, t: f64) -> String {
+        clip_under(&app.project, t)
+            .map(|c| {
+                let asset = app
+                    .project
+                    .asset(c.asset)
+                    .map(|a| a.path.display().to_string())
+                    .unwrap_or_else(|| "?".into());
                 let fps = app.project.fps.as_ref();
+                let (seg_start, seg_end) = {
+                    let track = app.project.timeline.video_track().unwrap();
+                    let si = track.index_at(grid_time(&app.project, t)).unwrap();
+                    let s = track.start_of(si);
+                    (s, s + track.segments[si].duration())
+                };
+                let clip_fps = app
+                    .project
+                    .asset(c.asset)
+                    .and_then(|a| a.fps())
+                    .map(|f| format!(" · {:.2}fps", secs(&f)))
+                    .unwrap_or_default();
                 format!(
-                    "— gap —  {} – {} · len {}",
-                    fmt_timecode(secs(&gs), fps),
-                    fmt_timecode(secs(&ge), fps),
-                    fmt_timecode(secs(&(ge - gs)), fps)
+                    "clip #{}  {}   {} – {} · len {}{clip_fps}   (src {} – {})",
+                    c.id,
+                    asset,
+                    fmt_timecode(secs(&seg_start), fps),
+                    fmt_timecode(secs(&seg_end), fps),
+                    fmt_timecode(secs(&c.duration()), fps),
+                    fmt_timecode(secs(&c.asset_in), fps),
+                    fmt_timecode(secs(&c.asset_out), fps)
+                )
+            })
+            .unwrap_or_else(|| match gap_under(&app.project, t) {
+                Some((gs, ge)) => {
+                    let fps = app.project.fps.as_ref();
+                    format!(
+                        "— gap —  {} – {} · len {}",
+                        fmt_timecode(secs(&gs), fps),
+                        fmt_timecode(secs(&ge), fps),
+                        fmt_timecode(secs(&(ge - gs)), fps)
+                    )
+                }
+                None => "— gap —".to_string(),
+            })
+    }
+
+    /// First info line in extend mode: armed edge, committable range,
+    /// available material, and the mode keys.
+    fn extend_status(app: &App, st: &ExtendState) -> String {
+        let fps = app.project.fps.as_ref();
+        let hi = st
+            .hi
+            .map(|h| fmt_timecode(h, fps))
+            .unwrap_or_else(|| "…".to_string());
+        let range = format!("{}–{}", fmt_timecode(st.lo, fps), hi);
+        let flag = if st.ripple { " · RIPPLE" } else { "" };
+        match &st.armed {
+            Armed::Clip { id, head } => {
+                let mat = match material_remaining(app, *id, *head) {
+                    Some(s) => format!(" · material {s:.1}s left"),
+                    None => String::new(),
+                };
+                format!(
+                    "EXTEND {} of clip #{} · edge {} · range {range}{mat}{flag}",
+                    if *head { "head" } else { "tail" },
+                    id,
+                    fmt_timecode(st.edge_pos, fps),
                 )
             }
-            None => "— gap —".to_string(),
-        })
-}
-
-/// First info line in extend mode: armed edge, committable range,
-/// available material, and the mode keys.
-fn extend_status(app: &App, st: &ExtendState) -> String {
-    let fps = app.project.fps.as_ref();
-    let hi = st.hi.map(|h| fmt_timecode(h, fps)).unwrap_or_else(|| "…".to_string());
-    let range = format!("{}–{}", fmt_timecode(st.lo, fps), hi);
-    let flag = if st.ripple { " · RIPPLE" } else { "" };
-    match &st.armed {
-        Armed::Clip { id, head } => {
-            let mat = match material_remaining(app, *id, *head) {
-                Some(s) => format!(" · material {s:.1}s left"),
-                None => String::new(),
-            };
-            format!(
-                "EXTEND {} of clip #{} · edge {} · range {range}{mat}{flag}",
-                if *head { "head" } else { "tail" },
-                id,
-                fmt_timecode(st.edge_pos, fps),
-            )
+            Armed::GapTail { .. } => format!("EXTEND gap end · range {range} · free growth{flag}"),
+            Armed::GapHead { .. } => {
+                format!("EXTEND gap start · range {range} · overwrites left{flag}")
+            }
         }
-        Armed::GapTail { .. } => format!(
-            "EXTEND gap end · range {range} · free growth{flag}"
-        ),
-        Armed::GapHead { .. } => format!(
-            "EXTEND gap start · range {range} · overwrites left{flag}"
-        ),
     }
-}
 
-/// Source seconds still unused on the extend side of a clip edge:
-/// before the in-point (head) or past the out-point (tail). `None`
-/// when the asset duration is unknown.
-fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
-    let track = app.project.timeline.video_track()?;
-    let clip = track.segments.iter().filter_map(|seg| match seg {
-        TimelineSegment::Clip(c) if c.id == id => Some(c),
-        _ => None,
-    }).next()?;
-    let asset = app.project.asset(clip.asset)?;
-    let dur = asset.duration()?;
-    Some(if head {
-        secs(&clip.asset_in)
-    } else {
-        (secs(&dur) - secs(&clip.asset_out)).max(0.0)
-    })
-}
+    /// Source seconds still unused on the extend side of a clip edge:
+    /// before the in-point (head) or past the out-point (tail). `None`
+    /// when the asset duration is unknown.
+    fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
+        let track = app.project.timeline.video_track()?;
+        let clip = track
+            .segments
+            .iter()
+            .filter_map(|seg| match seg {
+                TimelineSegment::Clip(c) if c.id == id => Some(c),
+                _ => None,
+            })
+            .next()?;
+        let asset = app.project.asset(clip.asset)?;
+        let dur = asset.duration()?;
+        Some(if head {
+            secs(&clip.asset_in)
+        } else {
+            (secs(&dur) - secs(&clip.asset_out)).max(0.0)
+        })
+    }
 
     let stats = format!(
         "{} clip(s) · {} · {} fps · undo depth {}",
@@ -2755,7 +2944,9 @@ mod tests {
                         asset_in: Seconds::from_integer(1),
                         asset_out: Seconds::from_integer(4),
                     }),
-                    TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+                    TimelineSegment::Gap(TimelineGap {
+                        duration: Seconds::from_integer(2),
+                    }),
                     TimelineSegment::Clip(nle_core::Clip {
                         id: 2,
                         asset: a,
@@ -2772,32 +2963,59 @@ mod tests {
     fn resolve_armed_matrix() {
         let p = asset_project();
         // Clip starts win (head-of-right at shared cuts).
-        assert_eq!(resolve_armed(&p, 0.0), Ok((Armed::Clip { id: 1, head: true }, 0.0)));
-        assert_eq!(resolve_armed(&p, 5.0), Ok((Armed::Clip { id: 2, head: true }, 5.0)));
+        assert_eq!(
+            resolve_armed(&p, 0.0),
+            Ok((Armed::Clip { id: 1, head: true }, 0.0))
+        );
+        assert_eq!(
+            resolve_armed(&p, 5.0),
+            Ok((Armed::Clip { id: 2, head: true }, 5.0))
+        );
         // Clip ends (gap starts resolve to the clip tail).
         // Clip end with a gap on the right: `e` arms the gap's head (the
         // edge at the cut), so it can be grown left over the clip.
-        assert_eq!(resolve_armed(&p, 3.0), Ok((Armed::GapHead { index: 1 }, 3.0)));
-        assert_eq!(resolve_armed(&p, 7.0), Ok((Armed::Clip { id: 2, head: false }, 7.0)));
+        assert_eq!(
+            resolve_armed(&p, 3.0),
+            Ok((Armed::GapHead { index: 1 }, 3.0))
+        );
+        assert_eq!(
+            resolve_armed(&p, 7.0),
+            Ok((Armed::Clip { id: 2, head: false }, 7.0))
+        );
         // Mid-segment positions refuse.
         assert!(resolve_armed(&p, 1.5).is_err());
         assert!(resolve_armed(&p, 4.0).is_err());
         // Shared clip|clip cut arms the right head.
         let mut q = asset_project();
         q.timeline.video_track_mut().unwrap().segments.remove(1);
-        assert_eq!(resolve_armed(&q, 3.0), Ok((Armed::Clip { id: 2, head: true }, 3.0)));
+        assert_eq!(
+            resolve_armed(&q, 3.0),
+            Ok((Armed::Clip { id: 2, head: true }, 3.0))
+        );
         // Virtual edges with gaps.
         let mut r = asset_project();
-        r.timeline.video_track_mut().unwrap().segments.push(
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
+        r.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(3),
+            }));
+        assert_eq!(
+            resolve_armed(&r, 10.0),
+            Ok((Armed::GapTail { index: 3 }, 10.0))
         );
-        assert_eq!(resolve_armed(&r, 10.0), Ok((Armed::GapTail { index: 3 }, 10.0)));
         let mut s = asset_project();
         s.timeline.video_track_mut().unwrap().segments.insert(
             0,
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
         );
-        assert_eq!(resolve_armed(&s, 0.0), Ok((Armed::GapHead { index: 0 }, 0.0)));
+        assert_eq!(
+            resolve_armed(&s, 0.0),
+            Ok((Armed::GapHead { index: 0 }, 0.0))
+        );
         // Empty timeline refuses.
         assert!(resolve_armed(&Project::new(), 0.0).is_err());
     }
@@ -2814,7 +3032,12 @@ mod tests {
         assert_eq!((plan.lo, plan.hi), (0.0, Some(9.0)));
         assert_eq!(plan.mat, Some((-1.0, 9.0)));
         match plan.preview {
-            ExtendPreviewSpec::Clip { src_start, length, origin, .. } => {
+            ExtendPreviewSpec::Clip {
+                src_start,
+                length,
+                origin,
+                ..
+            } => {
                 assert_eq!(src_start, Seconds::from_integer(0));
                 assert_eq!(length, Seconds::from_integer(10));
                 assert_eq!(origin, -1.0);
@@ -2845,7 +3068,12 @@ mod tests {
         assert_eq!((plan.lo, plan.hi), (0.0, Some(3.0)));
         assert_eq!(plan.mat, None);
         match plan.preview {
-            ExtendPreviewSpec::Clip { src_start, length, origin, .. } => {
+            ExtendPreviewSpec::Clip {
+                src_start,
+                length,
+                origin,
+                ..
+            } => {
                 assert_eq!(src_start, Seconds::from_integer(1));
                 assert_eq!(length, Seconds::from_integer(3));
                 assert_eq!(origin, 0.0);
@@ -2861,8 +3089,15 @@ mod tests {
         let p = asset_project(); // C1 [0..3) src 1..4 of a 10s asset
         let head1 = Armed::Clip { id: 1, head: true };
         let plan = plan_for_armed(&p, head1, 0.0).unwrap();
-        assert_eq!((plan.lo, plan.hi), (-1.0, Some(3.0)), "one second of head room below zero");
-        assert_eq!(plan_commit(&p, &head1, 0.0, -1.0), Ok(CommitKind::AbsorbHead));
+        assert_eq!(
+            (plan.lo, plan.hi),
+            (-1.0, Some(3.0)),
+            "one second of head room below zero"
+        );
+        assert_eq!(
+            plan_commit(&p, &head1, 0.0, -1.0),
+            Ok(CommitKind::AbsorbHead)
+        );
 
         for ripple in [false, true] {
             let mut app = App::new(asset_project(), PathBuf::from("t.json"));
@@ -2873,15 +3108,19 @@ mod tests {
             let c1 = clip_by_id(&app.project, 1);
             assert_eq!(c1.asset_in, Seconds::from_integer(0), "head material used");
             assert_eq!(c1.duration(), Seconds::from_integer(4));
-            assert_eq!(app.project.timeline.end(), Seconds::from_integer(8), "grew at the front");
+            assert_eq!(
+                app.project.timeline.end(),
+                Seconds::from_integer(8),
+                "grew at the front"
+            );
         }
     }
 
     // Rendering must survive a negative playhead (head extend past 0).
     #[test]
     fn extend_head_below_zero_renders() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let p = asset_project();
         let plan = plan_for_armed(&p, Armed::Clip { id: 1, head: true }, 0.0).unwrap();
         let mut app = App::new(p, PathBuf::from("t.json"));
@@ -2896,7 +3135,19 @@ mod tests {
             preview_off: -1.0, // edge 0 at source 1
         });
         let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
-        term.draw(|f| render_timeline(f, Rect { x: 0, y: 0, width: 60, height: 4 }, &app)).unwrap();
+        term.draw(|f| {
+            render_timeline(
+                f,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 60,
+                    height: 4,
+                },
+                &app,
+            )
+        })
+        .unwrap();
     }
 
     // A gap has no material, so its head extends without bound — including
@@ -2907,7 +3158,9 @@ mod tests {
         let mut p = asset_project();
         p.timeline.video_track_mut().unwrap().segments.insert(
             0,
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
         );
         let head0 = Armed::GapHead { index: 0 };
         let plan = plan_for_armed(&p, head0, 0.0).unwrap();
@@ -2922,20 +3175,28 @@ mod tests {
             let mut h = History::default();
             h.apply(&mut app.project, batch, 0).unwrap();
             let segs = app.project.timeline.video_track().unwrap().segments.clone();
-            assert!(matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(3)));
-            assert_eq!(app.project.timeline.end(), Seconds::from_integer(10), "grew at the front");
+            assert!(
+                matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(3))
+            );
+            assert_eq!(
+                app.project.timeline.end(),
+                Seconds::from_integer(10),
+                "grew at the front"
+            );
         }
     }
 
     // Rendering must survive a gap head armed below 0 (unbounded lo).
     #[test]
     fn gap_head_below_zero_renders() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let mut p = asset_project();
         p.timeline.video_track_mut().unwrap().segments.insert(
             0,
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
         );
         let plan = plan_for_armed(&p, Armed::GapHead { index: 0 }, 0.0).unwrap();
         let mut app = App::new(p, PathBuf::from("t.json"));
@@ -2950,15 +3211,31 @@ mod tests {
             preview_off: 0.0,
         });
         let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
-        term.draw(|f| render_timeline(f, Rect { x: 0, y: 0, width: 60, height: 4 }, &app)).unwrap();
+        term.draw(|f| {
+            render_timeline(
+                f,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 60,
+                    height: 4,
+                },
+                &app,
+            )
+        })
+        .unwrap();
     }
 
     #[test]
     fn plan_extend_virtual_edges() {
         let mut p = asset_project();
-        p.timeline.video_track_mut().unwrap().segments.push(
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
-        );
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(3),
+            }));
         let plan = plan_extend(&p, 10.0, false).unwrap();
         assert_eq!(plan.armed, Armed::GapTail { index: 3 });
         assert_eq!(plan.lo, 7.0);
@@ -2969,7 +3246,9 @@ mod tests {
         let mut s = asset_project();
         s.timeline.video_track_mut().unwrap().segments.insert(
             0,
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
         );
         let plan = plan_extend(&s, 0.0, false).unwrap();
         assert_eq!(plan.armed, Armed::GapHead { index: 0 });
@@ -2991,7 +3270,10 @@ mod tests {
         assert_eq!(clamp_extend(&st, 5.0), 7.0);
         assert_eq!(clamp_extend(&st, 8.0), 8.0);
         assert_eq!(clamp_extend(&st, 99.0), 9.0);
-        let open = ExtendState { hi: None, ..st.clone() };
+        let open = ExtendState {
+            hi: None,
+            ..st.clone()
+        };
         assert_eq!(clamp_extend(&open, 1e9), 1e9);
     }
 
@@ -3009,8 +3291,16 @@ mod tests {
             mat: None,
             preview_off: -1.0,
         };
-        assert_eq!(snap_extend_target(Some(&fps), &st, 99.0), 3.0, "blocked at the end");
-        assert_eq!(snap_extend_target(Some(&fps), &st, -99.0), -1.0, "blocked at the start");
+        assert_eq!(
+            snap_extend_target(Some(&fps), &st, 99.0),
+            3.0,
+            "blocked at the end"
+        );
+        assert_eq!(
+            snap_extend_target(Some(&fps), &st, -99.0),
+            -1.0,
+            "blocked at the start"
+        );
         assert_eq!(snap_extend_target(Some(&fps), &st, 1.0), 1.0);
     }
 
@@ -3021,13 +3311,21 @@ mod tests {
     fn extend_step_reaches_a_negative_head_range() {
         let fps = Seconds::new(30, 1);
         assert_eq!(extend_step_index(-1.0, Some(3.0), fps, 0.0, -1, 1), -1);
-        assert_eq!(extend_step_index(-1.0, Some(3.0), fps, -1.0, -1, 1), -30, "clamps at lo");
+        assert_eq!(
+            extend_step_index(-1.0, Some(3.0), fps, -1.0, -1, 1),
+            -30,
+            "clamps at lo"
+        );
         assert_eq!(
             extend_step_index(f64::NEG_INFINITY, Some(2.0), fps, 0.0, -1, 1),
             -1,
             "unbounded gap head"
         );
-        assert_eq!(extend_step_index(0.0, Some(2.0), fps, 2.0, 1, 5), 60, "clamps at hi");
+        assert_eq!(
+            extend_step_index(0.0, Some(2.0), fps, 2.0, 1, 5),
+            60,
+            "clamps at hi"
+        );
     }
 
     // Extending a tail to the asset's end leaves the material bound
@@ -3103,20 +3401,29 @@ mod tests {
             Some((Armed::Clip { id: 2, head: false }, target)),
             "] finds the clip ending at the new cut"
         );
-        assert!(!on_boundary(&app.project, hi), "the raw off-grid bound is not a cut");
+        assert!(
+            !on_boundary(&app.project, hi),
+            "the raw off-grid bound is not a cut"
+        );
     }
 
     #[test]
     fn plan_commit_routing_table() {
         let p = asset_project(); // C1 [0..3), gap [3..5), C2 [5..7)
         let tail1 = Armed::Clip { id: 1, head: false };
-        assert_eq!(plan_commit(&p, &tail1, 3.0, 4.0), Ok(CommitKind::GrowTailIntoGap));
+        assert_eq!(
+            plan_commit(&p, &tail1, 3.0, 4.0),
+            Ok(CommitKind::GrowTailIntoGap)
+        );
         assert_eq!(plan_commit(&p, &tail1, 3.0, 1.0), Ok(CommitKind::TrimTail));
         assert_eq!(plan_commit(&p, &tail1, 3.0, 0.0), Ok(CommitKind::Delete));
         assert_eq!(plan_commit(&p, &tail1, 3.0, 3.0), Ok(CommitKind::Noop));
         let head2 = Armed::Clip { id: 2, head: true };
         assert_eq!(plan_commit(&p, &head2, 5.0, 6.0), Ok(CommitKind::TrimHead));
-        assert_eq!(plan_commit(&p, &head2, 5.0, 4.0), Ok(CommitKind::GrowHeadIntoGap));
+        assert_eq!(
+            plan_commit(&p, &head2, 5.0, 4.0),
+            Ok(CommitKind::GrowHeadIntoGap)
+        );
         assert_eq!(plan_commit(&p, &head2, 5.0, 7.0), Ok(CommitKind::Delete));
         assert_eq!(plan_commit(&p, &head2, 5.0, 5.0), Ok(CommitKind::Noop));
         // Routing is flag-independent (ripple splits at run time).
@@ -3128,11 +3435,20 @@ mod tests {
         let mut q = asset_project();
         q.timeline.video_track_mut().unwrap().segments.truncate(1);
         let tail = Armed::Clip { id: 1, head: false };
-        assert_eq!(plan_commit(&q, &tail, 3.0, 4.0), Ok(CommitKind::GrowTailPastEnd));
+        assert_eq!(
+            plan_commit(&q, &tail, 3.0, 4.0),
+            Ok(CommitKind::GrowTailPastEnd)
+        );
         // Beyond the adjacent gap: absorb (both flags route here; run
         // splits e-replace vs E-push).
-        assert_eq!(plan_commit(&p, &tail1, 3.0, 6.0), Ok(CommitKind::AbsorbTail));
-        assert_eq!(plan_commit(&p, &head2, 5.0, 1.0), Ok(CommitKind::AbsorbHead));
+        assert_eq!(
+            plan_commit(&p, &tail1, 3.0, 6.0),
+            Ok(CommitKind::AbsorbTail)
+        );
+        assert_eq!(
+            plan_commit(&p, &head2, 5.0, 1.0),
+            Ok(CommitKind::AbsorbHead)
+        );
         // Directly into the next clip: absorb as well.
         let mut s = asset_project();
         s.timeline.video_track_mut().unwrap().segments.remove(1);
@@ -3140,12 +3456,25 @@ mod tests {
         assert_eq!(plan_commit(&s, &tail, 3.0, 4.0), Ok(CommitKind::AbsorbTail));
         // Virtual edges.
         let mut r = asset_project();
-        r.timeline.video_track_mut().unwrap().segments.push(
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
+        r.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(3),
+            }));
+        assert_eq!(
+            plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 8.0),
+            Ok(CommitKind::GapTail)
         );
-        assert_eq!(plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 8.0), Ok(CommitKind::GapTail));
-        assert_eq!(plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 12.0), Ok(CommitKind::GapTail));
-        assert_eq!(plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 10.0), Ok(CommitKind::Noop));
+        assert_eq!(
+            plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 12.0),
+            Ok(CommitKind::GapTail)
+        );
+        assert_eq!(
+            plan_commit(&r, &Armed::GapTail { index: 3 }, 10.0, 10.0),
+            Ok(CommitKind::Noop)
+        );
     }
 
     #[test]
@@ -3190,7 +3519,13 @@ mod tests {
         });
         // Commit with the playhead moved to 6.0, via the run_edit path.
         app.playhead = 6.0;
-        let batch = run_commit_action(&app, &Armed::Clip { id: 1, head: false }, CommitKind::AbsorbTail, false).unwrap();
+        let batch = run_commit_action(
+            &app,
+            &Armed::Clip { id: 1, head: false },
+            CommitKind::AbsorbTail,
+            false,
+        )
+        .unwrap();
         // Mirror run_edit's attribution: extend uses the entry edge.
         let from = match &app.mode {
             Mode::Extend(st) => st.edge_pos,
@@ -3210,7 +3545,10 @@ mod tests {
     // end (the edge we extended to), for both ripple and absorb.
     #[test]
     fn tail_extend_commit_lands_on_the_new_end() {
-        for (kind, ripple) in [(CommitKind::AbsorbTail, false), (CommitKind::AbsorbTail, true)] {
+        for (kind, ripple) in [
+            (CommitKind::AbsorbTail, false),
+            (CommitKind::AbsorbTail, true),
+        ] {
             let mut app = App::new(asset_project(), PathBuf::from("t.json"));
             app.playhead = 6.0; // extend C1's tail [0..3) out to 6.0
             app.mode = Mode::Extend(ExtendState {
@@ -3223,7 +3561,8 @@ mod tests {
                 preview_off: -1.0,
             });
             let target = app.playhead;
-            let batch = run_commit_action(&app, &Armed::Clip { id: 1, head: false }, kind, ripple).unwrap();
+            let batch =
+                run_commit_action(&app, &Armed::Clip { id: 1, head: false }, kind, ripple).unwrap();
             // Mirror run_edit's extend attribution (the armed edge).
             let frame = frame_of(app.project.fps.as_ref(), 3.0);
             app.history.apply(&mut app.project, batch, frame).unwrap();
@@ -3232,7 +3571,10 @@ mod tests {
                 let si = track.clip_index(1).unwrap();
                 secs(&(track.start_of(si) + track.segments[si].duration()))
             };
-            assert_eq!(end, target, "clip end == committed target (ripple={ripple})");
+            assert_eq!(
+                end, target,
+                "clip end == committed target (ripple={ripple})"
+            );
         }
     }
 
@@ -3253,8 +3595,14 @@ mod tests {
             Some((Armed::GapHead { index: 1 }, 3.0))
         );
         // `e` defaults to the gap's head at a clip|gap cut.
-        assert_eq!(resolve_armed(&p, 3.0), Ok((Armed::GapHead { index: 1 }, 3.0)));
-        assert_eq!(resolve_armed(&p, 5.0), Ok((Armed::Clip { id: 2, head: true }, 5.0)));
+        assert_eq!(
+            resolve_armed(&p, 3.0),
+            Ok((Armed::GapHead { index: 1 }, 3.0))
+        );
+        assert_eq!(
+            resolve_armed(&p, 5.0),
+            Ok((Armed::Clip { id: 2, head: true }, 5.0))
+        );
 
         let plan = plan_for_armed(&p, Armed::GapTail { index: 1 }, 5.0).unwrap();
         assert_eq!((plan.lo, plan.hi), (3.0, None), "unbounded");
@@ -3291,33 +3639,69 @@ mod tests {
         // Committing that delete ripples the gap shut.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 3.0;
-        let batch = run_commit_action(&app, &Armed::GapTail { index: 1 }, CommitKind::Delete, false).unwrap();
+        let batch = run_commit_action(
+            &app,
+            &Armed::GapTail { index: 1 },
+            CommitKind::Delete,
+            false,
+        )
+        .unwrap();
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
-        assert_eq!(app.project.timeline.end(), Seconds::from_integer(5), "gap removed, length shrank");
-        assert_eq!(app.project.timeline.video_track().unwrap().segments.len(), 2);
+        assert_eq!(
+            app.project.timeline.end(),
+            Seconds::from_integer(5),
+            "gap removed, length shrank"
+        );
+        assert_eq!(
+            app.project.timeline.video_track().unwrap().segments.len(),
+            2
+        );
 
         // Head grow to 1.0: clip #1's tail is trimmed, the gap grows left.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 1.0;
-        let batch = run_commit_action(&app, &Armed::GapHead { index: 1 }, CommitKind::GapHead, false).unwrap();
+        let batch = run_commit_action(
+            &app,
+            &Armed::GapHead { index: 1 },
+            CommitKind::GapHead,
+            false,
+        )
+        .unwrap();
         assert!(batch.desc.contains("trimmed clip #1"), "{}", batch.desc);
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
         assert!(matches!(&segs[0], TimelineSegment::Clip(c) if c.id == 1));
-        assert_eq!(clip_by_id(&app.project, 1).duration(), Seconds::from_integer(1));
-        assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
-        assert_eq!(app.project.timeline.end(), Seconds::from_integer(7), "length held");
+        assert_eq!(
+            clip_by_id(&app.project, 1).duration(),
+            Seconds::from_integer(1)
+        );
+        assert!(
+            matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4))
+        );
+        assert_eq!(
+            app.project.timeline.end(),
+            Seconds::from_integer(7),
+            "length held"
+        );
 
         // Head grow to 0.0 consumes clip #1 entirely.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 0.0;
-        let batch = run_commit_action(&app, &Armed::GapHead { index: 1 }, CommitKind::GapHead, false).unwrap();
+        let batch = run_commit_action(
+            &app,
+            &Armed::GapHead { index: 1 },
+            CommitKind::GapHead,
+            false,
+        )
+        .unwrap();
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
-        assert!(matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(5)));
+        assert!(
+            matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(5))
+        );
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(7));
 
         // E (ripple): grow the gap tail to 7 — clip #2 slides right.
@@ -3328,9 +3712,14 @@ mod tests {
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
-        assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
+        assert!(
+            matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4))
+        );
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(9));
-        assert_eq!(clip_by_id(&app.project, 2).duration(), Seconds::from_integer(2));
+        assert_eq!(
+            clip_by_id(&app.project, 2).duration(),
+            Seconds::from_integer(2)
+        );
 
         // e (replace): grow to 7 overwrites clip #2 entirely; length held.
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
@@ -3340,8 +3729,14 @@ mod tests {
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
-        assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
-        assert_eq!(app.project.timeline.end(), Seconds::from_integer(7), "length held");
+        assert!(
+            matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4))
+        );
+        assert_eq!(
+            app.project.timeline.end(),
+            Seconds::from_integer(7),
+            "length held"
+        );
         assert_eq!(segs.len(), 2, "clip #2 replaced by gap");
 
         // Shrink it to 4: clip #2 slides left (either flag).
@@ -3351,9 +3746,14 @@ mod tests {
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
-        assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert!(
+            matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(1))
+        );
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
-        assert_eq!(clip_by_id(&app.project, 2).duration(), Seconds::from_integer(2));
+        assert_eq!(
+            clip_by_id(&app.project, 2).duration(),
+            Seconds::from_integer(2)
+        );
     }
 
     // The status projects the post-commit timeline length.
@@ -3409,7 +3809,9 @@ mod tests {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 4.0; // inside the [3..5) gap
         edit_yank(&mut app);
-        assert!(matches!(&app.clipboard, Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(2)));
+        assert!(
+            matches!(&app.clipboard, Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(2))
+        );
         app.playhead = 1.0; // inside clip #1
         edit_yank(&mut app);
         assert!(matches!(&app.clipboard, Some(TimelineSegment::Clip(c)) if c.id == 1));
@@ -3530,7 +3932,10 @@ mod tests {
         // Over a gap clip_anchor is None, but edit_anchor is not.
         let app = App::new(asset_project(), PathBuf::from("t.json"));
         assert_eq!(clip_anchor(&app.project, 4.0), None);
-        assert!(matches!(edit_anchor(&app.project, 4.0), Some(Anchor::Gap(_))));
+        assert!(matches!(
+            edit_anchor(&app.project, 4.0),
+            Some(Anchor::Gap(_))
+        ));
     }
 
     // Undo restores the playhead to the frame the edit was made from.
@@ -3541,7 +3946,9 @@ mod tests {
         app.playhead = 1.0;
         let at_frame = frame_of(fps.as_ref(), app.playhead);
         let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
-        app.history.apply(&mut app.project, batch, at_frame).unwrap();
+        app.history
+            .apply(&mut app.project, batch, at_frame)
+            .unwrap();
         // move away, as the user would after editing
         app.playhead = 6.0;
         let outcome = app.history.undo(&mut app.project).unwrap();
@@ -3557,7 +3964,9 @@ mod tests {
         app.playhead = 4.0;
         let batch = edit::insert_gap(&app.project, app.playhead, 5).unwrap();
         app.history.apply(&mut app.project, batch, 0).unwrap();
-        assert!(matches!(&app.project.timeline.video_track().unwrap().segments[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(2) + Seconds::new(5, 30)));
+        assert!(
+            matches!(&app.project.timeline.video_track().unwrap().segments[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(2) + Seconds::new(5, 30))
+        );
     }
 
     // The pool's `gg` needs both keys: a lone `g` only arms the sequence.
@@ -3585,7 +3994,11 @@ mod tests {
                     r_frame_rate: Some("30/1".into()),
                     ..Default::default()
                 }],
-                format: RawFormat { format_name: "mp4".into(), duration: Some("5".into()), ..Default::default() },
+                format: RawFormat {
+                    format_name: "mp4".into(),
+                    duration: Some("5".into()),
+                    ..Default::default()
+                },
             },
         );
         // Insert the spare as a clip (core path), then it's in use.
@@ -3605,7 +4018,10 @@ mod tests {
         assert!(p.remove_asset(spare).is_err(), "in use → refused");
 
         // An unused import removes cleanly.
-        let (free, _) = p.add_asset("/media/free.mp4".into(), p.asset(spare).unwrap().probe.clone());
+        let (free, _) = p.add_asset(
+            "/media/free.mp4".into(),
+            p.asset(spare).unwrap().probe.clone(),
+        );
         assert!(free != spare);
         assert!(p.remove_asset(free).is_ok());
     }
@@ -3628,19 +4044,29 @@ mod tests {
         let batch = edit::paste_ripple(&app.project, &snapshot, app.playhead).unwrap();
         let frame = frame_of(app.project.fps.as_ref(), 0.0);
         app.history.apply(&mut app.project, batch, frame).unwrap();
-        assert!(app.project.timeline.end() > end_before, "insert grew the timeline");
+        assert!(
+            app.project.timeline.end() > end_before,
+            "insert grew the timeline"
+        );
 
         let outcome = app.history.undo(&mut app.project).unwrap();
-        assert_eq!(app.project.timeline.end(), end_before, "undo removed the insert");
-        assert_eq!(frame_to_secs(app.project.fps.as_ref(), outcome.playhead), 0.0);
+        assert_eq!(
+            app.project.timeline.end(),
+            end_before,
+            "undo removed the insert"
+        );
+        assert_eq!(
+            frame_to_secs(app.project.fps.as_ref(), outcome.playhead),
+            0.0
+        );
     }
 
     // Clip-edge dividers on the track row land on the same columns as the
     // cut positions the marker row/playhead use (one quantizer).
     #[test]
     fn clip_edges_align_with_cut_positions() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         // Four equal clips on the shared asset → cuts at 3,6,9,12.
         let mut p = asset_project();
         p.timeline.video_track_mut().unwrap().segments = (1..=4)
@@ -3656,9 +4082,26 @@ mod tests {
         let app = App::new(p, PathBuf::from("t.json"));
         let width = 80u16;
         let mut term = Terminal::new(TestBackend::new(width, 4)).unwrap();
-        term.draw(|f| render_timeline(f, Rect { x: 0, y: 0, width, height: 4 }, &app)).unwrap();
+        term.draw(|f| {
+            render_timeline(
+                f,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height: 4,
+                },
+                &app,
+            )
+        })
+        .unwrap();
         let buf = term.backend().buffer().clone();
-        let inner = Block::bordered().inner(Rect { x: 0, y: 0, width, height: 4 });
+        let inner = Block::bordered().inner(Rect {
+            x: 0,
+            y: 0,
+            width,
+            height: 4,
+        });
 
         // Every drawn divider is a `▏` glyph at a clip boundary; collect
         // its column (buffer x, offset by the border) and compare to the
@@ -3668,7 +4111,10 @@ mod tests {
             .collect();
         for cut in [3.0, 6.0, 9.0] {
             let want = inner.x + marker_col(cut, 12.0, inner.width);
-            assert!(divider_cols.contains(&want), "divider at cut {cut} → col {want}, got {divider_cols:?}");
+            assert!(
+                divider_cols.contains(&want),
+                "divider at cut {cut} → col {want}, got {divider_cols:?}"
+            );
         }
     }
 
@@ -3678,22 +4124,42 @@ mod tests {
     fn pool_insert_uses_whole_frames() {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        p.add_asset("/media/blue.mp4".into(), RawProbe {
-            streams: vec![RawStream {
-                index: 0, codec_type: Some("video".into()), codec_name: Some("h264".into()),
-                width: Some(320), height: Some(240), r_frame_rate: Some("30/1".into()),
-                ..Default::default()
-            }],
-            format: RawFormat { format_name: "mp4".into(), duration: Some("6.006".into()), ..Default::default() },
-        });
+        p.add_asset(
+            "/media/blue.mp4".into(),
+            RawProbe {
+                streams: vec![RawStream {
+                    index: 0,
+                    codec_type: Some("video".into()),
+                    codec_name: Some("h264".into()),
+                    width: Some(320),
+                    height: Some(240),
+                    r_frame_rate: Some("30/1".into()),
+                    ..Default::default()
+                }],
+                format: RawFormat {
+                    format_name: "mp4".into(),
+                    duration: Some("6.006".into()),
+                    ..Default::default()
+                },
+            },
+        );
         let mut app = App::new(p, PathBuf::from("t.json"));
         // Mirror insert_from_pool's whole-frame math.
         let d = app.project.media[0].duration().unwrap();
         let fps = app.project.fps.unwrap();
         let frames = (secs(&d) * secs(&fps)).floor().max(1.0) as i64;
         let whole = Seconds::new(frames, 1) / fps;
-        assert_eq!(whole, Seconds::new(180, 30), "6.006 floored to 180 frames (6.0 s)");
-        let snapshot = TimelineSegment::Clip(Clip { id: 0, asset: 1, asset_in: Seconds::from_integer(0), asset_out: whole });
+        assert_eq!(
+            whole,
+            Seconds::new(180, 30),
+            "6.006 floored to 180 frames (6.0 s)"
+        );
+        let snapshot = TimelineSegment::Clip(Clip {
+            id: 0,
+            asset: 1,
+            asset_in: Seconds::from_integer(0),
+            asset_out: whole,
+        });
         let batch = edit::paste_ripple(&app.project, &snapshot, 0.0).unwrap();
         app.history.apply(&mut app.project, batch, 0).unwrap();
         // No zero-length or sub-frame segment created.
@@ -3753,8 +4219,8 @@ mod tests {
     // The pool renders list + metadata without panicking.
     #[test]
     fn media_pool_renders() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let mut p = asset_project();
         // A second asset so list index (1) differs from asset id (2).
         p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
@@ -3765,38 +4231,53 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
         term.draw(|f| render(f, &app)).unwrap();
         let buf = term.backend().buffer().clone();
-        let text: String = (0..20).map(|y| (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        let text: String = (0..20)
+            .map(|y| {
+                (0..60)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(text.contains("media pool"), "{text}");
         assert!(text.contains("red.mp4"), "{text}");
 
         // The highlighted (cyan-bg) POOL row must hold the SECOND asset
         // (blue), not the first — index-based, not id-based. Find the pool
         // block by its title row first.
-        let title_y = (0..20u16).find(|&y| {
-            let row: String = (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect();
-            row.contains("media pool")
-        }).expect("pool title present");
-        let cyan_pool_row = (title_y..20u16).find(|&y| {
-            (0..60).any(|x| buf[(x, y)].bg == Color::Cyan)
-        });
+        let title_y = (0..20u16)
+            .find(|&y| {
+                let row: String = (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                row.contains("media pool")
+            })
+            .expect("pool title present");
+        let cyan_pool_row =
+            (title_y..20u16).find(|&y| (0..60).any(|x| buf[(x, y)].bg == Color::Cyan));
         let row: String = cyan_pool_row
             .map(|y| (0..60).map(|x| buf[(x, y)].symbol().to_string()).collect())
             .unwrap_or_default();
-        assert!(row.contains("blue.mp4"), "highlight on the selected row: {row:?}");
+        assert!(
+            row.contains("blue.mp4"),
+            "highlight on the selected row: {row:?}"
+        );
         assert!(!row.contains("red.mp4"), "not the first row: {row:?}");
     }
 
     // The bottom panels: a keys cheat-sheet and a dedicated notice panel.
     #[test]
     fn hints_and_notice_panels_render() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let render_text = |app: &App| {
             let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
             term.draw(|f| render(f, app)).unwrap();
             let buf = term.backend().buffer().clone();
             (0..24)
-                .map(|y| (0..80).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -3853,7 +4334,10 @@ mod tests {
         let batch = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, false).unwrap();
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
-        assert_eq!(clip_by_id(&app.project, 1).asset_out, Seconds::from_integer(6));
+        assert_eq!(
+            clip_by_id(&app.project, 1).asset_out,
+            Seconds::from_integer(6)
+        );
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(7));
         assert_eq!(
             app.project.timeline.video_track().unwrap().segments.len(),
@@ -3870,7 +4354,9 @@ mod tests {
         let mut p = asset_project();
         {
             let segs = &mut p.timeline.video_track_mut().unwrap().segments;
-            segs[1] = TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(1) });
+            segs[1] = TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(1),
+            });
             segs[2] = TimelineSegment::Clip(nle_core::Clip {
                 id: 2,
                 asset: 1,
@@ -3880,15 +4366,24 @@ mod tests {
         }
         let (head2, edge) = resolve_armed(&p, 4.0).unwrap();
         assert_eq!(head2, Armed::Clip { id: 2, head: true });
-        assert_eq!(plan_commit(&p, &head2, edge, 3.0), Ok(CommitKind::AbsorbHead));
+        assert_eq!(
+            plan_commit(&p, &head2, edge, 3.0),
+            Ok(CommitKind::AbsorbHead)
+        );
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.playhead = 3.0;
         let batch = run_commit_action(&app, &head2, CommitKind::AbsorbHead, false).unwrap();
         let mut h = History::default();
         h.apply(&mut app.project, batch, 0).unwrap();
-        assert_eq!(clip_by_id(&app.project, 2).asset_in, Seconds::from_integer(0));
+        assert_eq!(
+            clip_by_id(&app.project, 2).asset_in,
+            Seconds::from_integer(0)
+        );
         assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
-        assert_eq!(app.project.timeline.video_track().unwrap().segments.len(), 2);
+        assert_eq!(
+            app.project.timeline.video_track().unwrap().segments.len(),
+            2
+        );
     }
 
     // `[` / `]` pick the clip on the left (ends at the cut) or right
@@ -3983,7 +4478,9 @@ mod tests {
         let mut s = asset_project();
         s.timeline.video_track_mut().unwrap().segments.insert(
             0,
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
         );
         assert_eq!(
             flip_target(&s, Armed::GapHead { index: 0 }, false),
@@ -4059,7 +4556,9 @@ mod tests {
                 kind: TrackKind::Video,
                 segments: vec![
                     seg_clip(1, 3),
-                    TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(2) }),
+                    TimelineSegment::Gap(TimelineGap {
+                        duration: Seconds::from_integer(2),
+                    }),
                     seg_clip(2, 2),
                 ],
             }],
@@ -4247,8 +4746,8 @@ mod tests {
     // span, and the playhead.
     #[test]
     fn extend_overlays_the_timeline() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
 
         let p = asset_project(); // C1 [0..3) src1..4, gap [3..5), C2 [5..7) src0..2
         let plan = plan_for_armed(&p, Armed::Clip { id: 1, head: false }, 3.0).unwrap();
@@ -4268,7 +4767,12 @@ mod tests {
         });
 
         let mut term = Terminal::new(TestBackend::new(60, 4)).unwrap();
-        let area = Rect { x: 0, y: 0, width: 60, height: 4 };
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 60,
+            height: 4,
+        };
         term.draw(|f| render_timeline(f, area, &app)).unwrap();
         let buf = term.backend().buffer().clone();
         let sym = |x: u16, y: u16| -> (String, Color, Color) {
@@ -4293,6 +4797,10 @@ mod tests {
         let (s, f, _) = sym(9, 2);
         assert_eq!((s.as_str(), f), ("▏", Color::Yellow), "playhead");
         let (s, f, _) = sym(58, 2);
-        assert_eq!((s.as_str(), f), ("─", Color::Yellow), "span reaches the far end");
+        assert_eq!(
+            (s.as_str(), f),
+            ("─", Color::Yellow),
+            "span reaches the far end"
+        );
     }
 }

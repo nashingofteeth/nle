@@ -16,12 +16,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nle_core::{format_seconds, Project, Seconds};
 use nle_core::timeline::Segment;
+use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::trim::{device_args, run_ffmpeg, video_encode_args, Encoder, FfmpegError};
+use crate::trim::{Encoder, FfmpegError, device_args, run_ffmpeg, video_encode_args};
 
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_LAYOUT: &str = "stereo";
@@ -125,7 +125,12 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
     let mut graph = String::new();
     for (i, piece) in pieces.iter().enumerate() {
         match piece {
-            Piece::Clip { input, src_start, dur, has_audio } => {
+            Piece::Clip {
+                input,
+                src_start,
+                dur,
+                has_audio,
+            } => {
                 graph.push_str(&format!(
                     "[{input}:v]trim=start={src_start}:duration={dur},setpts=PTS-STARTPTS,\
                      scale={w}:{h},setsar=1,fps={fps_s},format=yuv420p[v{i}];\n"
@@ -231,7 +236,12 @@ pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, Export
     args.push(format!("[{vmap}]"));
     args.push("-map".into());
     args.push("[aout]".into());
-    args.extend(video_encode_args(spec.encoder, spec.crf, &spec.preset, &spec.bitrate));
+    args.extend(video_encode_args(
+        spec.encoder,
+        spec.crf,
+        &spec.preset,
+        &spec.bitrate,
+    ));
     args.push("-c:a".into());
     args.push("aac".into());
     args.push("-b:a".into());
@@ -254,9 +264,9 @@ fn secs_f64(t: &Seconds) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
     use nle_core::timeline::{Clip, Gap};
-    use nle_core::VideoSettings;
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -293,14 +303,32 @@ mod tests {
     fn project_with_two_clips() -> Project {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        p.video = Some(VideoSettings { width: 1920, height: 1080 });
+        p.video = Some(VideoSettings {
+            width: 1920,
+            height: 1080,
+        });
         let (a0, _) = p.add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
-        let (a1, _) = p.add_asset("b.mp4".into(), probe_report("8", 1280, 720, "30000/1001", false));
+        let (a1, _) = p.add_asset(
+            "b.mp4".into(),
+            probe_report("8", 1280, 720, "30000/1001", false),
+        );
         let track = p.timeline.video_track_mut().unwrap();
         track.segments = vec![
-            Segment::Clip(Clip { id: 1, asset: a0, asset_in: Seconds::from_integer(0), asset_out: Seconds::from_integer(10) }),
-            Segment::Gap(Gap { duration: Seconds::from_integer(2) }),
-            Segment::Clip(Clip { id: 2, asset: a1, asset_in: Seconds::from_integer(2), asset_out: Seconds::from_integer(5) }),
+            Segment::Clip(Clip {
+                id: 1,
+                asset: a0,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(10),
+            }),
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(2),
+            }),
+            Segment::Clip(Clip {
+                id: 2,
+                asset: a1,
+                asset_in: Seconds::from_integer(2),
+                asset_out: Seconds::from_integer(5),
+            }),
         ];
         p
     }
@@ -311,7 +339,10 @@ mod tests {
         let plan = compile_export(&p).unwrap();
 
         // inputs: deduped, first-use order
-        assert_eq!(plan.inputs, vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")]);
+        assert_eq!(
+            plan.inputs,
+            vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")]
+        );
         assert_eq!(plan.width, 1920);
         assert_eq!(plan.height, 1080);
 
@@ -323,7 +354,10 @@ mod tests {
         assert!(g.contains("color=c=black:s=1920x1080:r=30/1:d=2"), "{g}");
         // clip 2: src 2–5 from input 1; b.mp4 has no audio → anullsrc
         assert!(g.contains("[1:v]trim=start=2:duration=3,"), "{g}");
-        assert!(g.contains("anullsrc=r=48000:cl=stereo,atrim=duration=3"), "{g}");
+        assert!(
+            g.contains("anullsrc=r=48000:cl=stereo,atrim=duration=3"),
+            "{g}"
+        );
         // concat of 3 segments, video then audio
         assert!(g.contains("[v0][v1][v2]concat=n=3:v=1:a=0[vout]"), "{g}");
         assert!(g.contains("[a0][a1][a2]concat=n=3:v=0:a=1[aout]"), "{g}");
@@ -336,11 +370,19 @@ mod tests {
     #[test]
     fn trailing_gap_segment_fills_the_export() {
         let mut p = project_with_two_clips();
-        p.timeline.video_track_mut().unwrap().segments.push(Segment::Gap(Gap {
-            duration: Seconds::from_integer(5),
-        }));
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(Segment::Gap(Gap {
+                duration: Seconds::from_integer(5),
+            }));
         let plan = compile_export(&p).unwrap();
-        assert!(plan.graph.contains("color=c=black:s=1920x1080:r=30/1:d=5"), "{}", plan.graph);
+        assert!(
+            plan.graph.contains("color=c=black:s=1920x1080:r=30/1:d=5"),
+            "{}",
+            plan.graph
+        );
         assert_eq!(plan.frames, 600);
         assert_eq!(plan.duration, Seconds::from_integer(20));
     }
@@ -358,7 +400,10 @@ mod tests {
         assert!(g.contains("[vout]format=nv12,hwupload[venc]"), "{g}");
 
         let (g, _) = apply_encoder_tail("[vout]\n".into(), Encoder::Qsv);
-        assert!(g.contains("[vout]format=nv12,hwupload=extra_hw_frames=64[venc]"), "{g}");
+        assert!(
+            g.contains("[vout]format=nv12,hwupload=extra_hw_frames=64[venc]"),
+            "{g}"
+        );
 
         let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::Cpu);
         assert_eq!(vmap, "vout");

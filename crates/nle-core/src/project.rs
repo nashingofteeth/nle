@@ -12,7 +12,7 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::media::RawProbe;
-use crate::time::{rational_ser, Seconds};
+use crate::time::{Seconds, rational_ser};
 use crate::timeline::{Segment, Timeline, TimelineError};
 
 /// Project file format version. No migration path is kept (see
@@ -110,7 +110,7 @@ impl Project {
         let text = match fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(ProjectError::NotFound(path.to_path_buf()))
+                return Err(ProjectError::NotFound(path.to_path_buf()));
             }
             Err(e) => return Err(e.into()),
         };
@@ -143,9 +143,13 @@ impl Project {
         for track in &self.timeline.tracks {
             for seg in &track.segments {
                 if let Segment::Clip(clip) = seg
-                    && !self.media.iter().any(|a| a.id == clip.asset) {
-                        return Err(ProjectError::Asset(clip.asset, "not in the media pool".into()));
-                    }
+                    && !self.media.iter().any(|a| a.id == clip.asset)
+                {
+                    return Err(ProjectError::Asset(
+                        clip.asset,
+                        "not in the media pool".into(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -221,11 +225,11 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Clip;
     use crate::edit::{self, History};
     use crate::media::{RawFormat, RawStream};
     use crate::time::Seconds;
     use crate::timeline::Segment;
-    use crate::Clip;
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -262,19 +266,32 @@ mod tests {
     fn sample_project() -> Project {
         let mut p = Project::new();
         let (a0, _) = p.add_asset("a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
-        let (a1, _) = p.add_asset("b.mp4".into(), probe_report("8", 1280, 720, "30000/1001", false));
+        let (a1, _) = p.add_asset(
+            "b.mp4".into(),
+            probe_report("8", 1280, 720, "30000/1001", false),
+        );
         // [0..2) a.mp4 src 0..2 · [2..5) b.mp4 src 2..5
         let mut h = History::default();
         let batch = edit::paste_ripple(
             &p,
-            &Segment::Clip(Clip { id: 0, asset: a0, asset_in: Seconds::from_integer(0), asset_out: Seconds::from_integer(2) }),
+            &Segment::Clip(Clip {
+                id: 0,
+                asset: a0,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+            }),
             0.0,
         )
         .unwrap();
         h.apply(&mut p, batch, 0).unwrap();
         let batch = edit::paste_ripple(
             &p,
-            &Segment::Clip(Clip { id: 0, asset: a1, asset_in: Seconds::from_integer(2), asset_out: Seconds::from_integer(5) }),
+            &Segment::Clip(Clip {
+                id: 0,
+                asset: a1,
+                asset_in: Seconds::from_integer(2),
+                asset_out: Seconds::from_integer(5),
+            }),
             2.0,
         )
         .unwrap();
@@ -286,8 +303,14 @@ mod tests {
     #[test]
     fn asset_dedup_by_path() {
         let mut p = Project::new();
-        let (id1, added1) = p.add_asset("/x/a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
-        let (id2, added2) = p.add_asset("/x/a.mp4".into(), probe_report("10", 1920, 1080, "30/1", true));
+        let (id1, added1) = p.add_asset(
+            "/x/a.mp4".into(),
+            probe_report("10", 1920, 1080, "30/1", true),
+        );
+        let (id2, added2) = p.add_asset(
+            "/x/a.mp4".into(),
+            probe_report("10", 1920, 1080, "30/1", true),
+        );
         assert!(added1 && !added2);
         assert_eq!(id1, id2);
         assert_eq!(p.media.len(), 1);
@@ -299,10 +322,15 @@ mod tests {
         assert_eq!(p.asset_usage(1), vec![1]);
         assert_eq!(p.asset_usage(2), vec![2]);
         // In use: refuses, naming the clips.
-        assert!(matches!(p.remove_asset(1), Err(ProjectError::AssetInUse(1, ref v)) if v == &vec![1]));
+        assert!(
+            matches!(p.remove_asset(1), Err(ProjectError::AssetInUse(1, ref v)) if v == &vec![1])
+        );
         assert_eq!(p.media.len(), 2);
         // Unused: an imported-but-unplaced asset removes cleanly.
-        let (id, _) = p.add_asset("/x/spare.mp4".into(), probe_report("5", 320, 240, "30/1", false));
+        let (id, _) = p.add_asset(
+            "/x/spare.mp4".into(),
+            probe_report("5", 320, 240, "30/1", false),
+        );
         assert!(p.asset_usage(id).is_empty());
         assert!(p.remove_asset(id).is_ok());
         assert!(p.remove_asset(id).is_err(), "already gone");
@@ -311,10 +339,17 @@ mod tests {
     #[test]
     fn clip_ids_are_fresh_across_inserts() {
         let p = sample_project();
-        let ids: Vec<u32> = p.timeline.video_track().unwrap().segments.iter().filter_map(|s| match s {
-            Segment::Clip(c) => Some(c.id),
-            Segment::Gap(_) => None,
-        }).collect();
+        let ids: Vec<u32> = p
+            .timeline
+            .video_track()
+            .unwrap()
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Clip(c) => Some(c.id),
+                Segment::Gap(_) => None,
+            })
+            .collect();
         assert_eq!(ids, vec![1, 2]);
     }
 
@@ -352,7 +387,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.json");
         std::fs::write(&path, "{\"version\": 1}").unwrap();
-        assert!(matches!(Project::load(&path), Err(ProjectError::Version(1))));
+        assert!(matches!(
+            Project::load(&path),
+            Err(ProjectError::Version(1))
+        ));
     }
 
     #[test]

@@ -10,18 +10,24 @@ mod tui;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use nle_core::edit;
 use nle_core::timeline::{Clip, Segment};
-use nle_core::{format_seconds, parse_rate, parse_time, Asset, Project, Seconds, VideoSettings};
-use nle_ffmpeg::{probe, Encoder, ExportSpec, RawProbe, RawStream, TrimSpec};
+use nle_core::{Asset, Project, Seconds, VideoSettings, format_seconds, parse_rate, parse_time};
+use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
 
 #[derive(Parser)]
 #[command(name = "nle", version, about = "Terminal-native video editor")]
 struct Cli {
     /// Project file
-    #[arg(short, long, global = true, default_value = "nle.json", value_name = "FILE")]
+    #[arg(
+        short,
+        long,
+        global = true,
+        default_value = "nle.json",
+        value_name = "FILE"
+    )]
     project: PathBuf,
 
     #[command(subcommand)]
@@ -173,15 +179,35 @@ fn main() -> Result<()> {
         Cmd::Edl {} => cmd_edl(&cli.project),
         Cmd::Init { force } => cmd_init(&cli.project, force),
         Cmd::Import { files } => cmd_import(&cli.project, &files),
-        Cmd::Add { file, at, in_point, out_point } => {
-            cmd_add(&cli.project, &file, at.as_deref(), in_point.as_deref(), out_point.as_deref())
-        }
+        Cmd::Add {
+            file,
+            at,
+            in_point,
+            out_point,
+        } => cmd_add(
+            &cli.project,
+            &file,
+            at.as_deref(),
+            in_point.as_deref(),
+            out_point.as_deref(),
+        ),
         Cmd::Remove { id } => cmd_remove(&cli.project, id),
         Cmd::Show { json } => cmd_show(&cli.project, json),
         Cmd::Media { action } => cmd_media(&cli.project, action),
-        Cmd::Export { output, encoder, crf, preset, bitrate } => {
-            cmd_export(&cli.project, &output, encoder.into(), crf, &preset, &bitrate)
-        }
+        Cmd::Export {
+            output,
+            encoder,
+            crf,
+            preset,
+            bitrate,
+        } => cmd_export(
+            &cli.project,
+            &output,
+            encoder.into(),
+            crf,
+            &preset,
+            &bitrate,
+        ),
         Cmd::Probe { file, json } => cmd_probe(&file, json),
         Cmd::Trim {
             input,
@@ -245,7 +271,10 @@ fn cmd_edl(project_path: &Path) -> Result<()> {
 
 fn cmd_init(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
-        bail!("{} already exists (use --force to overwrite)", path.display());
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            path.display()
+        );
     }
     save_and_reset_history(&Project::new(), path)?;
     println!("✓ created {}", path.display());
@@ -275,13 +304,22 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
         }
         let (id, _) = project.add_asset(canonical, report);
         let asset = project.asset(id).context("asset vanished")?;
-        println!("✓ asset #{id}  {}  {}", file.display(), asset_summary(asset));
+        println!(
+            "✓ asset #{id}  {}  {}",
+            file.display(),
+            asset_summary(asset)
+        );
     }
     save_and_reset_history(&project, project_path)?;
     let clip_count = |p: &Project| {
         p.timeline
             .video_track()
-            .map(|t| t.segments.iter().filter(|s| matches!(s, Segment::Clip(_))).count())
+            .map(|t| {
+                t.segments
+                    .iter()
+                    .filter(|s| matches!(s, Segment::Clip(_)))
+                    .count()
+            })
             .unwrap_or(0)
     };
     println!(
@@ -332,8 +370,7 @@ fn cmd_add(
     };
 
     // Validate the source range against the asset.
-    
-    
+
     let asset = project
         .asset(asset_id)
         .context("asset vanished after import")?;
@@ -341,9 +378,10 @@ fn cmd_add(
         bail!("--in must be before --out");
     }
     if let Some(d) = asset.duration()
-        && out_t > d {
-            bail!("--out {out_point:?} is beyond the asset's duration {d}");
-        }
+        && out_t > d
+    {
+        bail!("--out {out_point:?} is beyond the asset's duration {d}");
+    }
     // The first clip defines the sequence settings (like a real NLE).
     let asset_fps = asset.fps();
     let asset_size = asset.video_size();
@@ -351,7 +389,10 @@ fn cmd_add(
         project.fps = asset_fps;
     }
     if project.video.is_none() {
-        project.video = asset_size.map(|(w, h)| VideoSettings { width: w, height: h });
+        project.video = asset_size.map(|(w, h)| VideoSettings {
+            width: w,
+            height: h,
+        });
     }
 
     // Ripple paste: inserts at --at (splits clips/gaps) or appends.
@@ -457,7 +498,11 @@ fn cmd_media(project_path: &Path, action: MediaCmd) -> Result<()> {
                 println!("media pool is empty — `nle import <file>`");
                 return Ok(());
             }
-            println!("{} — {} asset(s)", project_path.display(), project.media.len());
+            println!(
+                "{} — {} asset(s)",
+                project_path.display(),
+                project.media.len()
+            );
             for a in &project.media {
                 let used = project.asset_usage(a.id);
                 let usage = if used.is_empty() {
@@ -526,7 +571,11 @@ fn asset_summary(a: &Asset) -> String {
     if let Some(fps) = a.fps() {
         s += &format!(" @ {}/{}", fps.numer(), fps.denom());
     }
-    s += if a.probe.has_audio() { " · audio ✓" } else { " · no audio" };
+    s += if a.probe.has_audio() {
+        " · audio ✓"
+    } else {
+        " · no audio"
+    };
     s
 }
 
@@ -588,7 +637,11 @@ fn video_desc(s: &RawStream) -> String {
     }
     if let Some(rate) = s.r_frame_rate.as_deref().and_then(parse_rate) {
         let decimal = *rate.numer() as f64 / *rate.denom() as f64;
-        bits.push(format!("{}/{} fps ({decimal:.2})", rate.numer(), rate.denom()));
+        bits.push(format!(
+            "{}/{} fps ({decimal:.2})",
+            rate.numer(),
+            rate.denom()
+        ));
     }
     if let Some(p) = &s.pix_fmt {
         bits.push(p.clone());
@@ -648,7 +701,8 @@ fn cmd_trim(
     bitrate: &str,
 ) -> Result<()> {
     let start = parse_time(in_point).with_context(|| format!("invalid --in time: {in_point:?}"))?;
-    let end = parse_time(out_point).with_context(|| format!("invalid --out time: {out_point:?}"))?;
+    let end =
+        parse_time(out_point).with_context(|| format!("invalid --out time: {out_point:?}"))?;
     let duration = end - start;
     if duration <= Seconds::from_integer(0) {
         bail!("--out ({out_point}) must be later than --in ({in_point})");

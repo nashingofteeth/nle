@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nle_core::timeline::Segment as TimelineSegment;
-use nle_core::{format_seconds, Project, Seconds};
+use nle_core::{Project, Seconds, format_seconds};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -78,9 +78,7 @@ pub fn segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
                     length: c.duration(),
                 });
             }
-            TimelineSegment::Gap(g) => segs.push(Segment::Gap {
-                length: g.duration,
-            }),
+            TimelineSegment::Gap(g) => segs.push(Segment::Gap { length: g.duration }),
         }
     }
     Ok(segs)
@@ -98,7 +96,11 @@ pub fn assemble_edl(segments: &[Segment], black: Option<&Path>) -> Result<String
     let mut entries = Vec::new();
     for seg in segments {
         match seg {
-            Segment::Clip { path, start, length } => entries.push(format!(
+            Segment::Clip {
+                path,
+                start,
+                length,
+            } => entries.push(format!(
                 "{},{}",
                 edl_quote(&path.display().to_string()),
                 fmt_entry(*start, *length)
@@ -144,7 +146,11 @@ pub fn build_clip_preview(
     origin: f64,
 ) -> ExtendPreview {
     ExtendPreview {
-        url: format!("edl://{},{}", edl_quote(&path.display().to_string()), fmt_entry(src_start, length)),
+        url: format!(
+            "edl://{},{}",
+            edl_quote(&path.display().to_string()),
+            fmt_entry(src_start, length)
+        ),
         origin,
     }
 }
@@ -203,7 +209,11 @@ pub fn black_cache_dir() -> PathBuf {
 /// geometry and return its path. EDL entries reference it in chunks of at
 /// most that length, so one file per WxH+fps serves all projects on this
 /// machine.
-pub fn ensure_black_file(width: u32, height: u32, fps: &Seconds) -> Result<PathBuf, std::io::Error> {
+pub fn ensure_black_file(
+    width: u32,
+    height: u32,
+    fps: &Seconds,
+) -> Result<PathBuf, std::io::Error> {
     let dir = black_cache_dir();
     fs::create_dir_all(&dir)?;
     let name = format!("{width}x{height}_{}_{}.mp4", fps.numer(), fps.denom());
@@ -219,20 +229,40 @@ pub fn ensure_black_file(width: u32, height: u32, fps: &Seconds) -> Result<PathB
     let len_s = BLACK_FILE_SECS.to_string();
     let status = Command::new("ffmpeg")
         .args([
-            "-v", "error", "-y",
-            "-f", "lavfi", "-i", &format!("color=c=black:s={width}x{height}:r={fps_s}"),
-            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-            "-t", &len_s,
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "40",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "32k",
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("color=c=black:s={width}x{height}:r={fps_s}"),
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-t",
+            &len_s,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "40",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "32k",
         ])
         .arg("--")
         .arg(&tmp)
         .status()?;
     if !status.success() {
         let _ = fs::remove_file(&tmp);
-        return Err(std::io::Error::other("ffmpeg failed to generate the black gap file"));
+        return Err(std::io::Error::other(
+            "ffmpeg failed to generate the black gap file",
+        ));
     }
     fs::rename(&tmp, &path)?;
     Ok(path)
@@ -241,9 +271,11 @@ pub fn ensure_black_file(width: u32, height: u32, fps: &Seconds) -> Result<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nle_core::media::{RawFormat, RawProbe, RawStream};
-    use nle_core::timeline::{Clip as TimelineClip, Gap as TimelineGap, Segment as TimelineSegment};
     use nle_core::VideoSettings;
+    use nle_core::media::{RawFormat, RawProbe, RawStream};
+    use nle_core::timeline::{
+        Clip as TimelineClip, Gap as TimelineGap, Segment as TimelineSegment,
+    };
 
     fn seg_clip(id: u32, ain: i64, aout: i64) -> TimelineSegment {
         TimelineSegment::Clip(TimelineClip {
@@ -257,12 +289,17 @@ mod tests {
     fn project_with_gap() -> Project {
         let mut p = Project::new();
         p.fps = Some(Seconds::new(30, 1));
-        p.video = Some(VideoSettings { width: 320, height: 240 });
+        p.video = Some(VideoSettings {
+            width: 320,
+            height: 240,
+        });
         let (_a, _) = p.add_asset("/media/red.mp4".into(), probe_report("5"));
         p.timeline.video_track_mut().unwrap().segments = vec![
-            seg_clip(1, 1, 3),   // [0..2) src 1..3
-            TimelineSegment::Gap(TimelineGap { duration: Seconds::from_integer(3) }),
-            seg_clip(2, 0, 3),   // [5..8) src 0..3
+            seg_clip(1, 1, 3), // [0..2) src 1..3
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(3),
+            }),
+            seg_clip(2, 0, 3), // [5..8) src 0..3
         ];
         p
     }
@@ -298,7 +335,9 @@ mod tests {
                     start: Seconds::from_integer(1),
                     length: Seconds::from_integer(2),
                 },
-                Segment::Gap { length: Seconds::from_integer(3) },
+                Segment::Gap {
+                    length: Seconds::from_integer(3)
+                },
                 Segment::Clip {
                     path: "/media/red.mp4".into(),
                     start: Seconds::from_integer(0),
@@ -322,7 +361,9 @@ mod tests {
                 start: Seconds::from_integer(1),
                 length: Seconds::from_integer(2),
             },
-            Segment::Gap { length: Seconds::new(3, 2) },
+            Segment::Gap {
+                length: Seconds::new(3, 2),
+            },
         ];
         let edl = assemble_edl(&segs, Some(Path::new("/cache/black.mp4"))).unwrap();
         // third field is LENGTH: red src [1..3), then 1.5s of black
@@ -331,20 +372,29 @@ mod tests {
 
     #[test]
     fn gap_without_black_file_is_an_error() {
-        let segs = vec![Segment::Gap { length: Seconds::from_integer(1) }];
-        assert!(matches!(assemble_edl(&segs, None), Err(PreviewError::NoSize)));
+        let segs = vec![Segment::Gap {
+            length: Seconds::from_integer(1),
+        }];
+        assert!(matches!(
+            assemble_edl(&segs, None),
+            Err(PreviewError::NoSize)
+        ));
     }
 
     #[test]
     fn long_gaps_split_into_black_file_chunks() {
-        let segs = vec![Segment::Gap { length: Seconds::from_integer(25) }];
+        let segs = vec![Segment::Gap {
+            length: Seconds::from_integer(25),
+        }];
         let edl = assemble_edl(&segs, Some(Path::new("/cache/black.mp4"))).unwrap();
         assert_eq!(
             edl,
             "%16%/cache/black.mp4,0,10;%16%/cache/black.mp4,0,10;%16%/cache/black.mp4,0,5"
         );
         // exactly one black file long stays a single entry
-        let segs = vec![Segment::Gap { length: Seconds::from_integer(BLACK_FILE_SECS) }];
+        let segs = vec![Segment::Gap {
+            length: Seconds::from_integer(BLACK_FILE_SECS),
+        }];
         let edl = assemble_edl(&segs, Some(Path::new("/cache/black.mp4"))).unwrap();
         assert_eq!(edl, "%16%/cache/black.mp4,0,10");
     }
@@ -370,7 +420,10 @@ mod tests {
             build_black_preview(&bare, 5.0, Seconds::from_integer(25)),
             Err(PreviewError::NoSize)
         ));
-        bare.video = Some(VideoSettings { width: 320, height: 240 });
+        bare.video = Some(VideoSettings {
+            width: 320,
+            height: 240,
+        });
         assert!(matches!(
             build_black_preview(&bare, 5.0, Seconds::from_integer(25)),
             Err(PreviewError::NoFps)

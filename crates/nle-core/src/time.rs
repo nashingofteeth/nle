@@ -104,9 +104,9 @@ pub fn parse_rate(s: &str) -> Option<Seconds> {
 /// Serde glue: Seconds ↔ "numerator/denominator" strings ("25/2").
 /// The project file stays human-readable AND exact — no floats anywhere.
 pub mod rational_ser {
-    use serde::{de, Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de};
 
-    use super::{parse_rate, Seconds};
+    use super::{Seconds, parse_rate};
 
     pub fn serialize<S: Serializer>(v: &Seconds, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(&format_args!("{}/{}", v.numer(), v.denom()))
@@ -119,9 +119,9 @@ pub mod rational_ser {
 
     /// Option<Seconds> variant for fields that may be absent.
     pub mod opt {
-        use serde::{de, Deserialize, Deserializer, Serializer};
+        use serde::{Deserialize, Deserializer, Serializer, de};
 
-        use super::{parse_rate, Seconds};
+        use super::{Seconds, parse_rate};
 
         pub fn serialize<S: Serializer>(v: &Option<Seconds>, s: S) -> Result<S::Ok, S::Error> {
             match v {

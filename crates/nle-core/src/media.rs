@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::time::{parse_rate, parse_time, Seconds};
+use crate::time::{Seconds, parse_rate, parse_time};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RawProbe {
@@ -80,7 +80,10 @@ impl RawProbe {
 
     /// Container duration in exact seconds.
     pub fn duration(&self) -> Option<Seconds> {
-        self.format.duration.as_deref().and_then(|d| parse_time(d).ok())
+        self.format
+            .duration
+            .as_deref()
+            .and_then(|d| parse_time(d).ok())
     }
 
     /// Frame rate of the first video stream.

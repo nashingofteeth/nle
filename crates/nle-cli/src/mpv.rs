@@ -67,10 +67,10 @@ impl MpvPlayer {
         let mut child = Command::new("mpv")
             .args([
                 "--no-terminal",
-                "--idle=yes",           // stay alive before/after files
-                "--keep-open=always",   // at EOF: pause at the end, don't quit
-                "--pause",              // start paused at 0
-                "--hr-seek=yes",        // every seek is frame-exact
+                "--idle=yes",         // stay alive before/after files
+                "--keep-open=always", // at EOF: pause at the end, don't quit
+                "--pause",            // start paused at 0
+                "--hr-seek=yes",      // every seek is frame-exact
                 // EDL segment switches hiccup the audio chain; mpv's default
                 // framedrop then SKIPS video frames to resync. Holding the
                 // last frame reads far better than losing frames.
@@ -129,14 +129,22 @@ impl MpvPlayer {
 
     /// Subscribe to the properties the TUI cares about.
     pub fn observe(&self) -> Result<(), MpvError> {
-        for (id, name) in [(1, "time-pos"), (2, "pause"), (3, "duration"), (4, "eof-reached")] {
+        for (id, name) in [
+            (1, "time-pos"),
+            (2, "pause"),
+            (3, "duration"),
+            (4, "eof-reached"),
+        ] {
             self.send(serde_json::json!(["observe_property", id, name]))?;
         }
         Ok(())
     }
 
     fn send(&self, command: serde_json::Value) -> Result<(), MpvError> {
-        let mut writer = self.writer.lock().map_err(|e| MpvError::Ipc(e.to_string()))?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| MpvError::Ipc(e.to_string()))?;
         writeln!(writer, "{}", serde_json::json!({ "command": command }))
             .map_err(|e| MpvError::Ipc(e.to_string()))
     }
@@ -147,13 +155,7 @@ impl MpvPlayer {
     /// the playhead reliably.
     pub fn load(&self, url: &str, start: Option<f64>) {
         let cmd = match start {
-            Some(t) => serde_json::json!([
-                "loadfile",
-                url,
-                "replace",
-                0,
-                format!("start={t:.6}")
-            ]),
+            Some(t) => serde_json::json!(["loadfile", url, "replace", 0, format!("start={t:.6}")]),
             None => serde_json::json!(["loadfile", url, "replace", 0]),
         };
         let _ = self.send(cmd);
@@ -190,7 +192,11 @@ impl MpvPlayer {
 
     /// Update what MPRIS / the OSC report as the media title.
     pub fn set_media_title(&self, title: &str) {
-        let _ = self.send(serde_json::json!(["set_property", "force-media-title", title]));
+        let _ = self.send(serde_json::json!([
+            "set_property",
+            "force-media-title",
+            title
+        ]));
     }
 
     /// Ask mpv to exit cleanly.
@@ -226,7 +232,9 @@ impl Drop for MpvPlayer {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum IpcMessage {
-    Response { error: String },
+    Response {
+        error: String,
+    },
     Event {
         event: String,
         #[serde(default)]
@@ -261,15 +269,23 @@ fn read_loop(stream: UnixStream, state: Arc<Mutex<PlaybackState>>) {
                             st.last_error = Some(error);
                         }
                     }
-                    IpcMessage::Event { event, name, data, reason } => match event.as_str() {
+                    IpcMessage::Event {
+                        event,
+                        name,
+                        data,
+                        reason,
+                    } => match event.as_str() {
                         "property-change" => apply_property(&mut st, name.as_deref(), data),
                         "file-loaded" => st.file_loaded = true,
                         "end-file" => {
                             st.file_loaded = false;
                             if let Some(r) = reason
-                                && r != "eof" && r != "stop" && r != "redirect" {
-                                    st.last_error = Some(format!("playback ended: {r}"));
-                                }
+                                && r != "eof"
+                                && r != "stop"
+                                && r != "redirect"
+                            {
+                                st.last_error = Some(format!("playback ended: {r}"));
+                            }
                         }
                         _ => {}
                     },
@@ -298,7 +314,9 @@ mod tests {
         let json = r#"{"event":"property-change","id":1,"name":"time-pos","data":12.5}"#;
         let msg: IpcMessage = serde_json::from_str(json).unwrap();
         match msg {
-            IpcMessage::Event { event, name, data, .. } => {
+            IpcMessage::Event {
+                event, name, data, ..
+            } => {
                 assert_eq!(event, "property-change");
                 assert_eq!(name.as_deref(), Some("time-pos"));
                 assert_eq!(data.unwrap().as_f64(), Some(12.5));

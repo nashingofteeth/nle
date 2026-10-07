@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::time::{format_seconds, rational_ser, Seconds};
+use crate::time::{Seconds, format_seconds, rational_ser};
 
 #[derive(Debug, Error)]
 pub enum TimelineError {
@@ -177,11 +177,8 @@ impl Timeline {
     pub fn validate(&self) -> Result<(), TimelineError> {
         for (ti, track) in self.tracks.iter().enumerate() {
             for (si, seg) in track.segments.iter().enumerate() {
-                let bad = |what: &str| {
-                    TimelineError::Corrupt(format!(
-                        "track {ti} segment {si}: {what}"
-                    ))
-                };
+                let bad =
+                    |what: &str| TimelineError::Corrupt(format!("track {ti} segment {si}: {what}"));
                 match seg {
                     Segment::Clip(c) => {
                         if c.asset_out <= c.asset_in {
@@ -218,12 +215,17 @@ mod tests {
     }
 
     fn gap(dur: i64) -> Segment {
-        Segment::Gap(Gap { duration: Seconds::from_integer(dur) })
+        Segment::Gap(Gap {
+            duration: Seconds::from_integer(dur),
+        })
     }
 
     #[test]
     fn end_is_the_sum_of_segments() {
-        let t = Track { kind: TrackKind::Video, segments: vec![clip(1, 2), gap(1), clip(2, 3)] };
+        let t = Track {
+            kind: TrackKind::Video,
+            segments: vec![clip(1, 2), gap(1), clip(2, 3)],
+        };
         assert_eq!(t.end(), Seconds::from_integer(6));
         assert_eq!(t.start_of(0), Seconds::from_integer(0));
         assert_eq!(t.start_of(1), Seconds::from_integer(2));
@@ -233,13 +235,27 @@ mod tests {
 
     #[test]
     fn index_at_and_clip_at() {
-        let t = Track { kind: TrackKind::Video, segments: vec![clip(1, 2), gap(1), clip(2, 3)] };
+        let t = Track {
+            kind: TrackKind::Video,
+            segments: vec![clip(1, 2), gap(1), clip(2, 3)],
+        };
         assert_eq!(t.index_at(Seconds::from_integer(0)), Some(0));
         assert_eq!(t.index_at(Seconds::from_integer(2)), Some(1), "gap start");
-        assert_eq!(t.index_at(Seconds::from_integer(3)), Some(2), "the clip after the gap");
-        assert_eq!(t.index_at(Seconds::from_integer(6)), None, "the end belongs to no segment");
+        assert_eq!(
+            t.index_at(Seconds::from_integer(3)),
+            Some(2),
+            "the clip after the gap"
+        );
+        assert_eq!(
+            t.index_at(Seconds::from_integer(6)),
+            None,
+            "the end belongs to no segment"
+        );
         assert!(t.clip_at(Seconds::from_integer(4)).is_some());
-        assert!(t.clip_at(Seconds::from_integer(2)).is_none(), "inside a gap");
+        assert!(
+            t.clip_at(Seconds::from_integer(2)).is_none(),
+            "inside a gap"
+        );
         assert_eq!(t.clip_index(2), Some(2));
         assert_eq!(t.clip_index(9), None);
     }
