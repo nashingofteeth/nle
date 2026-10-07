@@ -205,6 +205,52 @@ impl MpvPlayer {
     }
 }
 
+/// The monitor interface the TUI drives. `MpvPlayer` is the real
+/// implementation; tests use a fake that records calls, so input routing can
+/// be unit-tested without an mpv process. `quit` is intentionally absent — the
+/// TUI never calls it (the `Drop` impl does).
+pub trait Mpv {
+    fn state(&self) -> PlaybackState;
+    fn load(&self, url: &str, start: Option<f64>);
+    fn set_pause(&self, on: bool);
+    fn toggle_pause(&self);
+    fn seek_absolute(&self, target: f64);
+    fn seek_relative(&self, delta: f64);
+    fn frame_step(&self);
+    fn frame_back_step(&self);
+    fn set_media_title(&self, title: &str);
+}
+
+impl Mpv for MpvPlayer {
+    fn state(&self) -> PlaybackState {
+        MpvPlayer::state(self)
+    }
+    fn load(&self, url: &str, start: Option<f64>) {
+        MpvPlayer::load(self, url, start)
+    }
+    fn set_pause(&self, on: bool) {
+        MpvPlayer::set_pause(self, on)
+    }
+    fn toggle_pause(&self) {
+        MpvPlayer::toggle_pause(self)
+    }
+    fn seek_absolute(&self, target: f64) {
+        MpvPlayer::seek_absolute(self, target)
+    }
+    fn seek_relative(&self, delta: f64) {
+        MpvPlayer::seek_relative(self, delta)
+    }
+    fn frame_step(&self) {
+        MpvPlayer::frame_step(self)
+    }
+    fn frame_back_step(&self) {
+        MpvPlayer::frame_back_step(self)
+    }
+    fn set_media_title(&self, title: &str) {
+        MpvPlayer::set_media_title(self, title)
+    }
+}
+
 impl Drop for MpvPlayer {
     fn drop(&mut self) {
         self.quit();

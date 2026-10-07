@@ -19,7 +19,7 @@ use nle_core::edit;
 use nle_core::timeline::Segment as TimelineSegment;
 use nle_core::{Batch, Clip, EditError, History, Project, Seconds};
 
-use crate::mpv::{MpvPlayer, PlaybackState};
+use crate::mpv::{Mpv, PlaybackState};
 use crate::preview::{self, Segment};
 
 /// Seconds → f64 for display/playhead math. The model stays rational;
@@ -377,7 +377,7 @@ impl App {
         }
     }
 
-    fn seek_rel(&mut self, player: &MpvPlayer, delta: f64) {
+    fn seek_rel(&mut self, player: &dyn Mpv, delta: f64) {
         if self.guard_loaded() {
             player.seek_relative(delta);
             // Model-authoritative while paused: h/l moves the playhead by
@@ -386,7 +386,7 @@ impl App {
         }
     }
 
-    fn seek_to(&mut self, player: &MpvPlayer, t: f64) {
+    fn seek_to(&mut self, player: &dyn Mpv, t: f64) {
         if self.guard_loaded() {
             let target = t.max(0.0);
             // Model position is authoritative when paused: set it now.
@@ -417,7 +417,7 @@ impl App {
 
 // ------------------------------------------------------------ event loop
 
-pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result<()> {
+pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
     let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
@@ -483,7 +483,7 @@ pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result
 /// Reload the project (and its undo history) from disk and rebuild the
 /// preview at the current playhead. Lets you edit `nle.json` in another
 /// window (e.g. vim) and watch it here.
-fn reload_project(app: &mut App, player: &MpvPlayer) -> anyhow::Result<()> {
+fn reload_project(app: &mut App, player: &dyn Mpv) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
     let edl = preview::build_edl(&project)?;
     app.project = project;
@@ -535,7 +535,7 @@ fn pool_resume(app: &App) -> f64 {
     }
 }
 
-pub fn handle_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
+pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     if matches!(app.mode, Mode::Command(_)) {
         let buf = match std::mem::replace(&mut app.mode, Mode::Normal) {
             Mode::Command(buf) => buf,
@@ -559,7 +559,7 @@ fn completes_gg(pending: Pending, code: KeyCode) -> bool {
 
 /// Media-pool panel keys: move the list (loading each asset for preview),
 /// insert/remove, and seek/play the preview.
-fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
+fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     // Counts build for the seek keys (bare `0` = start of the file).
     if let KeyCode::Char(c @ '0'..='9') = key.code {
         if c == '0' && app.count.is_none() {
@@ -616,7 +616,7 @@ fn pool_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
 }
 
 /// Seek the pool preview to the selected asset's last frame.
-fn pool_seek_end(app: &mut App, player: &MpvPlayer) {
+fn pool_seek_end(app: &mut App, player: &dyn Mpv) {
     let d = app
         .project
         .media
@@ -629,7 +629,7 @@ fn pool_seek_end(app: &mut App, player: &MpvPlayer) {
 
 /// Play/pause the pool preview; at the end of the file, restart from 0
 /// (mpv `--keep-open` holds at EOF, where a plain unpause would stick).
-fn pool_toggle_play(app: &mut App, player: &MpvPlayer) {
+fn pool_toggle_play(app: &mut App, player: &dyn Mpv) {
     if !app.loaded {
         return;
     }
@@ -643,7 +643,7 @@ fn pool_toggle_play(app: &mut App, player: &MpvPlayer) {
 }
 
 /// Move the list selection by `delta` and load the new asset.
-fn pool_move(app: &mut App, player: &MpvPlayer, delta: i64, n: usize) {
+fn pool_move(app: &mut App, player: &dyn Mpv, delta: i64, n: usize) {
     if n == 0 {
         return;
     }
@@ -652,7 +652,7 @@ fn pool_move(app: &mut App, player: &MpvPlayer, delta: i64, n: usize) {
 }
 
 /// Select a list row and swap the monitor to that asset.
-fn pool_select(app: &mut App, player: &MpvPlayer, sel: usize) {
+fn pool_select(app: &mut App, player: &dyn Mpv, sel: usize) {
     if pool_sel(app) == Some(sel) && app.loaded {
         return;
     }
@@ -661,7 +661,7 @@ fn pool_select(app: &mut App, player: &MpvPlayer, sel: usize) {
 }
 
 /// Load the selected asset into the monitor as a raw file.
-fn load_pool_preview(app: &mut App, player: &MpvPlayer) {
+fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
     let Some(sel) = pool_sel(app) else { return };
     let Some(path) = app.project.media.get(sel).map(|a| a.path.clone()) else {
         return;
@@ -671,7 +671,7 @@ fn load_pool_preview(app: &mut App, player: &MpvPlayer) {
 }
 
 /// Open the pool: remember the timeline playhead, preview the first asset.
-fn open_pool(app: &mut App, player: &MpvPlayer) {
+fn open_pool(app: &mut App, player: &dyn Mpv) {
     app.mode = Mode::Pool(PoolState {
         sel: 0,
         pos: 0.0,
@@ -682,7 +682,7 @@ fn open_pool(app: &mut App, player: &MpvPlayer) {
 }
 
 /// Close the pool: reload the project timeline at the remembered playhead.
-fn close_pool(app: &mut App, player: &MpvPlayer) {
+fn close_pool(app: &mut App, player: &dyn Mpv) {
     let resume = pool_resume(app);
     app.mode = Mode::Normal;
     if let Ok(edl) = preview::build_edl(&app.project) {
@@ -693,7 +693,7 @@ fn close_pool(app: &mut App, player: &MpvPlayer) {
 }
 
 /// Seek the pool preview to an absolute asset time (clamped to duration).
-fn pool_seek_abs(app: &mut App, player: &MpvPlayer, t: f64) {
+fn pool_seek_abs(app: &mut App, player: &dyn Mpv, t: f64) {
     if !app.loaded {
         return;
     }
@@ -725,13 +725,13 @@ fn pool_last_frame(app: &App, dur: f64) -> f64 {
     (dur - 1.0 / fps).max(0.0)
 }
 
-fn pool_seek_rel(app: &mut App, player: &MpvPlayer, delta: f64) {
+fn pool_seek_rel(app: &mut App, player: &dyn Mpv, delta: f64) {
     pool_seek_abs(app, player, pool_pos(app) + delta);
 }
 
 /// Frame-step the pool preview: move on the asset's frame grid and seek
 /// frame-exactly (same model-authoritative approach as normal mode).
-fn pool_step(app: &mut App, player: &MpvPlayer, dir: i64) {
+fn pool_step(app: &mut App, player: &dyn Mpv, dir: i64) {
     if !app.loaded {
         return;
     }
@@ -768,7 +768,7 @@ fn pool_step_target(app: &App, dir: i64) -> (f64, f64) {
 }
 
 /// Undo the last edit, restoring the playhead to where it was made.
-fn do_undo(app: &mut App, player: &MpvPlayer) {
+fn do_undo(app: &mut App, player: &dyn Mpv) {
     match app.history.undo(&mut app.project) {
         Ok(outcome) => {
             app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
@@ -780,7 +780,7 @@ fn do_undo(app: &mut App, player: &MpvPlayer) {
 }
 
 /// Redo the last undone edit.
-fn do_redo(app: &mut App, player: &MpvPlayer) {
+fn do_redo(app: &mut App, player: &dyn Mpv) {
     match app.history.redo(&mut app.project) {
         Ok(outcome) => {
             app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
@@ -792,7 +792,7 @@ fn do_redo(app: &mut App, player: &MpvPlayer) {
 }
 
 /// Insert a clip from the selected pool asset at the playhead (ripple).
-fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
+fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
     let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
         app.set_message("no asset selected");
         return;
@@ -828,7 +828,7 @@ fn insert_from_pool(app: &mut App, player: &MpvPlayer) {
 
 /// Remove the selected asset from the pool, undoably (the guard refuses if
 /// it's in use), then refresh the pool preview.
-fn remove_from_pool(app: &mut App, player: &MpvPlayer) {
+fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
     let Some(asset) = app.project.media.get(pool_sel(app).unwrap_or(0)) else {
         app.set_message("no asset selected");
         return;
@@ -870,7 +870,7 @@ fn command_key(app: &mut App, buf: String, key: KeyEvent) {
     }
 }
 
-fn normal_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
+fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     let code = key.code;
 
     // Ctrl-C quits even in raw mode (no SIGINT is generated).
@@ -1423,7 +1423,7 @@ fn clip_edge_under(project: &Project, t: f64, head: bool) -> Option<(u32, f64)> 
 
 /// `<` / `>` (and `,` / `.`) in Normal mode: move the playhead to the
 /// head or tail of the clip it is over.
-fn seek_clip_end(app: &mut App, player: &MpvPlayer, head: bool) {
+fn seek_clip_end(app: &mut App, player: &dyn Mpv, head: bool) {
     let Some((id, edge)) = clip_edge_under(&app.project, app.playhead, head) else {
         app.set_message("playhead is in a gap — clip start/end needs a clip");
         return;
@@ -1583,7 +1583,7 @@ fn trim_key(project: &Project, ph: f64, out: bool, ripple: bool) -> Result<Batch
 
 /// Apply an edit batch, then save + rebuild the preview so the monitor
 /// reflects the new timeline at the current playhead.
-fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>) -> bool {
+fn run_edit(app: &mut App, player: &dyn Mpv, result: Result<Batch, EditError>) -> bool {
     let batch = match result {
         Ok(b) => b,
         Err(e) => {
@@ -1627,7 +1627,7 @@ fn run_edit(app: &mut App, player: &MpvPlayer, result: Result<Batch, EditError>)
 /// is written alongside the project, then the monitor is reloaded for
 /// whichever view is showing: the pool's raw file when the pool is open, or
 /// the timeline EDL (with the playhead baked into the load) otherwise.
-fn persist_and_refresh(app: &mut App, player: &MpvPlayer) {
+fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
     if let Err(e) = app.project.save(&app.path) {
         app.set_message(&format!("save failed: {e}"));
         return;
@@ -1653,7 +1653,7 @@ fn persist_and_refresh(app: &mut App, player: &MpvPlayer) {
     }
 }
 
-fn edit_delete(app: &mut App, player: &MpvPlayer) {
+fn edit_delete(app: &mut App, player: &dyn Mpv) {
     edit_yank(app); // dd yanks first (vim: dd fills the register)
     run_edit(app, player, edit::delete_under(&app.project, app.playhead));
 }
@@ -1752,7 +1752,7 @@ fn armed_desc(armed: &Armed) -> String {
 
 /// Enter extend mode: resolve the boundary, build the material preview,
 /// and hand mpv over to it. Stays in Normal on any failure.
-fn enter_extend(app: &mut App, player: &MpvPlayer, ripple: bool) {
+fn enter_extend(app: &mut App, player: &dyn Mpv, ripple: bool) {
     let plan = match plan_extend(&app.project, app.playhead, ripple) {
         Err(msg) => {
             app.set_message(&msg);
@@ -1768,7 +1768,7 @@ fn enter_extend(app: &mut App, player: &MpvPlayer, ripple: bool) {
 
 /// Hand the monitor over to an extend plan's material preview and enter
 /// the mode. Shared by entry and by swapping sides at a shared cut.
-fn apply_extend_plan(app: &mut App, player: &MpvPlayer, plan: ExtendPlan, ripple: bool) {
+fn apply_extend_plan(app: &mut App, player: &dyn Mpv, plan: ExtendPlan, ripple: bool) {
     let (url, origin) = match &plan.preview {
         ExtendPreviewSpec::Clip {
             path,
@@ -1880,7 +1880,7 @@ fn side_hint(side: Side) -> &'static str {
 /// that side — `[` opens right, so it works the clip starting (right)
 /// there; `]` opens left, so the clip ending (left). `e`/`E` keep the
 /// default (right at a shared cut).
-fn enter_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
+fn enter_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
     let Some((armed, edge)) = armed_on_side(&app.project, app.playhead, side) else {
         app.set_message(side_hint(side));
         return;
@@ -1898,7 +1898,7 @@ fn enter_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
 
 /// `[` / `]` inside extend mode: move to the clip on the other side of
 /// the same cut, keeping the ripple flag and playhead.
-fn set_extend_side(app: &mut App, player: &MpvPlayer, side: Side) {
+fn set_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
     let Some(st) = extend_state(app) else { return };
     let Some((armed, edge)) = armed_on_side(&app.project, st.edge_pos, side) else {
         app.set_message(side_hint(side));
@@ -1937,7 +1937,7 @@ fn flip_target(project: &Project, armed: Armed, head: bool) -> Option<(Armed, f6
 /// `<` / `>` (and `,` / `.`) inside extend mode: re-anchor the armed edge
 /// to the head or tail of the segment being edited (clip or gap), keeping
 /// the ripple flag.
-fn flip_extend_edge(app: &mut App, player: &MpvPlayer, head: bool) {
+fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
     let Some(st) = extend_state(app) else { return };
     let Some((armed, edge)) = flip_target(&app.project, st.armed, head) else {
         app.set_message("segment is gone");
@@ -1959,7 +1959,7 @@ fn flip_extend_edge(app: &mut App, player: &MpvPlayer, head: bool) {
 
 /// Leave extend mode: project timeline back on the monitor, playhead at
 /// `pos`.
-fn exit_extend(app: &mut App, player: &MpvPlayer, pos: f64, msg: &str) {
+fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
     match preview::build_edl(&app.project) {
         Ok(edl) => player.load(&edl, Some(pos.max(0.0))),
         Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
@@ -2090,7 +2090,7 @@ fn projected_total(app: &App, st: &ExtendState) -> f64 {
 
 /// Commit: route, apply as one undo step, and leave the mode. Failures
 /// keep the mode (and its preview) so the position isn't lost.
-fn commit_extend(app: &mut App, player: &MpvPlayer) {
+fn commit_extend(app: &mut App, player: &dyn Mpv) {
     let Some(st) = extend_state(app) else { return };
     let kind = match plan_commit(&app.project, &st.armed, st.edge_pos, app.playhead) {
         Err(msg) => {
@@ -2114,14 +2114,14 @@ fn commit_extend(app: &mut App, player: &MpvPlayer) {
 
 /// Cancel: snap the playhead back to the armed edge, project timeline
 /// back on the monitor.
-fn cancel_extend(app: &mut App, player: &MpvPlayer) {
+fn cancel_extend(app: &mut App, player: &dyn Mpv) {
     let Some(st) = extend_state(app) else { return };
     exit_extend(app, player, st.edge_pos, "extend cancelled");
 }
 
 /// Mode-aware absolute seek: clamped to the committable range, translated
 /// through the preview offset for mpv.
-fn seek_to_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, t: f64) {
+fn seek_to_mode(app: &mut App, player: &dyn Mpv, st: &ExtendState, t: f64) {
     if !app.guard_loaded() {
         return;
     }
@@ -2132,7 +2132,7 @@ fn seek_to_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, t: f64) {
     player.seek_absolute((target - st.preview_off + 0.004).max(0.0));
 }
 
-fn seek_rel_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, delta: f64) {
+fn seek_rel_mode(app: &mut App, player: &dyn Mpv, st: &ExtendState, delta: f64) {
     let target = app.playhead + delta;
     seek_to_mode(app, player, st, target);
 }
@@ -2156,7 +2156,7 @@ fn extend_step_index(
 
 /// Mode-aware frame step: the frame index is clamped to the range, and
 /// mpv only steps when the model actually moved (no divergence).
-fn step_mode(app: &mut App, player: &MpvPlayer, st: &ExtendState, dir: i64, mult: u32) {
+fn step_mode(app: &mut App, player: &dyn Mpv, st: &ExtendState, dir: i64, mult: u32) {
     if !app.guard_loaded() {
         return;
     }
@@ -2181,7 +2181,7 @@ fn extend_inert(app: &mut App) {
     app.set_message("exit extend mode first (Esc)");
 }
 
-fn extend_key(app: &mut App, player: &MpvPlayer, key: KeyEvent) {
+fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     let code = key.code;
 
     if code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
