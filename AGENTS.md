@@ -84,6 +84,9 @@ plainly.
   distinguishes them (e.g. two assets so index 1 ≠ id 2).
 - **Dump mid-fix.** When a render assertion fails, print the actual grid
   and read it, then write assertions from the dump.
+- **The monitor is behind the `Mpv` trait**; TUI input routing is tested with
+  `FakeMpv`, which records the calls. Handlers that need mpv are no longer
+  untestable — add a `Call` variant and assert on it.
 
 ## Playhead anchoring after an action (settled rules)
 
@@ -130,6 +133,10 @@ plainly.
 - **Floors that shift a segment are slivers:** `insert_from_pool` floors an
   asset duration to whole frames (6.006 s → 6.0 s) so later splits can't
   strand a sub-frame stump; the renderer also skips zero-width segments.
+- **The media pool is a `Mode` variant** (`Mode::Pool(PoolState)`), not flat
+  fields — so "pool open" and its selection can't drift apart. Pool handlers
+  use small `Copy` accessors (`pool_sel`/`set_pool_sel`/…) so a borrow ends at
+  the statement instead of borrowing all of `App` across a helper call.
 
 ## Rust gotchas hit this session
 
@@ -181,6 +188,10 @@ a transitive tree for most needs).
 - Direct deps (10): clap, anyhow, thiserror, serde, serde_json,
   num-rational, tempfile, ratatui, crossterm (+3 internal crates).
   Zero network code in the tree.
+- **`tui` is a default Cargo feature.** `cargo build/test
+  --no-default-features` is the headless variant (no ratatui/crossterm) — keep
+  it compiling when adding TUI code (gate `mod`s, commands, and TUI-only
+  helpers).
 - `Cargo.lock` is committed — builds are reproducible; upgrades are
   deliberate events, not side effects.
 - After any dependency change: `cargo update` deliberately, then run
