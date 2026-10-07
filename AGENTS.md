@@ -54,14 +54,15 @@ This is a durable expectation across all milestones, not a one-off.
 
 ## Verify before every commit
 
-Run this exact sequence; do not commit otherwise:
+Run `scripts/check.sh`; do not commit otherwise. It is:
 
 ```sh
-cargo test                 # full workspace, must be green
-cargo clippy --all-targets # must be 0 warnings
+cargo fmt --all --check                      # formatting is enforced
+cargo clippy --all-targets -- -D warnings    # warnings are errors
+cargo test                                   # full workspace, must be green
 cargo build --release
 cargo install --path crates/nle-cli
-./demo.sh                  # end-to-end pixel checks (red/blue/black/green)
+./demo.sh                                    # end-to-end pixel checks
 ```
 
 Commit one logical change at a time (`feat:`/`fix:`/`refactor:`/`docs:`),
