@@ -16,6 +16,9 @@ instant preview. Full roadmap and current status: `PLAN.md`.
 cargo build --release
 N=./target/release/nle        # or just `nle` if cargo-installed
 
+# Headless build (no TUI/mpv, CLI only — cargo feature `tui` off):
+#   cargo build --release --no-default-features
+
 # Interactive editor (the point)
 $N edit                       # TUI + mpv monitor; vim keys:
 #   transport: space play/pause · h/l ±1s · H/L ±5s · f/F frame step
