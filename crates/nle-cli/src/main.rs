@@ -4,8 +4,13 @@
 //! instant EDL preview. Project file, media pool, timeline, and export
 //! landed in M0/M1.
 
+#[cfg(feature = "tui")]
 mod mpv;
+// The extend-mode preview helpers are TUI-only; without that feature they're
+// compiled but unused, so allow the dead code rather than gate each one.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod preview;
+#[cfg(feature = "tui")]
 mod tui;
 
 use std::path::{Path, PathBuf};
@@ -96,6 +101,7 @@ enum Cmd {
         bitrate: String,
     },
     /// Interactive editor: TUI dashboard + mpv monitor, vim keys
+    #[cfg(feature = "tui")]
     Edit {},
 
     /// Print the mpv preview URL for the timeline (debugging)
@@ -175,6 +181,7 @@ impl From<EncoderArg> for Encoder {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        #[cfg(feature = "tui")]
         Cmd::Edit {} => cmd_edit(&cli.project),
         Cmd::Edl {} => cmd_edl(&cli.project),
         Cmd::Init { force } => cmd_init(&cli.project, force),
@@ -235,6 +242,7 @@ fn main() -> Result<()> {
 
 // ------------------------------------------------------------ project cmds
 
+#[cfg(feature = "tui")]
 fn cmd_edit(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
     let empty = project
