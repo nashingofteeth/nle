@@ -5,6 +5,8 @@
 //! landed in M0/M1.
 
 #[cfg(feature = "tui")]
+mod log;
+#[cfg(feature = "tui")]
 mod mpv;
 // The extend-mode preview helpers are TUI-only; without that feature they're
 // compiled but unused, so allow the dead code rather than gate each one.

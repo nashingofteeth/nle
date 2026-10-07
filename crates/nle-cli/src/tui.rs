@@ -307,6 +307,7 @@ impl App {
     }
 
     pub fn set_message(&mut self, msg: &str) {
+        crate::log::line(msg);
         self.message = msg.to_string();
     }
 
@@ -358,6 +359,9 @@ impl App {
             }
         }
         if let Some(e) = &st.last_error {
+            if self.mpv_error.as_deref() != Some(e.as_str()) {
+                crate::log::line(&format!("mpv: {e}"));
+            }
             self.mpv_error = Some(e.clone());
         }
     }
@@ -1644,10 +1648,14 @@ fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
             .unwrap_or(0)
             .min(app.project.media.len().saturating_sub(1));
         set_pool_sel(app, sel);
+        crate::log::line(&format!("load pool preview #{sel}"));
         load_pool_preview(app, player);
     } else {
         match preview::build_edl(&app.project) {
-            Ok(edl) => player.load(&edl, Some(app.playhead)),
+            Ok(edl) => {
+                crate::log::line(&format!("load timeline EDL at {:.3}", app.playhead));
+                player.load(&edl, Some(app.playhead));
+            }
             Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
         }
     }
