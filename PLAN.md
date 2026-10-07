@@ -126,6 +126,19 @@ preview is M5); video layers strictly by index, no position/opacity in M4.
 the ~80-call-site sweep; `amix` gain policy (`normalize=0`, no implicit
 attenuation); set expectations that the monitor shows the active track only.
 
+## EDL (CMX3600) import — planned (after M4)
+
+Import an edit-decision-list exported from another NLE (Premiere/Resolve/
+Avid) and rebuild the timeline. Cuts only; dissolves/wipes are rejected
+(transitions are M5). A pure parser (`nle-core/src/edl.rs`) reads events and
+`*` comment hints; a resolve step matches reels/clip names against the media
+pool (`--media DIR`, `--map REEL=PATH`, error on any unresolved reel); a
+build step emits clips and record gaps. Source timecode is file-relative by
+default with `--src-offset HH:MM:SS:FF`. **Waits for M4** so `A`/`A2` audio
+events become real audio-track clips (linked audio is skipped to avoid
+doubling each clip's embedded audio). Command:
+`nle import-edl <file.edl> --media DIR [--fps] [--src-offset] [--map]`.
+
 ## M5 — transitions, effects, proxies (planned)
 
 **Goal:** richer edits beyond cuts — transitions between clips, per-clip
