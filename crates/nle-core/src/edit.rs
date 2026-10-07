@@ -11,7 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
@@ -276,6 +276,12 @@ impl History {
             done.drain(0..excess);
         }
         Self { done, undone: Vec::new() }
+    }
+
+    /// Sidecar path for a project file (`nle.json` → `nle.history.json`).
+    /// The history lives next to the project so both move together.
+    pub fn sidecar_path(project_path: &Path) -> PathBuf {
+        project_path.with_extension("history.json")
     }
 
     /// Atomic save to the sidecar file (crash can't corrupt it).
@@ -3291,6 +3297,19 @@ mod tests {
         assert_eq!(clip_ids(&p), vec![1, 2]);
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
         let _ = h;
+    }
+
+    #[test]
+    fn sidecar_path_maps_beside_the_project() {
+        assert_eq!(
+            History::sidecar_path(Path::new("nle.json")),
+            PathBuf::from("nle.history.json")
+        );
+        // A project without an extension still gets one.
+        assert_eq!(
+            History::sidecar_path(Path::new("dir/proj")),
+            PathBuf::from("dir/proj.history.json")
+        );
     }
 
     #[test]

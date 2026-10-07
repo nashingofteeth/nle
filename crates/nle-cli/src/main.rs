@@ -247,8 +247,18 @@ fn cmd_init(path: &Path, force: bool) -> Result<()> {
     if path.exists() && !force {
         bail!("{} already exists (use --force to overwrite)", path.display());
     }
-    Project::new().save(path)?;
+    save_and_reset_history(&Project::new(), path)?;
     println!("✓ created {}", path.display());
+    Ok(())
+}
+
+/// Save the project after an out-of-band write and drop the undo sidecar: a
+/// CLI write re-baselines the project, so any persisted stack no longer
+/// matches it (the next TUI session starts fresh rather than refusing every
+/// undo). See AGENTS.md "Compatibility: none, by design".
+fn save_and_reset_history(project: &Project, path: &Path) -> Result<()> {
+    project.save(path)?;
+    let _ = std::fs::remove_file(edit::History::sidecar_path(path));
     Ok(())
 }
 
@@ -267,7 +277,7 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
         let asset = project.asset(id).context("asset vanished")?;
         println!("✓ asset #{id}  {}  {}", file.display(), asset_summary(asset));
     }
-    project.save(project_path)?;
+    save_and_reset_history(&project, project_path)?;
     let clip_count = |p: &Project| {
         p.timeline
             .video_track()
@@ -358,7 +368,7 @@ fn cmd_add(
     let mut history = edit::History::default();
     let batch = edit::paste_ripple(&project, &scratch, secs_f64(&append_at))?;
     history.apply(&mut project, batch, 0)?;
-    project.save(project_path)?;
+    save_and_reset_history(&project, project_path)?;
     Ok(())
 }
 
@@ -371,7 +381,7 @@ fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
     let batch = edit::delete_clip_by_id(&project, id)?;
     let mut history = edit::History::default();
     history.apply(&mut project, batch, 0)?;
-    project.save(project_path)?;
+    save_and_reset_history(&project, project_path)?;
     println!("✓ removed clip #{id}");
     Ok(())
 }
@@ -462,7 +472,7 @@ fn cmd_media(project_path: &Path, action: MediaCmd) -> Result<()> {
         MediaCmd::Rm { id } => {
             let mut project = Project::load(project_path)?;
             let removed = project.remove_asset(id)?;
-            project.save(project_path)?;
+            save_and_reset_history(&project, project_path)?;
             println!("✓ removed asset #{id} ({})", removed.path.display());
             Ok(())
         }

@@ -5,7 +5,7 @@
 //! command line. Playback keys are sent to mpv; state flows back through
 //! the reader thread and is rendered on the next tick (~20fps redraw).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -410,14 +410,9 @@ impl App {
 
 // ------------------------------------------------------------ event loop
 
-/// Sidecar path for the undo history: `nle.json` → `nle.history.json`.
-fn history_path(project_path: &Path) -> PathBuf {
-    project_path.with_extension("history.json")
-}
-
 pub fn run(project: Project, path: PathBuf, player: MpvPlayer) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
-    let history = History::load(&history_path(&path)).unwrap_or_default();
+    let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
     app.history = history;
     // Media title (MPRIS "Now playing") follows the clip under the playhead.
@@ -484,7 +479,7 @@ fn reload_project(app: &mut App, player: &MpvPlayer) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
     let edl = preview::build_edl(&project)?;
     app.project = project;
-    app.history = History::load(&history_path(&app.path)).unwrap_or_default();
+    app.history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
     player.load(&edl, Some(app.playhead));
     Ok(())
 }
@@ -1496,7 +1491,7 @@ fn persist_and_refresh(app: &mut App, player: &MpvPlayer) {
         app.set_message(&format!("save failed: {e}"));
         return;
     }
-    if let Err(e) = app.history.save(&history_path(&app.path)) {
+    if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
         app.set_message(&format!("history save failed: {e}"));
     }
     if app.pool_open {
