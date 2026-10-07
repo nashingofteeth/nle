@@ -4859,4 +4859,187 @@ mod tests {
             "span reaches the far end"
         );
     }
+
+    // ---- input routing, against a fake monitor (no mpv process) ----
+
+    use std::cell::RefCell;
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum Call {
+        Load(String, Option<f64>),
+        SetPause(bool),
+        TogglePause,
+        SeekAbs(f64),
+        SeekRel(f64),
+        Step(i64),
+        SetTitle(String),
+    }
+
+    /// Records what the TUI asks the monitor to do. Interior mutability because
+    /// the `Mpv` trait takes `&self`.
+    #[derive(Default)]
+    struct FakeMpv {
+        state: RefCell<PlaybackState>,
+        calls: RefCell<Vec<Call>>,
+    }
+
+    impl FakeMpv {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn calls(&self) -> Vec<Call> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Mpv for FakeMpv {
+        fn state(&self) -> PlaybackState {
+            self.state.borrow().clone()
+        }
+        fn load(&self, url: &str, start: Option<f64>) {
+            self.calls
+                .borrow_mut()
+                .push(Call::Load(url.to_string(), start));
+        }
+        fn set_pause(&self, on: bool) {
+            self.calls.borrow_mut().push(Call::SetPause(on));
+        }
+        fn toggle_pause(&self) {
+            self.calls.borrow_mut().push(Call::TogglePause);
+        }
+        fn seek_absolute(&self, target: f64) {
+            self.calls.borrow_mut().push(Call::SeekAbs(target));
+        }
+        fn seek_relative(&self, delta: f64) {
+            self.calls.borrow_mut().push(Call::SeekRel(delta));
+        }
+        fn frame_step(&self) {
+            self.calls.borrow_mut().push(Call::Step(1));
+        }
+        fn frame_back_step(&self) {
+            self.calls.borrow_mut().push(Call::Step(-1));
+        }
+        fn set_media_title(&self, title: &str) {
+            self.calls
+                .borrow_mut()
+                .push(Call::SetTitle(title.to_string()));
+        }
+    }
+
+    fn key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// A project path under the system temp dir, so undo/redo's save doesn't
+    /// write into the repo.
+    fn temp_project_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nle-tui-test-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("t.json")
+    }
+
+    #[test]
+    fn transport_records_monitor_calls() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.loaded = true;
+        let fake = FakeMpv::new();
+
+        handle_key(&mut app, &fake, key('l'));
+        assert_eq!(app.playhead, 1.0);
+        assert_eq!(fake.calls(), vec![Call::SeekRel(1.0)]);
+
+        // A count multiplies the seek.
+        handle_key(&mut app, &fake, key('3'));
+        handle_key(&mut app, &fake, key('l'));
+        assert_eq!(app.playhead, 4.0);
+        assert_eq!(fake.calls().last(), Some(&Call::SeekRel(3.0)));
+
+        handle_key(&mut app, &fake, key('f'));
+        assert!((app.playhead - (4.0 + 1.0 / 30.0)).abs() < 1e-9);
+        assert_eq!(fake.calls().last(), Some(&Call::Step(1)));
+    }
+
+    // The pool's `gg`: a lone `g` only arms the sequence; the second seeks.
+    #[test]
+    fn pool_gg_waits_for_the_second_key() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.loaded = true;
+        open_pool_mode(&mut app, 0);
+        let fake = FakeMpv::new();
+
+        handle_key(&mut app, &fake, key('g'));
+        assert!(fake.calls().is_empty(), "a lone g must not seek");
+        handle_key(&mut app, &fake, key('g'));
+        assert_eq!(fake.calls(), vec![Call::SeekAbs(0.0)]);
+    }
+
+    // Pool space: restart at EOF, otherwise toggle.
+    #[test]
+    fn pool_space_restarts_at_eof_else_toggles() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.loaded = true;
+        open_pool_mode(&mut app, 0);
+
+        let fake = FakeMpv::new();
+        app.eof = false;
+        handle_key(&mut app, &fake, key(' '));
+        assert_eq!(fake.calls(), vec![Call::TogglePause]);
+
+        let fake = FakeMpv::new();
+        app.eof = true;
+        handle_key(&mut app, &fake, key(' '));
+        assert_eq!(
+            fake.calls(),
+            vec![Call::SeekAbs(0.0), Call::SetPause(false)]
+        );
+        assert_eq!(pool_pos(&app), 0.0);
+    }
+
+    // Undo while the pool is open must keep the pool preview (not kick the
+    // monitor to the timeline EDL).
+    #[test]
+    fn pool_undo_keeps_the_pool_preview() {
+        let mut app = App::new(asset_project(), temp_project_path("pool-undo"));
+        app.playhead = 1.0;
+        let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
+        let frame = frame_of(app.project.fps.as_ref(), app.playhead);
+        app.history.apply(&mut app.project, batch, frame).unwrap();
+        app.loaded = true;
+        open_pool_mode(&mut app, 0);
+
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('u'));
+        assert!(!app.history.can_undo(), "the trim was undone");
+        assert!(is_pool(&app), "still in the pool");
+        match fake.calls().last() {
+            Some(Call::Load(url, _)) => assert!(url.ends_with("red.mp4"), "{url}"),
+            other => panic!("expected a pool reload, got {other:?}"),
+        }
+    }
+
+    // Removing a pooled asset is recorded and undoable, and the preview
+    // follows the new selection.
+    #[test]
+    fn pool_remove_is_undoable() {
+        let mut p = asset_project();
+        let (spare, _) = p.add_asset("/media/spare.mp4".into(), p.asset(1).unwrap().probe.clone());
+        let mut app = App::new(p, temp_project_path("pool-remove"));
+        app.loaded = true;
+        open_pool_mode(&mut app, 1); // the spare row
+        let fake = FakeMpv::new();
+
+        handle_key(&mut app, &fake, key('d'));
+        assert_eq!(app.project.media.len(), 1, "spare removed");
+        assert!(app.history.can_undo());
+        assert!(is_pool(&app), "still in the pool");
+        assert!(
+            matches!(fake.calls().last(), Some(Call::Load(url, _)) if url.ends_with("red.mp4")),
+            "preview moved to the remaining asset: {:?}",
+            fake.calls()
+        );
+
+        handle_key(&mut app, &fake, key('u'));
+        assert_eq!(app.project.media.len(), 2, "undo restored the spare");
+        assert!(app.project.asset(spare).is_some());
+    }
 }
