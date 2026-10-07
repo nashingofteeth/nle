@@ -281,6 +281,9 @@ pub struct App {
     pub eof: bool,
     pub mpv_error: Option<String>,
     pub exit_message: Option<String>,
+    /// Remembered pool row so reopening the panel returns there. A sticky UI
+    /// preference, not panel state (whether the panel is open is `Mode::Pool`).
+    last_pool_sel: usize,
 }
 
 impl App {
@@ -303,6 +306,7 @@ impl App {
             eof: false,
             mpv_error: None,
             exit_message: None,
+            last_pool_sel: 0,
         }
     }
 
@@ -674,10 +678,13 @@ fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
     player.load(&path.display().to_string(), Some(0.0));
 }
 
-/// Open the pool: remember the timeline playhead, preview the first asset.
+/// Open the pool: remember the timeline playhead, preview the last row.
 fn open_pool(app: &mut App, player: &dyn Mpv) {
+    let sel = app
+        .last_pool_sel
+        .min(app.project.media.len().saturating_sub(1));
     app.mode = Mode::Pool(PoolState {
-        sel: 0,
+        sel,
         pos: 0.0,
         resume: app.playhead,
     });
@@ -688,6 +695,9 @@ fn open_pool(app: &mut App, player: &dyn Mpv) {
 /// Close the pool: reload the project timeline at the remembered playhead.
 fn close_pool(app: &mut App, player: &dyn Mpv) {
     let resume = pool_resume(app);
+    if let Some(sel) = pool_sel(app) {
+        app.last_pool_sel = sel; // capture on exit so reopening returns here
+    }
     app.mode = Mode::Normal;
     if let Ok(edl) = preview::build_edl(&app.project) {
         player.load(&edl, Some(resume.max(0.0)));
@@ -5049,5 +5059,26 @@ mod tests {
         handle_key(&mut app, &fake, key('u'));
         assert_eq!(app.project.media.len(), 2, "undo restored the spare");
         assert!(app.project.asset(spare).is_some());
+    }
+
+    // Reopening the pool returns to the row last selected.
+    #[test]
+    fn pool_reopen_returns_to_the_last_row() {
+        let mut p = asset_project();
+        p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+        // Drop the gap so close_pool's build_edl needs no black file (ffmpeg).
+        p.timeline.video_track_mut().unwrap().segments.remove(1);
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.loaded = true;
+        let fake = FakeMpv::new();
+
+        handle_key(&mut app, &fake, key('m')); // open
+        handle_key(&mut app, &fake, key('j')); // second row
+        assert_eq!(pool_sel(&app), Some(1));
+
+        handle_key(&mut app, &fake, key('m')); // close (captures row 1)
+        assert!(!is_pool(&app));
+        handle_key(&mut app, &fake, key('m')); // reopen
+        assert_eq!(pool_sel(&app), Some(1), "reopened on the last row");
     }
 }
