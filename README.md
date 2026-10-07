@@ -63,6 +63,10 @@ $N export -o fast.mp4 --encoder vaapi  # GPU (also: qsv)
 $N probe clip.mp4 [--json]
 $N trim clip.mp4 --in 2.5 --out 7 -o cut.mp4 [--encoder vaapi] [--copy]
 $N edl                                 # debug: print the preview EDL URL
+
+# Debug log: with NLE_LOG set, every nle command appends a timestamped trail
+# (TUI notices, mpv errors, project saves, ffmpeg runs). Unset = silent.
+NLE_LOG=/tmp/nle.log $N edit            # or: NLE_LOG=/tmp/nle.log $N export -o out.mp4
 ```
 
 Times accept plain seconds (`12.5`) or timecodes (`0:01:23.500`).
