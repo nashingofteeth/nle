@@ -15,7 +15,7 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::project::{Project, ProjectError};
+use crate::project::{Asset, Project, ProjectError};
 use crate::time::{format_seconds, Seconds};
 use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
 
@@ -23,7 +23,7 @@ use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
 pub const MAX_HISTORY: usize = 100;
 /// Sidecar file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old sidecars start fresh.
-pub const HISTORY_VERSION: u32 = 4;
+pub const HISTORY_VERSION: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -49,6 +49,8 @@ pub enum EditError {
     NothingToUndo,
     #[error("nothing to redo")]
     NothingToRedo,
+    #[error("history entry does not apply: {0}")]
+    History(String),
     #[error("no frame rate set — add a clip first")]
     NoFps,
     #[error(transparent)]
@@ -151,11 +153,11 @@ pub struct Batch {
     pub desc: String,
 }
 
-/// Undo/redo stack of frame-topology changes. `apply` is the only way
-/// in: it snapshots the affected track as frames before running the
-/// batch, then stores the before/after pair as a `Change`. Undo and redo
-/// verify the live track against the recorded topology (by segment id,
-/// never by list index) and substitute the other side.
+/// Undo/redo stack of project changes. `apply` (timeline) and `remove_asset`
+/// (pool) are the only ways in: each snapshots the affected state before
+/// mutating and stores the before/after pair as a `Change`. Undo and redo
+/// verify the live state against the recorded side (segment id/frame for
+/// tracks, exact pool equality for assets) and substitute the other.
 #[derive(Debug, Default, Clone)]
 pub struct History {
     done: Vec<Change>,
@@ -179,37 +181,47 @@ impl History {
             return Err(e);
         }
         let after = snapshot_track(&project.timeline.tracks[track], fps);
-        self.done.push(Change {
+        self.push_change(Change::Track(TrackChange {
             track,
             start_frame: 0,
             before,
             after,
             desc: batch.desc,
             playhead,
-        });
+        }));
+        Ok(())
+    }
+
+    /// Remove `id` from the media pool and record it so undo restores it.
+    /// `Project::remove_asset`'s guard refuses while any clip uses it; the
+    /// before/after pool snapshots make the change symmetric.
+    pub fn remove_asset(&mut self, project: &mut Project, id: u32, playhead: i64) -> Result<String, EditError> {
+        let before = project.media.clone();
+        let removed = project.remove_asset(id)?;
+        let after = project.media.clone();
+        let desc = format!("remove asset #{}", removed.id);
+        self.push_change(Change::Assets(AssetChange { before, after, desc: desc.clone(), playhead }));
+        Ok(desc)
+    }
+
+    /// Push onto `done`, clear redo, and enforce the depth cap.
+    fn push_change(&mut self, change: Change) {
+        self.done.push(change);
         self.undone.clear();
         if self.done.len() > MAX_HISTORY {
             let excess = self.done.len() - MAX_HISTORY;
             self.done.drain(0..excess);
         }
-        Ok(())
     }
 
     pub fn undo(&mut self, project: &mut Project) -> Result<UndoOutcome, EditError> {
         let change = self.done.last().ok_or(EditError::NothingToUndo)?.clone();
-        let saved = project
-            .timeline
-            .tracks
-            .get(change.track)
-            .map(|t| t.segments.clone());
-        let outcome = UndoOutcome { desc: change.desc.clone(), playhead: change.playhead };
-        if let Err(e) =
-            substitute_topology(project, &change, false).and_then(|_| project.validate().map_err(EditError::from))
-        {
-            if let Some(segments) = saved
-                && let Some(track) = project.timeline.tracks.get_mut(change.track) {
-                    track.segments = segments;
-                }
+        let outcome = UndoOutcome { desc: change.desc().to_string(), playhead: change.playhead() };
+        // Snapshot the whole project so a refused substitution (the live
+        // state no longer matches the recorded side) leaves it untouched.
+        let snapshot = project.clone();
+        if let Err(e) = substitute(project, &change, false) {
+            *project = snapshot;
             return Err(e);
         }
         self.done.pop();
@@ -219,19 +231,10 @@ impl History {
 
     pub fn redo(&mut self, project: &mut Project) -> Result<UndoOutcome, EditError> {
         let change = self.undone.last().ok_or(EditError::NothingToRedo)?.clone();
-        let saved = project
-            .timeline
-            .tracks
-            .get(change.track)
-            .map(|t| t.segments.clone());
-        let outcome = UndoOutcome { desc: change.desc.clone(), playhead: change.playhead };
-        if let Err(e) =
-            substitute_topology(project, &change, true).and_then(|_| project.validate().map_err(EditError::from))
-        {
-            if let Some(segments) = saved
-                && let Some(track) = project.timeline.tracks.get_mut(change.track) {
-                    track.segments = segments;
-                }
+        let outcome = UndoOutcome { desc: change.desc().to_string(), playhead: change.playhead() };
+        let snapshot = project.clone();
+        if let Err(e) = substitute(project, &change, true) {
+            *project = snapshot;
             return Err(e);
         }
         self.undone.pop();
@@ -323,17 +326,55 @@ pub enum Atom {
     Gap { frames: i64 },
 }
 
-/// One undoable user action as topologies: the affected track's
-/// segments before and after, in frames. Undo substitutes `before` for
-/// `after`; redo does the reverse. `start_frame` is reserved (whole-track
-/// snapshots start at 0) for future region-scoped entries. `playhead` is
-/// the timeline frame the edit was made from, restored on undo/redo.
+/// One undoable user action. A timeline edit carries the affected track's
+/// before/after topology (verified by segment id/frame counts); a pool edit
+/// carries the media list before/after. The enum keeps undo/redo exhaustive:
+/// a new change kind is a compile error until it is handled.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Change {
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Change {
+    Track(TrackChange),
+    Assets(AssetChange),
+}
+
+impl Change {
+    pub fn desc(&self) -> &str {
+        match self {
+            Change::Track(c) => &c.desc,
+            Change::Assets(c) => &c.desc,
+        }
+    }
+
+    pub fn playhead(&self) -> i64 {
+        match self {
+            Change::Track(c) => c.playhead,
+            Change::Assets(c) => c.playhead,
+        }
+    }
+}
+
+/// A timeline edit: the affected track's segments before and after, in
+/// frames. Undo substitutes `before` for `after`; redo does the reverse.
+/// `start_frame` is reserved (whole-track snapshots start at 0) for future
+/// region-scoped entries. `playhead` is the timeline frame the edit was made
+/// from, restored on undo/redo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrackChange {
     pub track: usize,
     pub start_frame: i64,
     pub before: Vec<Atom>,
     pub after: Vec<Atom>,
+    pub desc: String,
+    pub playhead: i64,
+}
+
+/// A media-pool edit: the whole pool before and after (probes included).
+/// Only removals are recorded today. Undo verifies the pool matches the
+/// recorded side, so an out-of-band change refuses loudly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AssetChange {
+    pub before: Vec<Asset>,
+    pub after: Vec<Asset>,
     pub desc: String,
     pub playhead: i64,
 }
@@ -402,10 +443,21 @@ fn batch_track(batch: &Batch, project: &Project) -> Result<usize, EditError> {
     }
 }
 
+/// Verify the live project still matches one side of `change` and substitute
+/// the other. `forward == false` is undo (expect `after`, write `before`);
+/// `true` is redo. Revalidates afterwards so a stale/foreign entry refuses
+/// rather than corrupting the project.
+fn substitute(project: &mut Project, change: &Change, forward: bool) -> Result<(), EditError> {
+    match change {
+        Change::Track(c) => substitute_topology(project, c, forward)?,
+        Change::Assets(c) => substitute_assets(project, c, forward)?,
+    }
+    project.validate().map_err(EditError::from)
+}
+
 /// Verify the live track matches one side of `change` (by segment id and
-/// frame counts) and substitute the other. `forward == false` is undo
-/// (expect `after`, write `before`); `true` is redo.
-fn substitute_topology(project: &mut Project, change: &Change, forward: bool) -> Result<(), EditError> {
+/// frame counts) and substitute the other.
+fn substitute_topology(project: &mut Project, change: &TrackChange, forward: bool) -> Result<(), EditError> {
     let fps = history_fps(project);
     let track = project
         .timeline
@@ -419,11 +471,28 @@ fn substitute_topology(project: &mut Project, change: &Change, forward: bool) ->
     };
     let live = snapshot_track(track, fps);
     if live != *expected {
-        return Err(EditError::Timeline(TimelineError::Corrupt(
-            "timeline changed outside the undo stack — history entry does not apply".to_string(),
-        )));
+        return Err(EditError::History(
+            "timeline changed outside the undo stack".to_string(),
+        ));
     }
     track.segments = write.iter().map(|a| segment_from_atom(a, fps)).collect();
+    Ok(())
+}
+
+/// Verify the live media pool matches one side of `change` (exact equality,
+/// including probes) and substitute the other.
+fn substitute_assets(project: &mut Project, change: &AssetChange, forward: bool) -> Result<(), EditError> {
+    let (expected, write) = if forward {
+        (&change.before, &change.after)
+    } else {
+        (&change.after, &change.before)
+    };
+    if project.media != *expected {
+        return Err(EditError::History(
+            "media pool changed outside the undo stack".to_string(),
+        ));
+    }
+    project.media = write.clone();
     Ok(())
 }
 
@@ -3199,7 +3268,7 @@ mod tests {
         h.save(&path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\": 4"), "{text}");
+        assert!(text.contains("\"version\": 5"), "{text}");
         assert!(!text.contains("undone"), "{text}");
         assert!(!text.contains("30/1"), "{text}");
 
@@ -3281,13 +3350,68 @@ mod tests {
             c.id = 99;
         }
         let mut h2 = History::load(&path).unwrap();
-        assert!(matches!(
-            h2.undo(&mut p2),
-            Err(EditError::Timeline(TimelineError::Corrupt(_)))
-        ));
+        assert!(matches!(h2.undo(&mut p2), Err(EditError::History(_))));
         // project untouched by the failed undo
         assert_eq!(clip_ids(&p2), vec![1, 99]);
         assert_eq!(p2.timeline.end(), Seconds::from_integer(5));
+    }
+
+    // An unused pooled asset can be removed and undone; the whole pool is
+    // restored (same order/ids).
+    #[test]
+    fn asset_removal_is_undoable() {
+        let mut p = fixture();
+        let (spare, _) = p.add_asset("/media/spare.mp4".into(), probe_report("5"));
+        let before = p.media.clone();
+
+        let mut h = History::default();
+        let desc = h.remove_asset(&mut p, spare, 42).unwrap();
+        assert!(desc.contains(&format!("#{spare}")), "{desc}");
+        assert!(p.asset(spare).is_none(), "gone after removal");
+        assert_eq!(p.media.len(), before.len() - 1);
+
+        let outcome = h.undo(&mut p).unwrap();
+        assert_eq!(outcome.desc, desc, "undo restores the same description");
+        assert_eq!(outcome.playhead, 42, "and the playhead it was made from");
+        assert_eq!(p.media, before, "pool restored exactly (order and ids)");
+
+        h.redo(&mut p).unwrap();
+        assert!(p.asset(spare).is_none(), "redo removes it again");
+    }
+
+    // If the pool changed outside the stack, an asset undo refuses and leaves
+    // the project untouched rather than clobbering the foreign change.
+    #[test]
+    fn asset_history_refuses_when_pool_changed_outside() {
+        let mut p = fixture();
+        let (spare, _) = p.add_asset("/media/spare.mp4".into(), probe_report("5"));
+        let mut h = History::default();
+        h.remove_asset(&mut p, spare, 0).unwrap();
+        let _ = p.add_asset("/media/extra.mp4".into(), probe_report("5"));
+        let live = p.media.clone();
+
+        assert!(matches!(h.undo(&mut p), Err(EditError::History(_))));
+        assert_eq!(p.media, live, "failed undo left the pool untouched");
+    }
+
+    // The pool change serializes into the sidecar and undoes after reload.
+    #[test]
+    fn asset_removal_sidecar_round_trips() {
+        let mut p = fixture();
+        let (spare, _) = p.add_asset("/media/spare.mp4".into(), probe_report("5"));
+        let mut h = History::default();
+        h.remove_asset(&mut p, spare, 0).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nle.history.json");
+        h.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"kind\": \"assets\""), "{text}");
+
+        let mut h2 = History::load(&path).unwrap();
+        let mut p2 = p.clone();
+        h2.undo(&mut p2).unwrap();
+        assert!(p2.asset(spare).is_some(), "asset restored after reload");
     }
 
     #[test]
@@ -3298,14 +3422,16 @@ mod tests {
         let batch = trim_in(&p30, 1.0).unwrap();
         h30.apply(&mut p30, batch, 0).unwrap();
         let first_gap = |h: &History| {
-            h.state().done[0]
-                .after
-                .iter()
-                .find_map(|a| match a {
-                    Atom::Gap { frames } => Some(*frames),
-                    Atom::Clip { .. } => None,
-                })
-                .unwrap()
+            match &h.state().done[0] {
+                Change::Track(c) => &c.after,
+                Change::Assets(_) => panic!("expected a track change"),
+            }
+            .iter()
+            .find_map(|a| match a {
+                Atom::Gap { frames } => Some(*frames),
+                Atom::Clip { .. } => None,
+            })
+            .unwrap()
         };
         assert_eq!(first_gap(&h30), 30);
 
@@ -3320,10 +3446,7 @@ mod tests {
         // frame counts no longer match, so undo refuses instead of
         // mis-restoring.
         p30.fps = Some(Seconds::new(60, 1));
-        assert!(matches!(
-            h30.undo(&mut p30),
-            Err(EditError::Timeline(TimelineError::Corrupt(_)))
-        ));
+        assert!(matches!(h30.undo(&mut p30), Err(EditError::History(_))));
     }
 
     #[test]
