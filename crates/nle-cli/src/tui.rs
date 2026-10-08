@@ -2480,16 +2480,11 @@ fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 // ------------------------------------------------------------ rendering
 
 fn render(f: &mut Frame, app: &App) {
-    // Bottom panels: keys cheat-sheet, then a dedicated message panel.
-    // Hidden when the terminal is too short to spare them.
-    let keys = if f.area().height >= 20 { 8 } else { 0 };
-    let msg_h = if f.area().height >= 20 { 3 } else { 0 };
-    // The timeline grows to show every track (one row each + border +
-    // marker row), but leaves room for the info panel and bottom panels.
-    let track_rows = app.project.timeline.tracks.len().max(1) as u16;
-    let reserved = 1 + keys + msg_h + 4;
-    let max_tl = f.area().height.saturating_sub(reserved).max(4);
-    let timeline_h = (track_rows + 2).clamp(4, max_tl);
+    // Size the timeline to show every track, then give what's left to the
+    // info panel and the bottom panels. The bottom panels are dropped before
+    // the timeline is allowed to hide a track.
+    let (timeline_h, keys, msg_h) =
+        panel_heights(app.project.timeline.tracks.len(), f.area().height);
     let [status, timeline, info, keys_area, msg_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(timeline_h),
@@ -2512,6 +2507,25 @@ fn render(f: &mut Frame, app: &App) {
     if msg_h > 0 {
         render_message(f, msg_area, app);
     }
+}
+
+/// Rows for the timeline panel and the two bottom panels: the timeline gets
+/// one row per track plus the marker row and two borders, and the keys/message
+/// panels are dropped before a track has to be hidden. Returns
+/// `(timeline_h, keys_h, msg_h)`. Pure so the sizing is testable.
+fn panel_heights(track_count: usize, height: u16) -> (u16, u16, u16) {
+    let track_rows = track_count.max(1) as u16;
+    // Two borders + one row per track + the marker row.
+    let want_tl = track_rows.saturating_add(3);
+    // The status row is always present; keep a few rows for the info panel.
+    let min_info = 3u16;
+    let max_tl = height.saturating_sub(1 + min_info).max(4);
+    let timeline_h = want_tl.min(max_tl).max(4);
+    // Bottom panels only when they fit without squeezing the tracks.
+    let leftover = height.saturating_sub(1 + timeline_h + min_info);
+    let msg_h = if leftover >= 3 { 3 } else { 0 };
+    let keys_h = if leftover >= 3 + 8 { 8 } else { 0 };
+    (timeline_h, keys_h, msg_h)
 }
 
 /// The keys cheat-sheet (mode-specific; see `hints_for`).
@@ -2897,9 +2911,12 @@ fn track_window(n: usize, active: usize, capacity: usize) -> (usize, usize) {
     (start, capacity)
 }
 
-/// One track's segments as (duration, label, style) parts.
-fn track_parts(project: &Project, track: &Track) -> Vec<(f64, String, Style)> {
-    track
+/// One track's segments as (duration, label, style) parts, plus a trailing
+/// gap for any span short of the timeline end — a track shorter than the
+/// timeline reads as gap rather than blank.
+fn track_parts(project: &Project, track: &Track, total: f64) -> Vec<(f64, String, Style)> {
+    let gap_style = Style::default().bg(Color::DarkGray).fg(Color::Black);
+    let mut parts: Vec<(f64, String, Style)> = track
         .segments
         .iter()
         .map(|s| match s {
@@ -2914,13 +2931,14 @@ fn track_parts(project: &Project, track: &Track) -> Vec<(f64, String, Style)> {
                     Style::default().bg(Color::Cyan).fg(Color::Black),
                 )
             }
-            TimelineSegment::Gap(g) => (
-                secs(&g.duration),
-                "gap".to_string(),
-                Style::default().bg(Color::DarkGray).fg(Color::Black),
-            ),
+            TimelineSegment::Gap(g) => (secs(&g.duration), "gap".to_string(), gap_style),
         })
-        .collect()
+        .collect();
+    let tail = total - secs(&track.end());
+    if tail > 1e-9 {
+        parts.push((tail, "gap".to_string(), gap_style));
+    }
+    parts
 }
 
 /// Draw one track's segment row. `notch` overlays the extend-mode playhead
@@ -2928,7 +2946,7 @@ fn track_parts(project: &Project, track: &Track) -> Vec<(f64, String, Style)> {
 /// quantizer as the marker row (`marker_col` of the cumulative time), so
 /// drawn clip edges and the playhead/cut indicator can never disagree.
 fn draw_track_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64, notch: bool) {
-    let parts = track_parts(&app.project, track);
+    let parts = track_parts(&app.project, track, total);
     let mut cum: f64 = 0.0;
     let mut cells: Vec<(u16, String, Style)> = Vec::new();
     for (i, (dur, label, style)) in parts.iter().enumerate() {
@@ -3558,6 +3576,65 @@ mod tests {
         assert!(row(1).contains("v1"), "{:?}", row(1));
         assert!(row(2).contains("a1"), "{:?}", row(2));
         assert!(!row(1).contains("a1"), "{:?}", row(1));
+    }
+
+    // A track shorter than the timeline reads as a trailing gap, not blank.
+    #[test]
+    fn shorter_track_pads_with_a_trailing_gap() {
+        let mut p = asset_project(); // track 0 ends at 7.0
+        let a = p.media[0].id;
+        let ti = p.timeline.add_track(TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(nle_core::Clip {
+            id: 7,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(2),
+        })];
+        // The 2 s track is padded to the 7 s timeline with a 5 s gap.
+        let parts = track_parts(&p, &p.timeline.tracks[ti], 7.0);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        let (dur, label, _) = parts.last().unwrap();
+        assert_eq!(label, "gap");
+        assert!((dur - 5.0).abs() < 1e-9, "{dur}");
+        // A track that already reaches the end gains nothing.
+        assert_eq!(track_parts(&p, &p.timeline.tracks[0], 7.0).len(), 3);
+    }
+
+    // The panel is sized so every track fits; the bottom panels are dropped
+    // before a track is hidden.
+    #[test]
+    fn panel_heights_show_every_track_when_they_fit() {
+        let (tl, keys, msg) = panel_heights(3, 24);
+        assert!(tl >= 3 + 3, "3 tracks + marker + borders: {tl}");
+        assert_eq!((keys, msg), (8, 3), "bottom panels still fit");
+        // It grows with the track count instead of windowing.
+        assert!(panel_heights(6, 24).0 > panel_heights(2, 24).0);
+        // Too short: the bottom panels go first.
+        assert_eq!(panel_heights(6, 14).1, 0);
+        assert_eq!(panel_heights(6, 14).2, 0);
+    }
+
+    // The full render shows every track's gutter on a normal terminal.
+    #[test]
+    fn all_tracks_are_visible_in_the_timeline_panel() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut p = asset_project();
+        p.timeline.add_track(TrackKind::Video); // v2
+        p.timeline.add_track(TrackKind::Audio); // a1
+        let app = App::new(p, PathBuf::from("t.json"));
+        let mut term = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        term.draw(|f| render(f, &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let row = |y: u16| {
+            (0..60)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        };
+        // status at y=0, timeline border at y=1, tracks at y=2.., marker last.
+        assert!(row(2).contains("v1"), "{:?}", row(2));
+        assert!(row(3).contains("v2"), "{:?}", row(3));
+        assert!(row(4).contains("a1"), "{:?}", row(4));
     }
 
     #[test]
