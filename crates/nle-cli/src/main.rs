@@ -501,10 +501,11 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&project)?);
         return Ok(());
     }
-    let track = project.timeline.video_track().context("no video track")?;
-    let clip_count = track
-        .segments
+    let clip_count: usize = project
+        .timeline
+        .tracks
         .iter()
+        .flat_map(|t| t.segments.iter())
         .filter(|s| matches!(s, Segment::Clip(_)))
         .count();
 
@@ -521,41 +522,64 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         head += &format!(" · {}×{}", v.width, v.height);
     }
     println!("{head}");
-    println!("  v1");
 
-    let mut cursor = Seconds::from_integer(0);
-    for seg in &track.segments {
-        match seg {
-            Segment::Gap(g) => {
-                let end = cursor + g.duration;
-                println!(
-                    "      ┄ gap {}–{}",
-                    format_seconds(&cursor),
-                    format_seconds(&end)
-                );
-                cursor = end;
-            }
-            Segment::Clip(clip) => {
-                let asset = project
-                    .asset(clip.asset)
-                    .map(|a| a.path.display().to_string())
-                    .unwrap_or_else(|| "?".into());
-                let start = cursor;
-                let end = start + clip.duration();
-                println!(
-                    "    #{:<4}{:>9} – {:<9} {}  (src {}–{})",
-                    clip.id,
-                    format_seconds(&start),
-                    format_seconds(&end),
-                    asset,
-                    format_seconds(&clip.asset_in),
-                    format_seconds(&clip.asset_out)
-                );
-                cursor = end;
+    for (ti, track) in project.timeline.tracks.iter().enumerate() {
+        let mute = if track.muted { " (muted)" } else { "" };
+        println!("  {}{mute}", track_label(&project, ti));
+
+        let mut cursor = Seconds::from_integer(0);
+        for seg in &track.segments {
+            match seg {
+                Segment::Gap(g) => {
+                    let end = cursor + g.duration;
+                    println!(
+                        "      ┄ gap {}–{}",
+                        format_seconds(&cursor),
+                        format_seconds(&end)
+                    );
+                    cursor = end;
+                }
+                Segment::Clip(clip) => {
+                    let asset = project
+                        .asset(clip.asset)
+                        .map(|a| a.path.display().to_string())
+                        .unwrap_or_else(|| "?".into());
+                    let start = cursor;
+                    let end = start + clip.duration();
+                    println!(
+                        "    #{:<4}{:>9} – {:<9} {}  (src {}–{})",
+                        clip.id,
+                        format_seconds(&start),
+                        format_seconds(&end),
+                        asset,
+                        format_seconds(&clip.asset_in),
+                        format_seconds(&clip.asset_out)
+                    );
+                    cursor = end;
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Short label for a track: `v1..` for video, `a1..` for audio, numbered
+/// within their kind by stacking order (matches the TUI gutter).
+fn track_label(project: &Project, ti: usize) -> String {
+    let (mut v, mut a) = (0, 0);
+    for (i, t) in project.timeline.tracks.iter().enumerate() {
+        match t.kind {
+            TrackKind::Video => v += 1,
+            TrackKind::Audio => a += 1,
+        }
+        if i == ti {
+            return match t.kind {
+                TrackKind::Video => format!("v{v}"),
+                TrackKind::Audio => format!("a{a}"),
+            };
+        }
+    }
+    "—".to_string()
 }
 
 fn cmd_media(project_path: &Path, action: MediaCmd) -> Result<()> {
