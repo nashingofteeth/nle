@@ -109,7 +109,7 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
   active track; `:track add video|audio · mute [N] · rm N`.
 - **CLI:** `nle track ls|add|mute|rm`, `nle add --track N`,
   `nle edl --track N`.
-- **Verified:** 175 tests, clippy clean, `./demo.sh` multi-track pixel +
+- **Verified:** 174 tests, clippy clean, `./demo.sh` multi-track pixel +
   audio checks.
 
 **Deferred:** composite preview (M5); linked a/v detach; a muted sole video
