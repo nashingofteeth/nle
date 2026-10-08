@@ -597,6 +597,7 @@ fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         app.count = Some(app.count.unwrap_or(0) * 10 + d);
         return;
     }
+    let had_count = app.count.is_some();
     let mult = app.count.take().unwrap_or(1);
 
     // Second key of the `gg` sequence (mirrors normal mode). This must run
@@ -631,6 +632,26 @@ fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('L') => pool_seek_rel(app, player, 5.0 * mult as f64),
         KeyCode::Char('f') => pool_step(app, player, 1),
         KeyCode::Char('F') => pool_step(app, player, -1),
+        // Track change is available in the pool so `enter` inserts where you
+        // mean (the monitor keeps the asset preview; see `pool_set_track`).
+        KeyCode::Char('t') => {
+            let n = app.project.timeline.tracks.len();
+            let idx = if had_count {
+                (mult as usize).saturating_sub(1)
+            } else {
+                (app.active() + 1) % n.max(1)
+            };
+            pool_set_track(app, idx);
+        }
+        KeyCode::Char('T') => {
+            let n = app.project.timeline.tracks.len();
+            let idx = if had_count {
+                (mult as usize).saturating_sub(1)
+            } else {
+                (app.active() + n.max(1) - 1) % n.max(1)
+            };
+            pool_set_track(app, idx);
+        }
         _ => {}
     }
 
@@ -2573,6 +2594,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
             "media pool — the monitor previews the selected file",
             "j/k assets · { } list ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
             "space play · enter insert at playhead · d remove · u undo · m/esc close",
+            "tracks     t/T target · <N>t jump · insert goes to the active track",
         ];
     }
     vec![
@@ -2591,8 +2613,9 @@ fn render_pool(f: &mut Frame, area: Rect, app: &App) {
     let [list_area, meta_area] =
         Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).areas(area);
 
-    // Left: the asset list.
-    let list_block = Block::bordered().title(" media pool ");
+    // Left: the asset list. The title names the track `enter` inserts into.
+    let target = track_label(&app.project, app.active());
+    let list_block = Block::bordered().title(format!(" media pool → {target} "));
     let list_inner = list_block.inner(list_area);
     f.render_widget(list_block, list_area);
     let items: Vec<ratatui::widgets::ListItem> = app
@@ -2804,14 +2827,22 @@ fn track_label(project: &Project, ti: usize) -> String {
     "—".to_string()
 }
 
-/// Make track `idx` active (clamped) and point the monitor at it.
-fn set_active_track(app: &mut App, player: &dyn Mpv, idx: usize) {
+/// Make track `idx` active (clamped) and return its label. Leaves the monitor
+/// alone — the pool keeps its asset preview; normal mode reloads on top.
+fn select_active_track(app: &mut App, idx: usize) -> Option<String> {
     let n = app.project.timeline.tracks.len();
     if n == 0 {
-        return;
+        return None;
     }
     app.active_track = idx.min(n - 1);
-    let label = track_label(&app.project, app.active_track);
+    Some(track_label(&app.project, app.active_track))
+}
+
+/// Make track `idx` active and point the monitor at its timeline EDL.
+fn set_active_track(app: &mut App, player: &dyn Mpv, idx: usize) {
+    let Some(label) = select_active_track(app, idx) else {
+        return;
+    };
     // The monitor follows the active track.
     match preview::build_edl(&app.project, app.active()) {
         Ok(edl) => {
@@ -2819,6 +2850,14 @@ fn set_active_track(app: &mut App, player: &dyn Mpv, idx: usize) {
             app.set_message(&format!("track {label}"));
         }
         Err(e) => app.set_message(&format!("track {label} — preview: {e}")),
+    }
+}
+
+/// Switch the active track from the pool: retarget where `enter` inserts and
+/// announce it, but leave the monitor on the asset preview.
+fn pool_set_track(app: &mut App, idx: usize) {
+    if let Some(label) = select_active_track(app, idx) {
+        app.set_message(&format!("insert track {label}"));
     }
 }
 
@@ -5573,6 +5612,36 @@ mod tests {
         handle_key(&mut app, &fake, key('u'));
         assert_eq!(app.project.media.len(), 2, "undo restored the spare");
         assert!(app.project.asset(spare).is_some());
+    }
+
+    // `t`/`T` change the insert target while the pool is open, without
+    // disturbing the asset preview on the monitor.
+    #[test]
+    fn pool_t_switches_the_insert_track() {
+        let mut p = asset_project();
+        p.timeline.add_track(TrackKind::Audio); // track 1
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.loaded = true;
+        open_pool_mode(&mut app, 0);
+        let fake = FakeMpv::new();
+
+        handle_key(&mut app, &fake, key('t'));
+        assert_eq!(app.active(), 1, "t cycles to the next track");
+        assert!(app.message.contains("a1"), "{}", app.message);
+        assert!(
+            fake.calls().is_empty(),
+            "the asset preview is untouched: {:?}",
+            fake.calls()
+        );
+
+        handle_key(&mut app, &fake, key('T'));
+        assert_eq!(app.active(), 0, "T cycles back");
+
+        // `<2>t` jumps to track 2 (1-based).
+        handle_key(&mut app, &fake, key('2'));
+        handle_key(&mut app, &fake, key('t'));
+        assert_eq!(app.active(), 1);
+        assert!(is_pool(&app), "still in the pool");
     }
 
     // Reopening the pool returns to the row last selected.
