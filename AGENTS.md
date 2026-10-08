@@ -205,6 +205,8 @@ plainly.
   arg (`expected = CONST`) instead.
 - Two writers of one invariant (`sync` vs `seek`) — clamp at **every**
   write, not just the "obvious" one.
+- `clippy::too_many_arguments` (7+) → group the args in a parameter struct
+  (`DetectArgs`) instead of `#[allow]`-ing it.
 
 ## Interaction conventions added this session
 
@@ -239,6 +241,23 @@ plainly.
 - A helper that emits a filter chain must push its output label too: the
   multi-track audio pad emitted its `anullsrc…` chain but forgot the
   label, and ffmpeg reported a filter with an unconnected pad.
+
+## detect-edits pitfalls
+
+- **Cuts to/from black score below the scene threshold** — a hard cut to
+  black is invisible to `select='gt(scene,T)'`. Pair it with
+  `blackdetect` (the dailies test: 3 s leading black + a 0.2 s black flash,
+  both recovered as gaps).
+- **`select` fires on consecutive frames during flashes** — `min_shot`
+  folds sub-threshold media spans into a neighbour; a short media span
+  flanked by gaps is real and kept.
+- **`-vf` argv needs ffmpeg-level quoting**: the `select` comma must be
+  protected as `select='gt(scene,0.4)'` (we pass argv without a shell).
+- **Detection decimals aren't rationals**: `showinfo` prints
+  `pts_time:3.03333`; `Seconds::approximate_float` keeps the decimal and
+  `reconstruct` re-snaps to the frame grid.
+- **Extra streams are ignored, not silent**: the test `.mov` had two video
+  streams; `detect-edits` warns and reconstructs the first.
 
 ## Layout & dependency policy (moved from README)
 

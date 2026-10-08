@@ -10,7 +10,8 @@ the model directly: trim in/out, split, delete, yank/paste, insert gap,
 **extend mode**, a **media pool** with file preview, **multi-track editing**
 (track rows, active track, overlay video + mixed audio), and undo/redo —
 auto-saved, instant preview. The CLI can also **import a CMX3600 EDL or an
-OpenTimelineIO (`.otio`) timeline** and set a **clip's playback speed**.
+OpenTimelineIO (`.otio`) timeline**, set a **clip's playback speed**, and
+**detect the cuts in a rendered file** (`detect-edits`).
 Full roadmap and current status: `PLAN.md`.
 
 ## Usage
@@ -78,6 +79,11 @@ $N import-otio sequence.otio            # OpenTimelineIO (.otio) → project
 #   itself (--media/--remap for moved media). Kdenlive rate conforms
 #   (timewarp) import as per-clip speed.
 $N speed 3 0.5                          # clip #3 plays at half speed (ripples)
+$N detect-edits edit.mov               # rebuild a project from a rendered file
+$N detect-edits edit.mov --list        # print the detected cuts, write nothing
+#   one clip per detected shot; black spans come back as gaps. Tune with
+#   --threshold (0..1) / --min-shot; --video-only drops audio; --force
+#   overwrites the project. Recovers the edit structure, not the sources.
 $N export -o final.mp4                 # libx264, frame-exact
 $N export -o fast.mp4 --encoder vaapi  # GPU (also: qsv)
 

@@ -168,6 +168,27 @@ existing project.
 **Deferred:** a TUI speed key (only `:speed` today); OTIO transitions/nesting;
 audio-only OTIO.
 
+## Edit detect (`detect-edits`) — shipped
+
+- **Detect** (`nle-ffmpeg/src/detect.rs`): one ffmpeg pass —
+  `blackdetect` + `select='gt(scene,T)',showinfo` — parsed from stderr.
+  `detect` (process) is split from `build_args`/`parse_log` (pure) so the
+  parsing is unit-tested without spawning ffmpeg.
+- **Reconstruct** (`nle-core/src/detect.rs`): raw cuts/blacks → exact,
+  frame-snapped `Span`s (media/gap); adjacent gaps coalesce; sub-`min_shot`
+  media folds into a neighbour. Pure, no ids.
+- **CLI:** `nle detect-edits FILE [--list --threshold --min-shot
+  --black-min --no-gaps --fps --video-only --force]` — a video track plus a
+  matching split audio track, written with `save_and_reset_history`.
+- **Verified:** pure unit tests + `./demo.sh` (red/blue/black/green file →
+  detect → export → pixel checks; the black span returns as one gap). Also
+  run on a 1.4 GB 1080p60 dailies `.mov`: 19 cuts + 2 gaps, including 3 s
+  of leading black and a 0.2 s black flash that scene detection missed.
+
+**Deferred:** TUI `:detect FILE`; matching shots back to pooled source
+assets (frame fingerprinting) — a rendered file can't recover its sources,
+only the cut structure.
+
 ## M5 — transitions, effects, proxies (planned)
 
 **Goal:** richer edits beyond cuts — transitions between clips, per-clip
