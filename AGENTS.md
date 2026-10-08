@@ -168,6 +168,9 @@ plainly.
   timeline is a sequence, so a new duration moves every follower. Export
   retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained outside
   [0.5, 2]); the 1× graph stays byte-identical.
+- **One video track + an audio track still takes the multi-track export
+  path** (the fast path needs *zero* audio tracks), so a single video layer
+  must reach `[vout]` with no dangling `null[vcomp]`.
 
 ## EDL import (CMX3600) pitfalls
 

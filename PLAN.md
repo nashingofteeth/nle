@@ -180,6 +180,8 @@ audio-only OTIO.
 - **CLI:** `nle detect-edits FILE [--list --threshold --min-shot
   --black-min --no-gaps --fps --video-only --force]` — a video track plus a
   matching split audio track, written with `save_and_reset_history`.
+  `--append [--track N]` adds the shots to an existing project at the
+  timeline end instead (audio mirrored onto the first audio track).
 - **Verified:** pure unit tests + `./demo.sh` (red/blue/black/green file →
   detect → export → pixel checks; the black span returns as one gap). Also
   run on a 1.4 GB 1080p60 dailies `.mov`: 19 cuts + 2 gaps, including 3 s

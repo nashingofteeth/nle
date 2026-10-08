@@ -81,6 +81,8 @@ $N import-otio sequence.otio            # OpenTimelineIO (.otio) → project
 $N speed 3 0.5                          # clip #3 plays at half speed (ripples)
 $N detect-edits edit.mov               # rebuild a project from a rendered file
 $N detect-edits edit.mov --list        # print the detected cuts, write nothing
+$N detect-edits edit.mov --append      # append the shots to an existing project
+#   --append starts at the timeline end; --track N picks the video target
 #   one clip per detected shot; black spans come back as gaps. Tune with
 #   --threshold (0..1) / --min-shot; --video-only drops audio; --force
 #   overwrites the project. Recovers the edit structure, not the sources.
