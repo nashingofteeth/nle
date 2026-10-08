@@ -1,7 +1,8 @@
 # nle — plan of record
 
-Status: **M3 complete, M4 next.** This file is the design/roadmap; the
-README is the user-facing how-to. Keep it in sync as milestones land.
+Status: **M4 complete, EDL (CMX3600) import next.** This file is the
+design/roadmap; the README is the user-facing how-to. Keep it in sync as
+milestones land.
 
 ## Vision
 
@@ -68,7 +69,7 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **—** | `demo.sh` playground + clippy cleanup | ✅ `100acdc`, `dac81c4` |
 | **M2** | TUI + mpv monitor + vim nav + instant preview + `r` + `:cmd` + `nle edl` | ✅ `344291a` |
 | **M3** | Editing for real | ✅ done |
-| **M4** | Multi-track + separate audio tracks | ⏳ next |
+| **M4** | Multi-track + separate audio tracks | ✅ done |
 | **M5** | Transitions (`xfade`/`acrossfade`) + effects + proxy cache + thumbnails/waveforms | pending |
 | **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending |
 | **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
@@ -89,44 +90,32 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 - **Verified:** ~140 tests, clippy clean, `./demo.sh` pixel checks, release
   installed.
 
-## M4 — multi-track + audio (next)
+## M4 — multi-track + audio (shipped)
 
-**Goal:** one implicit video track → an ordered **list of tracks** (video +
-audio); TUI track rows and an **active track** for edits; export layers
-video (`overlay`) and mixes audio (`amix`). No effects/transitions (that's
-M5).
+- **Model:** tracks are an ordered list of `Track { kind, muted, segments }`;
+  helpers `track(ti)` / `video_tracks` / `audio_tracks` / `add_track`;
+  validate requires ≥1 video track. Project **v3**.
+- **Ops:** every track-resolving edit op is `*_on(project, track, …)`; the
+  unsuffixed name wraps the first video track. A stale index returns
+  `TrackNotFound` (never panics).
+- **Export:** one video track with no audio track keeps the classic concat
+  path **byte-for-byte**; otherwise each track is padded to the timeline
+  length and video layers composite bottom→top with `overlay` (upper gaps
+  transparent `black@0.0`/`yuva420p`), audio sums with
+  `amix=inputs=N:normalize=0`. Muted tracks are dropped.
+- **TUI:** one row per track with a `v#`/`a#` gutter, active row
+  highlighted; `t`/`T` cycle and `<N>t` jumps (digits stay vim counts);
+  navigation, edits, and the monitor (active-track EDL) all follow the
+  active track; `:track add video|audio · mute [N] · rm N`.
+- **CLI:** `nle track ls|add|mute|rm`, `nle add --track N`,
+  `nle edl --track N`.
+- **Verified:** 175 tests, clippy clean, `./demo.sh` multi-track pixel +
+  audio checks.
 
-**Where we start:** the shape already exists — `Timeline { tracks: Vec<Track> }`,
-`TrackKind::{Video, Audio}`, and the graph compiler already emits a
-per-segment video+audio pair and `concat`s. So M4 is mostly generalizing
-"the track" to "a track index" (~80 `video_track()` call sites) plus
-layering/mixing — not a rewrite.
+**Deferred:** composite preview (M5); linked a/v detach; a muted sole video
+track is a no-op in the fast path.
 
-**Decisions (proposed):** track identity = index + kind (position-derived,
-matching the segment model); audio = **minimal now** (extra audio tracks;
-linked a/v detach later); `active_track` is TUI state; the instant monitor
-previews the **active** video track (mpv `edl://` can't compose — composite
-preview is M5); video layers strictly by index, no position/opacity in M4.
-
-**Sequencing (commit per step):**
-1. Model: track helpers (`track(ti)`, `video_tracks`, `add_track`) + a
-   `muted` flag + validate "≥1 video track". Pure, tested; call sites still
-   use `video_track()`.
-2. Edit ops: thread an explicit `track` index through `edit::*`; the TUI
-   passes `active_track`; single-track behaviour identical.
-3. Graph: per-track concat chains + `overlay` (video) + `amix` (audio);
-   **single-track graph byte-identical** (guards M0–M3 proofs).
-4. TUI: one row per track, active-track highlight, `t`/`T` to cycle.
-5. Preview: active-track EDL (+ `nle edl --track N`).
-6. Commands: `:track add video|audio`, `:track mute [N]`, `:track rm N`.
-7. `demo.sh` multi-track export proof (pixel/PSNR + ffprobe audio); update
-   this file's status.
-
-**Risks:** `overlay` eof/short-upper-layer timing (may need `setpts`/`tpad`);
-the ~80-call-site sweep; `amix` gain policy (`normalize=0`, no implicit
-attenuation); set expectations that the monitor shows the active track only.
-
-## EDL (CMX3600) import — planned (after M4)
+## EDL (CMX3600) import — next
 
 Import an edit-decision-list exported from another NLE (Premiere/Resolve/
 Avid) and rebuild the timeline. Cuts only; dissolves/wipes are rejected
@@ -134,9 +123,9 @@ Avid) and rebuild the timeline. Cuts only; dissolves/wipes are rejected
 `*` comment hints; a resolve step matches reels/clip names against the media
 pool (`--media DIR`, `--map REEL=PATH`, error on any unresolved reel); a
 build step emits clips and record gaps. Source timecode is file-relative by
-default with `--src-offset HH:MM:SS:FF`. **Waits for M4** so `A`/`A2` audio
-events become real audio-track clips (linked audio is skipped to avoid
-doubling each clip's embedded audio). Command:
+default with `--src-offset HH:MM:SS:FF`. `A`/`A2` audio events become real
+audio-track clips (M4 makes that possible); linked audio is skipped to avoid
+doubling each clip's embedded audio. Command:
 `nle import-edl <file.edl> --media DIR [--fps] [--src-offset] [--map]`.
 
 ## M5 — transitions, effects, proxies (planned)

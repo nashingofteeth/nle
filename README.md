@@ -5,10 +5,11 @@ FFmpeg underneath. Built for this machine only.
 
 ## Status
 
-**M3 complete — M4 (multi-track + audio) next.** The TUI drives the model
+**M4 complete — EDL (CMX3600) import next.** The TUI drives the model
 directly: trim in/out, split, delete, yank/paste, insert gap, **extend
-mode**, a **media pool** with file preview, and undo/redo — auto-saved,
-instant preview. Full roadmap and current status: `PLAN.md`.
+mode**, a **media pool** with file preview, **multi-track editing** (track
+rows, active track, overlay video + mixed audio), and undo/redo —
+auto-saved, instant preview. Full roadmap and current status: `PLAN.md`.
 
 ## Usage
 
@@ -30,6 +31,10 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              dd delete (gap) · D delete + ripple · yy yank clip/gap ·
 #              p paste-over (replaces underneath) · P ripple-insert ·
 #              u / Ctrl-r undo/redo (auto-saved)
+#   tracks:    t/T cycle the active track · <N>t jump to track N ·
+#              :track add video|audio · :track mute [N] · :track rm N ·
+#              navigation, edits, and the monitor all follow the active
+#              track (the timeline draws one row per track)
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of
 #              a cut (bracket opens toward its side) ·
@@ -55,6 +60,10 @@ $N init
 $N import intro.mp4 b-roll.mov
 $N add intro.mp4 --in 2.5 --out 7      # trimmed clip at end of track
 $N add b-roll.mov --at 10              # creates a gap before it
+$N track add video                     # a second (overlay) video track
+$N add b-roll.mov --track 1 --at 3     # place on that track
+$N track add audio                     # an audio track; mix on export
+$N track ls                            # list tracks (index, kind, mute)
 $N show                                # or --json for the raw EDL
 $N remove 2                            # by clip id from `show`
 $N media ls                            # pooled assets + usage

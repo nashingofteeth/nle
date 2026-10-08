@@ -137,6 +137,19 @@ plainly.
   fields — so "pool open" and its selection can't drift apart. Pool handlers
   use small `Copy` accessors (`pool_sel`/`set_pool_sel`/…) so a borrow ends at
   the statement instead of borrowing all of `App` across a helper call.
+- **Track-scoped edits (M4):** every track-resolving edit op is
+  `*_on(project, track, …)`; the plain name is a wrapper for the first
+  video track. New ops must take the index — don't add fresh
+  `video_track()` calls. A stale index returns `TrackNotFound`, never
+  panics (`track_at`).
+- **The active track drives everything:** `App::active()` is the clamped
+  index; navigation, edits, and the monitor EDL all follow it. Digits are
+  vim counts, so track selection is `t`/`T` and `<N>t` — **bare `1..9`
+  would break `3l`**.
+- **Export stays byte-identical for the simple case:** one video track +
+  no audio track keeps the classic concat path; otherwise each track is
+  padded to the timeline length, video layers `overlay` bottom→top (upper
+  gaps `black@0.0`/`yuva420p`), audio `amix`es, and muted tracks drop out.
 
 ## Rust gotchas hit this session
 
@@ -172,6 +185,12 @@ plainly.
   duration; the pool clock snaps to `dur − 1/fps` at EOF.
 - Pool preview stops at the reachable source: a clip head previews
   `[0, aout]`, not the whole asset.
+- `overlay`'s `format` option accepts only `yuv420/yuv422/yuv444/rgb/gbrp/
+  auto` — `yuva420p` is rejected as invalid, but the overlay's alpha plane
+  still drives compositing (the top layer's transparency works anyway).
+- A helper that emits a filter chain must push its output label too: the
+  multi-track audio pad emitted its `anullsrc…` chain but forgot the
+  label, and ffmpeg reported a filter with an unconnected pad.
 
 ## Layout & dependency policy (moved from README)
 
