@@ -89,6 +89,34 @@ for t in 1 3.5; do
 done
 rm -f pixel.raw
 
+echo "== detect-edits: reverse-engineer a rendered file =="
+# A known 4-shot file: red 0–1, blue 1–2, black 2–3, green 3–4. The black
+# span exercises gap recovery (scene detection alone misses cuts to black).
+if [ ! -f detect-src.mp4 ]; then
+  ffmpeg -v error -y \
+    -f lavfi -i "color=c=red:s=320x240:r=30:d=1" \
+    -f lavfi -i "color=c=blue:s=320x240:r=30:d=1" \
+    -f lavfi -i "color=c=black:s=320x240:r=30:d=1" \
+    -f lavfi -i "color=c=green:s=320x240:r=30:d=1" \
+    -filter_complex "[0:v][1:v][2:v][3:v]concat=n=4:v=1:a=0[v]" \
+    -map "[v]" -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p detect-src.mp4
+fi
+rm -f detect.json detect.history.json
+$N --project detect.json detect-edits detect-src.mp4 --force
+$N --project detect.json export -o detect-out.mp4 >/dev/null
+echo "  expect: red 0–1, blue 1–2, black(gap) 2–3, green 3–4"
+for t in 0.5 1.5 2.5 3.5; do
+  ffmpeg -v error -y -ss "$t" -i detect-out.mp4 -frames:v 1 -f rawvideo -pix_fmt rgb24 pixel.raw
+  printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
+done
+rm -f pixel.raw
+detect_gaps=$($N --project detect.json show | grep -c 'gap' || true)
+if [ "$detect_gaps" -eq 1 ]; then
+  echo "  ✓ recovered the black span as one gap segment"
+else
+  echo "  ✗ expected 1 gap, got $detect_gaps"; exit 1
+fi
+
 echo "== log check (NLE_LOG end-to-end) =="
 LOG="$(pwd)/nle-log-check.txt"
 rm -f "$LOG" log-check.json

@@ -19,12 +19,14 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use nle_core::detect::{Span, reconstruct};
 use nle_core::edit;
 use nle_core::edl::{self, EdlEvent};
 use nle_core::otio::{self, OtioItem};
 use nle_core::time::{parse_timecode, timecode_to_frames};
-use nle_core::timeline::{Clip, Segment, TrackKind};
+use nle_core::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 use nle_core::{Asset, Project, Seconds, VideoSettings, format_seconds, parse_rate, parse_time};
+use nle_ffmpeg::detect::{DetectOptions, detect};
 use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
 
 #[derive(Parser)]
@@ -138,6 +140,35 @@ enum Cmd {
         /// Remap a clip path: OLD=NEW (repeatable)
         #[arg(long = "remap", value_name = "OLD=NEW")]
         remap: Vec<String>,
+        /// Overwrite an existing project file
+        #[arg(long)]
+        force: bool,
+    },
+    /// Detect the cuts in a rendered file and rebuild an editable timeline
+    DetectEdits {
+        /// The rendered/edited video to analyze
+        file: PathBuf,
+        /// Scene-change score in 0..1 (lower = more cuts)
+        #[arg(long, default_value_t = 0.4)]
+        threshold: f32,
+        /// Ignore shots shorter than this (suppresses flashes)
+        #[arg(long, value_name = "TIME", default_value = "0.5")]
+        min_shot: String,
+        /// Shortest black interval to treat as a gap
+        #[arg(long, value_name = "TIME", default_value = "0.1")]
+        black_min: String,
+        /// Do not recover black intervals as gaps
+        #[arg(long)]
+        no_gaps: bool,
+        /// Force the frame rate (e.g. 30000/1001, 29.97, 24)
+        #[arg(long, value_name = "RATE")]
+        fps: Option<String>,
+        /// Rebuild video only, dropping the file's audio
+        #[arg(long)]
+        video_only: bool,
+        /// Print the detected cut points; write no project
+        #[arg(long)]
+        list: bool,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -328,6 +359,28 @@ fn main() -> Result<()> {
             &remap,
             force,
         ),
+        Cmd::DetectEdits {
+            file,
+            threshold,
+            min_shot,
+            black_min,
+            no_gaps,
+            fps,
+            video_only,
+            list,
+            force,
+        } => cmd_detect_edits(DetectArgs {
+            project: &cli.project,
+            file: &file,
+            threshold,
+            min_shot: &min_shot,
+            black_min: &black_min,
+            no_gaps,
+            fps: fps.as_deref(),
+            video_only,
+            list,
+            force,
+        }),
         Cmd::Export {
             output,
             encoder,
@@ -1130,6 +1183,167 @@ fn cmd_import_otio(
         project.timeline.tracks.len(),
         project.media.len(),
         clips
+    );
+    Ok(())
+}
+
+/// Arguments for [`cmd_detect_edits`]. A parameter struct keeps the call
+/// site readable and clippy's `too_many_arguments` quiet — the Rust
+/// equivalent of "pass an options object" instead of a long positional list.
+struct DetectArgs<'a> {
+    project: &'a Path,
+    file: &'a Path,
+    threshold: f32,
+    min_shot: &'a str,
+    black_min: &'a str,
+    no_gaps: bool,
+    fps: Option<&'a str>,
+    video_only: bool,
+    list: bool,
+    force: bool,
+}
+
+fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
+    let DetectArgs {
+        project: project_path,
+        file,
+        threshold,
+        min_shot,
+        black_min,
+        no_gaps,
+        fps: fps_arg,
+        video_only,
+        list,
+        force,
+    } = args;
+    let min_shot =
+        parse_time(min_shot).with_context(|| format!("invalid --min-shot {min_shot:?}"))?;
+    let black_min =
+        parse_time(black_min).with_context(|| format!("invalid --black-min {black_min:?}"))?;
+
+    let canonical = file
+        .canonicalize()
+        .with_context(|| format!("{} not found", file.display()))?;
+    let report = probe(&canonical).with_context(|| format!("probing {}", file.display()))?;
+    let duration = report
+        .duration()
+        .context("could not determine the file's duration")?;
+    let fps = match fps_arg {
+        Some(s) => parse_fps_arg(s)?,
+        None => report.fps().context("no frame rate known — pass --fps")?,
+    };
+
+    // The reconstruction references one asset, and export reads the first
+    // stream of each kind — say so rather than silently dropping the rest.
+    let count_of = |kind: &str| {
+        report
+            .streams
+            .iter()
+            .filter(|s| s.codec_type.as_deref() == Some(kind))
+            .count()
+            .saturating_sub(1)
+    };
+    let extra_video = count_of("video");
+    let extra_audio = count_of("audio");
+    if extra_video > 0 {
+        eprintln!(
+            "warning: {extra_video} extra video stream(s) ignored — only the first is reconstructed"
+        );
+    }
+    if extra_audio > 0 {
+        eprintln!("warning: {extra_audio} extra audio stream(s) ignored — only the first is used");
+    }
+
+    let opts = DetectOptions {
+        threshold,
+        black_min,
+        ..DetectOptions::default()
+    };
+    let detection = detect(&canonical, &opts)
+        .with_context(|| format!("detecting cuts in {}", file.display()))?;
+    let blacks: &[(Seconds, Seconds)] = if no_gaps { &[] } else { &detection.blacks };
+    let spans = reconstruct(&detection.cuts, blacks, duration, fps, min_shot);
+
+    let gaps = spans
+        .iter()
+        .filter(|s| matches!(s, Span::Gap { .. }))
+        .count();
+    if list {
+        println!(
+            "{} cut(s), {gaps} gap(s), {} total",
+            detection.cuts.len(),
+            format_seconds(&duration)
+        );
+        for c in &detection.cuts {
+            println!("  cut {}", format_seconds(c));
+        }
+        return Ok(());
+    }
+
+    if project_path.exists() && !force {
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            project_path.display()
+        );
+    }
+
+    let has_audio = report.has_audio();
+    let mut project = Project::new();
+    let (asset_id, _) = project.add_asset(canonical, report);
+    project.fps = Some(fps);
+    project.video = project
+        .asset(asset_id)
+        .and_then(|a| a.video_size())
+        .map(|(width, height)| VideoSettings { width, height });
+
+    // Both tracks follow the SAME spans: in the rendered file a gap is black
+    // + silence, and splitting audio at the video cuts keeps each shot a
+    // movable pair. (No a/v linking yet, so reordering only the video still
+    // desyncs — a model limit, not a detector bug.)
+    let mut next_id = 1u32;
+    let mut build_track = |kind: TrackKind| {
+        let mut segments = Vec::new();
+        for span in &spans {
+            match span {
+                Span::Gap { duration } => segments.push(Segment::Gap(Gap {
+                    duration: *duration,
+                })),
+                Span::Media { start, end } => {
+                    segments.push(Segment::Clip(Clip {
+                        id: next_id,
+                        asset: asset_id,
+                        asset_in: *start,
+                        asset_out: *end,
+                    }));
+                    next_id += 1;
+                }
+            }
+        }
+        Track {
+            kind,
+            muted: false,
+            segments,
+        }
+    };
+    let mut tracks = vec![build_track(TrackKind::Video)];
+    if has_audio && !video_only {
+        tracks.push(build_track(TrackKind::Audio));
+    }
+    project.timeline = Timeline { tracks };
+    project.validate()?;
+    save_and_reset_history(&project, project_path)?;
+
+    let clips = spans
+        .iter()
+        .filter(|s| matches!(s, Span::Media { .. }))
+        .count();
+    println!(
+        "✓ {} — {} cut(s) → {} clip(s), {} gap(s) @ {}",
+        project_path.display(),
+        detection.cuts.len(),
+        clips,
+        gaps,
+        format_seconds(&fps),
     );
     Ok(())
 }

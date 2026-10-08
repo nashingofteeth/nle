@@ -5,6 +5,7 @@
 //! spawned (the project save/load is I/O but pure-data I/O).
 //! Keeping it pure means it can be unit-tested exhaustively and instantly.
 
+pub mod detect;
 pub mod edit;
 pub mod edl;
 pub mod media;
@@ -13,6 +14,7 @@ pub mod project;
 pub mod time;
 pub mod timeline;
 
+pub use detect::{Span, reconstruct};
 pub use edit::{
     Atom, Batch, Change, EditError, EditOp, History, absorb_outward, delete_clip_by_id,
     delete_ripple, delete_under, extend_edge, extend_gap_end, paste, paste_ripple, set_speed,
