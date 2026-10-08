@@ -57,6 +57,9 @@ enum Cmd {
     Add {
         /// Media file (auto-imported if new)
         file: PathBuf,
+        /// Track index to place on (0-based; default 0)
+        #[arg(long, default_value_t = 0)]
+        track: usize,
         /// Timeline position (default: end of track)
         #[arg(long, value_name = "TIME")]
         at: Option<String>,
@@ -227,12 +230,14 @@ fn main() -> Result<()> {
         Cmd::Import { files } => cmd_import(&cli.project, &files),
         Cmd::Add {
             file,
+            track,
             at,
             in_point,
             out_point,
         } => cmd_add(
             &cli.project,
             &file,
+            track,
             at.as_deref(),
             in_point.as_deref(),
             out_point.as_deref(),
@@ -383,6 +388,7 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
 fn cmd_add(
     project_path: &Path,
     file: &Path,
+    track: usize,
     at: Option<&str>,
     in_point: Option<&str>,
     out_point: Option<&str>,
@@ -447,7 +453,11 @@ fn cmd_add(
     // Ripple paste: inserts at --at (splits clips/gaps) or appends.
     let append_at = match at_t {
         Some(t) => t,
-        None => project.timeline.end(),
+        None => project
+            .timeline
+            .track(track)
+            .map(|t| t.end())
+            .unwrap_or_else(|| Seconds::from_integer(0)),
     };
     let scratch = Segment::Clip(Clip {
         id: 0,
@@ -456,7 +466,7 @@ fn cmd_add(
         asset_out: out_t,
     });
     let mut history = edit::History::default();
-    let batch = edit::paste_ripple(&project, &scratch, secs_f64(&append_at))?;
+    let batch = edit::paste_ripple_on(&project, track, &scratch, secs_f64(&append_at))?;
     history.apply(&mut project, batch, 0)?;
     save_and_reset_history(&project, project_path)?;
     Ok(())
@@ -468,7 +478,16 @@ fn secs_f64(t: &Seconds) -> f64 {
 
 fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
     let mut project = Project::load(project_path)?;
-    let batch = edit::delete_clip_by_id(&project, id)?;
+    // Clip ids are unique across tracks; find the one that holds it.
+    let Some(ti) = project
+        .timeline
+        .tracks
+        .iter()
+        .position(|t| t.clip_index(id).is_some())
+    else {
+        bail!("clip #{id} not found");
+    };
+    let batch = edit::delete_clip_by_id_on(&project, ti, id)?;
     let mut history = edit::History::default();
     history.apply(&mut project, batch, 0)?;
     save_and_reset_history(&project, project_path)?;
