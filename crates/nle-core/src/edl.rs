@@ -7,7 +7,8 @@
 
 use thiserror::Error;
 
-use crate::time::{Timecode, parse_timecode};
+use crate::time::{Seconds, Timecode, frames_to_seconds, parse_timecode, timecode_to_frames};
+use crate::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 
 #[derive(Debug, Error, PartialEq)]
 pub enum EdlError {
@@ -141,6 +142,158 @@ fn parse_event(line: &str, event: usize) -> Result<EdlEvent, EdlError> {
     })
 }
 
+/// Resolve a reel/clip name to an asset id (the caller owns the pool).
+pub type ReelMap<'a> = dyn Fn(&EdlEvent) -> Option<u32> + 'a;
+
+#[derive(Debug, Error, PartialEq)]
+pub enum BuildError {
+    #[error("no video events in the EDL")]
+    NoVideo,
+    #[error("event {event}: overlapping record time (cuts only)")]
+    Overlap { event: u32 },
+    #[error("event {event}: source out is not after source in")]
+    BadSpan { event: u32 },
+    #[error("event {event}: no pool asset matches {name:?}")]
+    Unresolved { event: u32, name: String },
+}
+
+fn hint(ev: &EdlEvent) -> Option<String> {
+    ev.source_file.clone().or_else(|| ev.clip_name.clone())
+}
+
+fn frames_of(tc: Timecode, doc: &EdlDoc, fps: Seconds) -> i64 {
+    timecode_to_frames(tc, fps, doc.drop_frame)
+}
+
+/// Build a timeline from `doc`: video events become video track 0, then one
+/// audio track per distinct audio channel. Record-position gaps become `Gap`
+/// segments; source timecodes map to file time by subtracting
+/// `src_offset_frames`. Audio events whose reel + source range match a video
+/// event are *linked* (the video clip already carries that audio) and are
+/// skipped, so linked a/v doesn't double.
+pub fn build(
+    doc: &EdlDoc,
+    fps: Seconds,
+    src_offset_frames: i64,
+    resolve: &ReelMap,
+) -> Result<Timeline, BuildError> {
+    let mut video: Vec<&EdlEvent> = doc
+        .events
+        .iter()
+        .filter(|e| e.channel.starts_with('V'))
+        .collect();
+    video.sort_by_key(|e| frames_of(e.rec_in, doc, fps));
+    if video.is_empty() {
+        return Err(BuildError::NoVideo);
+    }
+
+    let mut next_id = 1u32;
+    // Standard EDLs start record time at 01:00:00:00 — the earliest event
+    // is the timeline origin, not zero.
+    let rec_origin = doc
+        .events
+        .iter()
+        .map(|e| frames_of(e.rec_in, doc, fps))
+        .min()
+        .unwrap_or(0);
+    let mut track_of =
+        |events: &[&EdlEvent], overlap_ok: bool| -> Result<Vec<Segment>, BuildError> {
+            let mut segs = Vec::new();
+            let mut cursor = rec_origin;
+            for ev in events {
+                let rec_in = frames_of(ev.rec_in, doc, fps);
+                let rec_out = frames_of(ev.rec_out, doc, fps);
+                if rec_in < cursor {
+                    if overlap_ok {
+                        continue;
+                    }
+                    return Err(BuildError::Overlap { event: ev.num });
+                }
+                if rec_in > cursor {
+                    segs.push(Segment::Gap(Gap {
+                        duration: frames_to_seconds(rec_in - cursor, fps),
+                    }));
+                }
+                let src_in = frames_of(ev.src_in, doc, fps) - src_offset_frames;
+                let src_out = frames_of(ev.src_out, doc, fps) - src_offset_frames;
+                if src_out <= src_in {
+                    return Err(BuildError::BadSpan { event: ev.num });
+                }
+                let asset = resolve(ev).ok_or_else(|| BuildError::Unresolved {
+                    event: ev.num,
+                    name: hint(ev).unwrap_or_else(|| ev.reel.clone()),
+                })?;
+                segs.push(Segment::Clip(Clip {
+                    id: next_id,
+                    asset,
+                    asset_in: frames_to_seconds(src_in, fps),
+                    asset_out: frames_to_seconds(src_out, fps),
+                }));
+                next_id += 1;
+                cursor = rec_out;
+            }
+            Ok(segs)
+        };
+
+    let video_segs = track_of(&video, false)?;
+    let mut tracks = vec![Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: video_segs,
+    }];
+
+    // Linked-audio keys: (reel, src_in_frames, src_out_frames).
+    let linked: Vec<(String, i64, i64)> = video
+        .iter()
+        .map(|e| {
+            (
+                e.reel.clone(),
+                frames_of(e.src_in, doc, fps),
+                frames_of(e.src_out, doc, fps),
+            )
+        })
+        .collect();
+
+    let mut channels: Vec<String> = doc
+        .events
+        .iter()
+        .filter(|e| e.channel.starts_with('A'))
+        .map(|e| e.channel.clone())
+        .collect();
+    channels.sort();
+    channels.dedup();
+
+    for ch in channels {
+        let evs: Vec<&EdlEvent> = doc
+            .events
+            .iter()
+            .filter(|e| {
+                e.channel == ch
+                    && !linked.contains(&(
+                        e.reel.clone(),
+                        frames_of(e.src_in, doc, fps),
+                        frames_of(e.src_out, doc, fps),
+                    ))
+            })
+            .collect();
+        let mut evs = evs;
+        evs.sort_by_key(|e| frames_of(e.rec_in, doc, fps));
+        if evs.is_empty() {
+            continue;
+        }
+        let segs = track_of(&evs, true)?;
+        if !segs.is_empty() {
+            tracks.push(Track {
+                kind: TrackKind::Audio,
+                muted: false,
+                segments: segs,
+            });
+        }
+    }
+
+    Ok(Timeline { tracks })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,5 +358,71 @@ FCM: NON-DROP FRAME
             parse("001 AX V C 00:00:00:00 00:00:02:00 01:00:00:00 nope\n"),
             Err(EdlError::Timecode { event: 1, .. })
         ));
+    }
+
+    fn some_asset(_: &EdlEvent) -> Option<u32> {
+        Some(7)
+    }
+
+    #[test]
+    fn builds_video_with_record_gaps() {
+        // Event 2 starts one second late → a record gap between them.
+        let edl = "\
+001 AX V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+002 AX V C 00:00:01:00 00:00:03:00 01:00:03:00 01:00:05:00
+";
+        let doc = parse(edl).unwrap();
+        let fps = Seconds::from_integer(30);
+        let tl = build(&doc, fps, 0, &some_asset).unwrap();
+        assert_eq!(tl.tracks.len(), 1);
+        let segs = &tl.tracks[0].segments;
+        assert!(matches!(segs[0], Segment::Clip(_)), "{segs:?}");
+        assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
+        assert!(matches!(segs[2], Segment::Clip(_)), "{segs:?}");
+    }
+
+    #[test]
+    fn source_offset_maps_to_file_time() {
+        let edl = "001 AX V C 01:00:00:00 01:00:02:00 01:00:00:00 01:00:02:00\n";
+        let doc = parse(edl).unwrap();
+        let fps = Seconds::from_integer(30);
+        let off = timecode_to_frames(parse_timecode("01:00:00:00").unwrap(), fps, false);
+        let tl = build(&doc, fps, off, &some_asset).unwrap();
+        match &tl.tracks[0].segments[0] {
+            Segment::Clip(c) => {
+                assert_eq!(c.asset_in, Seconds::from_integer(0));
+                assert_eq!(c.asset_out, Seconds::from_integer(2));
+            }
+            _ => panic!("expected a clip"),
+        }
+    }
+
+    #[test]
+    fn unresolved_event_errors() {
+        let edl = "001 AX V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n";
+        let doc = parse(edl).unwrap();
+        let none = |_: &EdlEvent| None;
+        let err = build(&doc, Seconds::from_integer(30), 0, &none).unwrap_err();
+        assert!(
+            matches!(err, BuildError::Unresolved { event: 1, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn linked_audio_is_skipped_but_distinct_audio_gets_a_track() {
+        let edl = "\
+001 AX V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+002 AX A C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+003 MU A C 00:00:00:00 00:00:05:00 01:00:00:00 01:00:05:00
+";
+        let doc = parse(edl).unwrap();
+        let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
+        assert_eq!(tl.tracks.len(), 2, "video + one distinct audio track");
+        assert_eq!(tl.tracks[0].kind, TrackKind::Video);
+        assert_eq!(tl.tracks[1].kind, TrackKind::Audio);
+        // The linked A event (same reel + src as the video) is skipped;
+        // only the MU event remains.
+        assert_eq!(tl.tracks[1].segments.len(), 1);
     }
 }

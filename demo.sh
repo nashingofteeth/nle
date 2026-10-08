@@ -69,6 +69,26 @@ else
   echo "  ✗ multi-track export has no audio"; exit 1
 fi
 
+echo "== EDL (CMX3600) import =="
+cat > demo.edl <<'EOF'
+TITLE: demo
+FCM: NON-DROP FRAME
+
+001  AX  V  C  00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+* FROM CLIP NAME: red.mp4
+002  AX  V  C  00:00:00:00 00:00:02:00 01:00:03:00 01:00:05:00
+* FROM CLIP NAME: blue.mp4
+EOF
+rm -f edl-demo.json edl-demo.history.json
+$N --project edl-demo.json import-edl demo.edl --media . --force >/dev/null
+$N --project edl-demo.json export -o demo-edl.mp4 >/dev/null
+echo "  expect: red 0–2, gap 2–3, blue 3–5"
+for t in 1 3.5; do
+  ffmpeg -v error -y -ss "$t" -i demo-edl.mp4 -frames:v 1 -f rawvideo -pix_fmt rgb24 pixel.raw
+  printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
+done
+rm -f pixel.raw
+
 echo "== log check (NLE_LOG end-to-end) =="
 LOG="$(pwd)/nle-log-check.txt"
 rm -f "$LOG" log-check.json

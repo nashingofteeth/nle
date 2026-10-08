@@ -14,11 +14,14 @@ mod preview;
 #[cfg(feature = "tui")]
 mod tui;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use nle_core::edit;
+use nle_core::edl::{self, EdlEvent};
+use nle_core::time::{parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Clip, Segment, TrackKind};
 use nle_core::{Asset, Project, Seconds, VideoSettings, format_seconds, parse_rate, parse_time};
 use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
@@ -90,6 +93,26 @@ enum Cmd {
     Track {
         #[command(subcommand)]
         action: TrackCmd,
+    },
+    /// Import a CMX3600 EDL, building a project from the listed media
+    ImportEdl {
+        /// The .edl file
+        file: PathBuf,
+        /// Directory of media to match reels/clip names against
+        #[arg(long, value_name = "DIR")]
+        media: PathBuf,
+        /// Force the frame rate (e.g. 30000/1001, 29.97, 24)
+        #[arg(long, value_name = "RATE")]
+        fps: Option<String>,
+        /// Source timecode that maps to file time zero
+        #[arg(long, value_name = "TC", default_value = "00:00:00:00")]
+        src_offset: String,
+        /// Override a reel: REEL=PATH (repeatable)
+        #[arg(long = "map", value_name = "REEL=PATH")]
+        map: Vec<String>,
+        /// Overwrite an existing project file
+        #[arg(long)]
+        force: bool,
     },
     /// Render the timeline to a file
     Export {
@@ -246,6 +269,22 @@ fn main() -> Result<()> {
         Cmd::Show { json } => cmd_show(&cli.project, json),
         Cmd::Media { action } => cmd_media(&cli.project, action),
         Cmd::Track { action } => cmd_track(&cli.project, action),
+        Cmd::ImportEdl {
+            file,
+            media,
+            fps,
+            src_offset,
+            map,
+            force,
+        } => cmd_import_edl(
+            &cli.project,
+            &file,
+            &media,
+            fps.as_deref(),
+            &src_offset,
+            &map,
+            force,
+        ),
         Cmd::Export {
             output,
             encoder,
@@ -682,6 +721,178 @@ fn cmd_track(project_path: &Path, action: TrackCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Media extensions probed when importing a `--media` directory.
+const MEDIA_EXTS: &[&str] = &[
+    "mp4", "mov", "mkv", "m4v", "avi", "webm", "wav", "mp3", "m4a", "aac", "flac", "ogg",
+];
+
+/// `--fps` accepts `n/d`, a decimal NTSC rate, or a whole number.
+fn parse_fps_arg(s: &str) -> Result<Seconds> {
+    if let Some(r) = parse_rate(s) {
+        return Ok(r);
+    }
+    match s {
+        "23.976" => Ok(Seconds::new(24000, 1001)),
+        "29.97" => Ok(Seconds::new(30000, 1001)),
+        "59.94" => Ok(Seconds::new(60000, 1001)),
+        _ => {
+            let n: i64 = s
+                .parse()
+                .with_context(|| format!("invalid --fps {s:?} (try 30000/1001, 29.97, or 24)"))?;
+            Ok(Seconds::from_integer(n))
+        }
+    }
+}
+
+/// Match a reel/clip name to a pooled asset: exact filename, then stem,
+/// then a case-insensitive substring (unique best).
+fn match_asset(project: &Project, needle: &str) -> Option<u32> {
+    let needle = needle.to_lowercase();
+    let needle_stem = Path::new(&needle)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| needle.clone());
+    let mut fuzzy = None;
+    for a in &project.media {
+        let file = a
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let stem = a
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if file == needle || stem == needle || file == needle_stem || stem == needle_stem {
+            return Some(a.id);
+        }
+        if fuzzy.is_none() && (stem.contains(&needle_stem) || needle_stem.contains(&stem)) {
+            fuzzy = Some(a.id);
+        }
+    }
+    fuzzy
+}
+
+/// Resolve an EDL event to an asset id: an explicit `--map` reel, then the
+/// `SOURCE FILE`/`FROM CLIP NAME` filename, then the reel field.
+fn resolve_reel(project: &Project, map: &HashMap<String, PathBuf>, ev: &EdlEvent) -> Option<u32> {
+    if let Some(path) = map.get(&ev.reel)
+        && let Some(a) = project.asset_by_path(path)
+    {
+        return Some(a.id);
+    }
+    for cand in [ev.source_file.as_deref(), ev.clip_name.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(id) = match_asset(project, cand) {
+            return Some(id);
+        }
+    }
+    match_asset(project, &ev.reel)
+}
+
+fn cmd_import_edl(
+    project_path: &Path,
+    edl_path: &Path,
+    media_dir: &Path,
+    fps_arg: Option<&str>,
+    src_offset: &str,
+    maps: &[String],
+    force: bool,
+) -> Result<()> {
+    if project_path.exists() && !force {
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            project_path.display()
+        );
+    }
+    let text = std::fs::read_to_string(edl_path)
+        .with_context(|| format!("reading {}", edl_path.display()))?;
+    let doc = edl::parse(&text).with_context(|| format!("parsing {}", edl_path.display()))?;
+
+    // Probe + pool every media file, deduped by path.
+    let mut project = Project::new();
+    let add = |project: &mut Project, p: &Path| -> Result<PathBuf> {
+        let canonical = p
+            .canonicalize()
+            .with_context(|| format!("{} not found", p.display()))?;
+        if project.asset_by_path(&canonical).is_none() {
+            let report = probe(&canonical)?;
+            project.add_asset(canonical.clone(), report);
+        }
+        Ok(canonical)
+    };
+
+    let mut imported = 0usize;
+    for entry in std::fs::read_dir(media_dir)
+        .with_context(|| format!("reading media dir {}", media_dir.display()))?
+    {
+        let path = entry?.path();
+        let is_media = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| MEDIA_EXTS.contains(&e.to_lowercase().as_str()))
+            .unwrap_or(false);
+        if path.is_file() && is_media {
+            add(&mut project, &path)?;
+            imported += 1;
+        }
+    }
+    if imported == 0 {
+        bail!("no media files found in {}", media_dir.display());
+    }
+
+    let mut map: HashMap<String, PathBuf> = HashMap::new();
+    for m in maps {
+        let (reel, path) = m
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--map expects REEL=PATH, got {m:?}"))?;
+        let canonical = add(&mut project, Path::new(path))?;
+        map.insert(reel.to_string(), canonical);
+    }
+
+    // Prefer the first video event's asset for settings; fall back to any.
+    let (fps, size) = {
+        let first_asset = doc
+            .events
+            .iter()
+            .filter(|e| e.channel.starts_with('V'))
+            .find_map(|e| resolve_reel(&project, &map, e))
+            .and_then(|id| project.asset(id));
+        let fps = match fps_arg {
+            Some(s) => parse_fps_arg(s)?,
+            None => first_asset
+                .and_then(|a| a.fps())
+                .or_else(|| project.media.iter().find_map(|a| a.fps()))
+                .ok_or_else(|| anyhow::anyhow!("no frame rate known — pass --fps"))?,
+        };
+        let size = first_asset
+            .and_then(|a| a.video_size())
+            .or_else(|| project.media.iter().find_map(|a| a.video_size()));
+        (fps, size)
+    };
+    project.fps = Some(fps);
+    project.video = size.map(|(width, height)| VideoSettings { width, height });
+
+    let offset_frames = timecode_to_frames(parse_timecode(src_offset)?, fps, doc.drop_frame);
+    let timeline = edl::build(&doc, fps, offset_frames, &|ev| {
+        resolve_reel(&project, &map, ev)
+    })?;
+    project.timeline = timeline;
+    project.validate()?;
+    save_and_reset_history(&project, project_path)?;
+    println!(
+        "✓ {} — {} event(s) → {} track(s), {} asset(s)",
+        project_path.display(),
+        doc.events.len(),
+        project.timeline.tracks.len(),
+        project.media.len()
+    );
+    Ok(())
 }
 
 fn cmd_export(
