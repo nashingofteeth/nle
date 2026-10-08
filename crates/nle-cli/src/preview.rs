@@ -55,11 +55,11 @@ pub enum Segment {
     },
 }
 
-/// Flatten the video track into ordered preview segments.
-pub fn segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
+/// Flatten track `ti` into ordered preview segments.
+pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewError> {
     let track = project
         .timeline
-        .video_track()
+        .track(ti)
         .ok_or(PreviewError::NoVideoTrack)?;
     if track.segments.is_empty() {
         return Err(PreviewError::Empty);
@@ -181,10 +181,10 @@ pub fn build_black_preview(
 /// anyway (mpv simply holds black past the last chunk).
 pub const EXTEND_PREVIEW_SECS: i64 = 3600;
 
-/// Build the full `edl://` URL for a project, generating the black gap
+/// Build the full `edl://` URL for track `ti`, generating the black gap
 /// file if the timeline has gaps.
-pub fn build_edl(project: &Project) -> Result<String, PreviewError> {
-    let segs = segments(project)?;
+pub fn build_edl(project: &Project, ti: usize) -> Result<String, PreviewError> {
+    let segs = segments(project, ti)?;
     let has_gap = segs.iter().any(|s| matches!(s, Segment::Gap { .. }));
     let black = if has_gap {
         let size = project.video.as_ref().ok_or(PreviewError::NoSize)?;
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn segments_flatten_clips_and_gaps_in_order() {
         let p = project_with_gap();
-        let segs = segments(&p).unwrap();
+        let segs = segments(&p, 0).unwrap();
         assert_eq!(
             segs,
             vec![
@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn edl_starts_with_prefix() {
         let p = project_with_gap();
-        let segs = segments(&p).unwrap();
+        let segs = segments(&p, 0).unwrap();
         let edl = assemble_edl(&segs, Some(Path::new("/b.mp4"))).unwrap();
         assert!(edl.starts_with("%14%/media/red.mp4,1,2;"), "{edl}");
     }

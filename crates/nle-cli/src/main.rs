@@ -111,7 +111,11 @@ enum Cmd {
     Edit {},
 
     /// Print the mpv preview URL for the timeline (debugging)
-    Edl {},
+    Edl {
+        /// Track index to preview (0-based; default 0)
+        #[arg(long, default_value_t = 0)]
+        track: usize,
+    },
 
     /// Show what's inside a media file (streams, codecs, rates)
     Probe {
@@ -218,7 +222,7 @@ fn main() -> Result<()> {
     match cli.command {
         #[cfg(feature = "tui")]
         Cmd::Edit {} => cmd_edit(&cli.project),
-        Cmd::Edl {} => cmd_edl(&cli.project),
+        Cmd::Edl { track } => cmd_edl(&cli.project, track),
         Cmd::Init { force } => cmd_init(&cli.project, force),
         Cmd::Import { files } => cmd_import(&cli.project, &files),
         Cmd::Add {
@@ -301,15 +305,15 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
         &media_title,
     )?;
     player.observe()?;
-    let edl = preview::build_edl(&project)?;
+    let edl = preview::build_edl(&project, 0)?;
     player.load(&edl, None);
     tui::run(project, project_path.to_path_buf(), player)?;
     Ok(())
 }
 
-fn cmd_edl(project_path: &Path) -> Result<()> {
+fn cmd_edl(project_path: &Path, track: usize) -> Result<()> {
     let project = Project::load(project_path)?;
-    println!("{}", preview::build_edl(&project)?);
+    println!("{}", preview::build_edl(&project, track)?);
     Ok(())
 }
 

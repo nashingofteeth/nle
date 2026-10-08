@@ -509,9 +509,12 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
 /// window (e.g. vim) and watch it here.
 fn reload_project(app: &mut App, player: &dyn Mpv) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
-    let edl = preview::build_edl(&project)?;
     app.project = project;
+    app.active_track = app
+        .active_track
+        .min(app.project.timeline.tracks.len().saturating_sub(1));
     app.history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
+    let edl = preview::build_edl(&app.project, app.active())?;
     player.load(&edl, Some(app.playhead));
     Ok(())
 }
@@ -715,7 +718,7 @@ fn close_pool(app: &mut App, player: &dyn Mpv) {
         app.last_pool_sel = sel; // capture on exit so reopening returns here
     }
     app.mode = Mode::Normal;
-    if let Ok(edl) = preview::build_edl(&app.project) {
+    if let Ok(edl) = preview::build_edl(&app.project, app.active()) {
         player.load(&edl, Some(resume.max(0.0)));
     }
     app.playhead = resume;
@@ -1804,7 +1807,7 @@ fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
         crate::log::line(&format!("load pool preview #{sel}"));
         load_pool_preview(app, player);
     } else {
-        match preview::build_edl(&app.project) {
+        match preview::build_edl(&app.project, app.active()) {
             Ok(edl) => {
                 crate::log::line(&format!("load timeline EDL at {:.3}", app.playhead));
                 player.load(&edl, Some(app.playhead));
@@ -2126,7 +2129,7 @@ fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
 /// Leave extend mode: project timeline back on the monitor, playhead at
 /// `pos`.
 fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
-    match preview::build_edl(&app.project) {
+    match preview::build_edl(&app.project, app.active()) {
         Ok(edl) => player.load(&edl, Some(pos.max(0.0))),
         Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
     }
@@ -2787,17 +2790,22 @@ fn track_label(project: &Project, ti: usize) -> String {
     "—".to_string()
 }
 
-/// Make track `idx` active (clamped) and notice it. Switching tracks only
-/// changes which track edits and navigation act on; the monitor keeps the
-/// timeline preview until M4's active-track preview lands.
-fn set_active_track(app: &mut App, _player: &dyn Mpv, idx: usize) {
+/// Make track `idx` active (clamped) and point the monitor at it.
+fn set_active_track(app: &mut App, player: &dyn Mpv, idx: usize) {
     let n = app.project.timeline.tracks.len();
     if n == 0 {
         return;
     }
     app.active_track = idx.min(n - 1);
     let label = track_label(&app.project, app.active_track);
-    app.set_message(&format!("track {label}"));
+    // The monitor follows the active track.
+    match preview::build_edl(&app.project, app.active()) {
+        Ok(edl) => {
+            player.load(&edl, Some(app.playhead));
+            app.set_message(&format!("track {label}"));
+        }
+        Err(e) => app.set_message(&format!("track {label} — preview: {e}")),
+    }
 }
 
 fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
@@ -5340,6 +5348,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nle-tui-test-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("t.json")
+    }
+
+    #[test]
+    fn switching_track_reloads_the_monitor_for_that_track() {
+        let mut p = asset_project();
+        let a = p.media[0].id;
+        let ti = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(nle_core::Clip {
+            id: 9,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(2),
+        })];
+        let mut app = App::new(p, temp_project_path("track-switch"));
+        let fake = FakeMpv::new();
+        set_active_track(&mut app, &fake, 1);
+        assert_eq!(app.active(), 1);
+        match &fake.calls()[0] {
+            Call::Load(url, _) => assert!(url.starts_with("edl://"), "{url}"),
+            other => panic!("expected a load, got {other:?}"),
+        }
+        assert!(app.message.contains("a1"), "{}", app.message);
     }
 
     #[test]
