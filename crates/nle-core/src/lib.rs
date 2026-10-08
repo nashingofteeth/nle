@@ -6,6 +6,7 @@
 //! Keeping it pure means it can be unit-tested exhaustively and instantly.
 
 pub mod edit;
+pub mod edl;
 pub mod media;
 pub mod project;
 pub mod time;
@@ -16,6 +17,7 @@ pub use edit::{
     delete_ripple, delete_under, extend_edge, extend_gap_end, paste, paste_ripple, split, trim_in,
     trim_in_ripple, trim_out, trim_out_ripple,
 };
+pub use edl::{EdlDoc, EdlError, EdlEvent};
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use project::{Asset, Project, ProjectError, VideoSettings};
 pub use time::{
