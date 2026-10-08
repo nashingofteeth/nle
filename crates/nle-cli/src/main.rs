@@ -1437,16 +1437,25 @@ fn span_segments(spans: &[Span], asset: u32, next_id: &mut u32) -> Vec<Segment> 
 
 /// Append `segments` to track `ti`, padding with a gap up to `start` so the
 /// appended block begins at a common point on every track (keeps a/v aligned).
-fn append_spans(project: &mut Project, ti: usize, start: Seconds, segments: Vec<Segment>) {
-    if let Some(track) = project.timeline.track_mut(ti) {
-        let end = track.end();
-        if end < start {
-            track.segments.push(Segment::Gap(Gap {
-                duration: start - end,
-            }));
-        }
-        track.segments.extend(segments);
+/// A padding gap coalesces with a leading gap in the run, so we never leave
+/// two adjacent `Gap` segments.
+fn append_spans(project: &mut Project, ti: usize, start: Seconds, mut segments: Vec<Segment>) {
+    let Some(track) = project.timeline.track_mut(ti) else {
+        return;
+    };
+    let end = track.end();
+    if end < start {
+        track.segments.push(Segment::Gap(Gap {
+            duration: start - end,
+        }));
     }
+    if matches!(segments.first(), Some(Segment::Gap(_)))
+        && let Some(Segment::Gap(prev)) = track.segments.last_mut()
+        && let Segment::Gap(first) = segments.remove(0)
+    {
+        prev.duration += first.duration;
+    }
+    track.segments.extend(segments);
 }
 
 /// The next free clip id: one past the highest in use. Mirrors
@@ -1682,4 +1691,41 @@ fn cmd_trim(
     };
     println!("✓ {}  ({})", output.display(), shown);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gap(secs: i64) -> Segment {
+        Segment::Gap(Gap {
+            duration: Seconds::from_integer(secs),
+        })
+    }
+
+    #[test]
+    fn append_spans_coalesces_a_padding_gap_into_a_leading_gap() {
+        let mut p = Project::new();
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        // Appending at 5s pads 0..5, and the run starts with a 3s gap: the two
+        // must merge into one 8s gap, not sit adjacent.
+        append_spans(&mut p, ai, Seconds::from_integer(5), vec![gap(3), gap(2)]);
+        let segs = &p.timeline.track(ai).unwrap().segments;
+        assert_eq!(segs, &vec![gap(8), gap(2)], "{segs:?}");
+    }
+
+    #[test]
+    fn append_spans_keeps_the_padding_when_the_run_leads_with_media() {
+        let mut p = Project::new();
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        let clip = Segment::Clip(Clip::new(
+            1,
+            1,
+            Seconds::from_integer(0),
+            Seconds::from_integer(2),
+        ));
+        append_spans(&mut p, ai, Seconds::from_integer(5), vec![clip.clone()]);
+        let segs = &p.timeline.track(ai).unwrap().segments;
+        assert_eq!(segs, &vec![gap(5), clip], "{segs:?}");
+    }
 }
