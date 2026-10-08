@@ -17,8 +17,8 @@ use crate::timeline::{Segment, Timeline, TimelineError};
 
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
-/// never silently misread.
-pub const PROJECT_VERSION: u32 = 2;
+/// never silently misread. v3 adds the per-track `muted` flag (tracks).
+pub const PROJECT_VERSION: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -74,8 +74,9 @@ impl Asset {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
-    /// Project file format — v2 is the segment model. (v1 files are not
-    /// readable; the only v1 project was the regenerable demo.)
+    /// Project file format — v3 is the segment model with multi-track
+    /// (`Track.muted`). (v1/v2 files are not readable; the only v1/v2
+    /// project was the regenerable demo.)
     version: u32,
     /// Output frame rate — None until the first clip sets it.
     #[serde(default, with = "rational_ser::opt")]
@@ -173,8 +174,7 @@ impl Project {
         self.media.iter().find(|a| a.path == path)
     }
 
-    /// Clip ids across the timeline that reference asset `id` (video track
-    /// now; all tracks once M4 lands).
+    /// Clip ids across all tracks that reference asset `id`.
     pub fn asset_usage(&self, id: u32) -> Vec<u32> {
         self.timeline
             .tracks

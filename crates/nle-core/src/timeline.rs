@@ -73,10 +73,23 @@ impl Segment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     pub kind: TrackKind,
+    /// A muted track contributes nothing to the mix. Defaults to `false` so
+    /// a track written before this field existed still parses.
+    #[serde(default)]
+    pub muted: bool,
     pub segments: Vec<Segment>,
 }
 
 impl Track {
+    /// A new, empty track of `kind`.
+    pub fn new(kind: TrackKind) -> Self {
+        Self {
+            kind,
+            muted: false,
+            segments: Vec::new(),
+        }
+    }
+
     /// Total duration: the sum of segment durations.
     pub fn end(&self) -> Seconds {
         self.segments
@@ -137,15 +150,39 @@ impl Timeline {
     /// A timeline with one empty video track.
     pub fn new() -> Self {
         Self {
-            tracks: vec![Track {
-                kind: TrackKind::Video,
-                segments: Vec::new(),
-            }],
+            tracks: vec![Track::new(TrackKind::Video)],
         }
     }
 
+    /// Track at `ti` (by position — the stacking order).
+    pub fn track(&self, ti: usize) -> Option<&Track> {
+        self.tracks.get(ti)
+    }
+
+    pub fn track_mut(&mut self, ti: usize) -> Option<&mut Track> {
+        self.tracks.get_mut(ti)
+    }
+
+    /// All video tracks, in stacking order.
+    pub fn video_tracks(&self) -> impl Iterator<Item = &Track> {
+        self.tracks.iter().filter(|t| t.kind == TrackKind::Video)
+    }
+
+    /// All audio tracks, in stacking order.
+    pub fn audio_tracks(&self) -> impl Iterator<Item = &Track> {
+        self.tracks.iter().filter(|t| t.kind == TrackKind::Audio)
+    }
+
+    /// Append a track of `kind`; returns its index.
+    pub fn add_track(&mut self, kind: TrackKind) -> usize {
+        self.tracks.push(Track::new(kind));
+        self.tracks.len() - 1
+    }
+
+    /// The first video track. Editing still assumes a single video track
+    /// until the ops take an explicit index (M4 step 2).
     pub fn video_track(&self) -> Option<&Track> {
-        self.tracks.iter().find(|t| t.kind == TrackKind::Video)
+        self.video_tracks().next()
     }
 
     pub fn video_track_mut(&mut self) -> Option<&mut Track> {
@@ -172,9 +209,13 @@ impl Timeline {
         Err(TimelineError::ClipNotFound(id))
     }
 
-    /// Structural sanity: positive spans and gaps, valid asset refs are
-    /// the PROJECT's job (it owns the pool). Overlaps are unrepresentable.
+    /// Structural sanity: at least one video track, positive spans and
+    /// gaps. Valid asset refs are the PROJECT's job (it owns the pool).
+    /// Overlaps are unrepresentable.
     pub fn validate(&self) -> Result<(), TimelineError> {
+        if self.video_tracks().next().is_none() {
+            return Err(TimelineError::NoVideoTrack);
+        }
         for (ti, track) in self.tracks.iter().enumerate() {
             for (si, seg) in track.segments.iter().enumerate() {
                 let bad =
@@ -224,6 +265,7 @@ mod tests {
     fn end_is_the_sum_of_segments() {
         let t = Track {
             kind: TrackKind::Video,
+            muted: false,
             segments: vec![clip(1, 2), gap(1), clip(2, 3)],
         };
         assert_eq!(t.end(), Seconds::from_integer(6));
@@ -237,6 +279,7 @@ mod tests {
     fn index_at_and_clip_at() {
         let t = Track {
             kind: TrackKind::Video,
+            muted: false,
             segments: vec![clip(1, 2), gap(1), clip(2, 3)],
         };
         assert_eq!(t.index_at(Seconds::from_integer(0)), Some(0));
@@ -272,5 +315,55 @@ mod tests {
         assert!(p_timeline.validate().is_err());
         p_timeline.tracks[0].segments = vec![gap(0)];
         assert!(p_timeline.validate().is_err());
+    }
+
+    #[test]
+    fn tracks_are_addressed_by_index_and_kind() {
+        let mut t = Timeline::new();
+        assert_eq!(t.tracks.len(), 1, "one video track to start");
+        assert_eq!(t.video_tracks().count(), 1);
+        assert_eq!(t.audio_tracks().count(), 0);
+        assert_eq!(t.video_track().unwrap().kind, TrackKind::Video);
+        assert!(t.track(1).is_none());
+
+        let ai = t.add_track(TrackKind::Audio);
+        assert_eq!(ai, 1, "add_track returns the new index");
+        assert_eq!(t.track(1).unwrap().kind, TrackKind::Audio);
+        assert_eq!(t.video_tracks().count(), 1);
+        assert_eq!(t.audio_tracks().count(), 1);
+        // video_track() is the *first* video, not the last track.
+        assert_eq!(t.video_track().unwrap().kind, TrackKind::Video);
+        t.track_mut(1).unwrap().muted = true;
+        assert!(t.track(1).unwrap().muted);
+    }
+
+    #[test]
+    fn muted_defaults_false_and_round_trips() {
+        let t = Track::new(TrackKind::Audio);
+        assert!(!t.muted, "new tracks are not muted");
+        // A track written before the field existed parses as unmuted.
+        let legacy: Track = serde_json::from_str(r#"{"kind":"Video","segments":[]}"#).unwrap();
+        assert!(!legacy.muted);
+        // And it round-trips once set.
+        let mut t = Track::new(TrackKind::Video);
+        t.muted = true;
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Track = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    #[test]
+    fn validate_requires_a_video_track() {
+        let no_video = Timeline {
+            tracks: vec![Track::new(TrackKind::Audio)],
+        };
+        assert!(matches!(
+            no_video.validate(),
+            Err(TimelineError::NoVideoTrack)
+        ));
+
+        let mut ok = Timeline::new();
+        ok.add_track(TrackKind::Audio);
+        assert!(ok.validate().is_ok());
     }
 }

@@ -3003,6 +3003,7 @@ mod tests {
         p.timeline = Timeline {
             tracks: vec![Track {
                 kind: TrackKind::Video,
+                muted: false,
                 segments: vec![
                     TimelineSegment::Clip(nle_core::Clip {
                         id: 1,
@@ -4628,6 +4629,7 @@ mod tests {
         p.timeline = Timeline {
             tracks: vec![Track {
                 kind: TrackKind::Video,
+                muted: false,
                 segments: vec![
                     seg_clip(1, 3),
                     TimelineSegment::Gap(TimelineGap {
