@@ -5496,7 +5496,8 @@ mod tests {
             id: 9,
             asset: a,
             asset_in: Seconds::from_integer(0),
-            asset_out: Seconds::from_integer(2),
+            // Spans the timeline so the preview needs no black filler file.
+            asset_out: Seconds::from_integer(7),
         })];
         let mut app = App::new(p, temp_project_path("track-switch"));
         let fake = FakeMpv::new();

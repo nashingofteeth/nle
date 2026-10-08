@@ -55,14 +55,23 @@ pub enum Segment {
     },
 }
 
-/// Flatten track `ti` into ordered preview segments.
+/// Flatten track `ti` into ordered preview segments. A track shorter than
+/// the timeline is padded with a trailing gap, so the monitor spans the
+/// whole timeline instead of stopping at the track's own end.
 pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewError> {
     let track = project
         .timeline
         .track(ti)
         .ok_or(PreviewError::NoVideoTrack)?;
+    let total = project.timeline.end();
     if track.segments.is_empty() {
-        return Err(PreviewError::Empty);
+        // An empty track is all gap — preview the whole timeline as black
+        // (unless the timeline itself is empty).
+        return if total > Seconds::from_integer(0) {
+            Ok(vec![Segment::Gap { length: total }])
+        } else {
+            Err(PreviewError::Empty)
+        };
     }
 
     let mut segs = Vec::new();
@@ -80,6 +89,10 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
             }
             TimelineSegment::Gap(g) => segs.push(Segment::Gap { length: g.duration }),
         }
+    }
+    let tail = total - track.end();
+    if tail > Seconds::from_integer(0) {
+        segs.push(Segment::Gap { length: tail });
     }
     Ok(segs)
 }
@@ -344,6 +357,41 @@ mod tests {
                     length: Seconds::from_integer(3),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn shorter_track_previews_its_tail_as_a_gap() {
+        let mut p = project_with_gap(); // track 0 ends at 8 s
+        let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![seg_clip(9, 0, 2)]; // 2 s
+        let segs = segments(&p, ti).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                Segment::Clip {
+                    path: "/media/red.mp4".into(),
+                    start: Seconds::from_integer(0),
+                    length: Seconds::from_integer(2),
+                },
+                // Padded to the 8 s timeline so playback doesn't stop at 2 s.
+                Segment::Gap {
+                    length: Seconds::from_integer(6)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_track_previews_the_whole_timeline_as_black() {
+        let mut p = project_with_gap(); // timeline ends at 8 s
+        let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        let segs = segments(&p, ti).unwrap();
+        assert_eq!(
+            segs,
+            vec![Segment::Gap {
+                length: Seconds::from_integer(8)
+            }]
         );
     }
 
