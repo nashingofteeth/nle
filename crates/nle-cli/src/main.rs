@@ -169,6 +169,12 @@ enum Cmd {
         /// Print the detected cut points; write no project
         #[arg(long)]
         list: bool,
+        /// Append the detected clips to an existing project (at the end)
+        #[arg(long)]
+        append: bool,
+        /// Video track to append to (0-based; default: first video track)
+        #[arg(long, value_name = "N")]
+        track: Option<usize>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -368,6 +374,8 @@ fn main() -> Result<()> {
             fps,
             video_only,
             list,
+            append,
+            track,
             force,
         } => cmd_detect_edits(DetectArgs {
             project: &cli.project,
@@ -379,6 +387,8 @@ fn main() -> Result<()> {
             fps: fps.as_deref(),
             video_only,
             list,
+            append,
+            track,
             force,
         }),
         Cmd::Export {
@@ -1200,6 +1210,8 @@ struct DetectArgs<'a> {
     fps: Option<&'a str>,
     video_only: bool,
     list: bool,
+    append: bool,
+    track: Option<usize>,
     force: bool,
 }
 
@@ -1214,6 +1226,8 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         fps: fps_arg,
         video_only,
         list,
+        append,
+        track,
         force,
     } = args;
     let min_shot =
@@ -1264,6 +1278,10 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
     let blacks: &[(Seconds, Seconds)] = if no_gaps { &[] } else { &detection.blacks };
     let spans = reconstruct(&detection.cuts, blacks, duration, fps, min_shot);
 
+    let clips = spans
+        .iter()
+        .filter(|s| matches!(s, Span::Media { .. }))
+        .count();
     let gaps = spans
         .iter()
         .filter(|s| matches!(s, Span::Gap { .. }))
@@ -1280,14 +1298,85 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         return Ok(());
     }
 
+    let has_audio = report.has_audio();
+
+    // --append: add the detected shots to an existing project, starting at
+    // the timeline end. Pad each target track up to that common point so the
+    // appended video and audio stay aligned.
+    if append {
+        let mut project = Project::load(project_path).with_context(|| {
+            format!(
+                "--append needs an existing project at {}",
+                project_path.display()
+            )
+        })?;
+        if project.fps.is_none() {
+            project.fps = Some(fps);
+        }
+        if project.video.is_none() {
+            project.video = report
+                .size()
+                .map(|(width, height)| VideoSettings { width, height });
+        }
+        let (asset_id, _) = project.add_asset(canonical, report);
+
+        let start = project.timeline.end();
+        let video_ti = match track {
+            Some(n) => {
+                let t = project
+                    .timeline
+                    .track(n)
+                    .with_context(|| format!("no track #{n}"))?;
+                if t.kind != TrackKind::Video {
+                    bail!("track #{n} is not a video track");
+                }
+                n
+            }
+            None => project
+                .timeline
+                .tracks
+                .iter()
+                .position(|t| t.kind == TrackKind::Video)
+                .context("project has no video track")?,
+        };
+
+        let mut next_id = next_clip_id(&project);
+        let video_segments = span_segments(&spans, asset_id, &mut next_id);
+        append_spans(&mut project, video_ti, start, video_segments);
+
+        if has_audio && !video_only {
+            let audio_ti = match project
+                .timeline
+                .tracks
+                .iter()
+                .position(|t| t.kind == TrackKind::Audio)
+            {
+                Some(i) => i,
+                None => project.timeline.add_track(TrackKind::Audio),
+            };
+            let audio_segments = span_segments(&spans, asset_id, &mut next_id);
+            append_spans(&mut project, audio_ti, start, audio_segments);
+        }
+
+        project.validate()?;
+        save_and_reset_history(&project, project_path)?;
+        println!(
+            "✓ {} — appended {} clip(s), {} gap(s) @ {}",
+            project_path.display(),
+            clips,
+            gaps,
+            format_seconds(&fps),
+        );
+        return Ok(());
+    }
+
     if project_path.exists() && !force {
         bail!(
-            "{} already exists (use --force to overwrite)",
+            "{} already exists (use --force to overwrite, or --append)",
             project_path.display()
         );
     }
 
-    let has_audio = report.has_audio();
     let mut project = Project::new();
     let (asset_id, _) = project.add_asset(canonical, report);
     project.fps = Some(fps);
@@ -1301,42 +1390,22 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
     // movable pair. (No a/v linking yet, so reordering only the video still
     // desyncs — a model limit, not a detector bug.)
     let mut next_id = 1u32;
-    let mut build_track = |kind: TrackKind| {
-        let mut segments = Vec::new();
-        for span in &spans {
-            match span {
-                Span::Gap { duration } => segments.push(Segment::Gap(Gap {
-                    duration: *duration,
-                })),
-                Span::Media { start, end } => {
-                    segments.push(Segment::Clip(Clip {
-                        id: next_id,
-                        asset: asset_id,
-                        asset_in: *start,
-                        asset_out: *end,
-                    }));
-                    next_id += 1;
-                }
-            }
-        }
-        Track {
-            kind,
-            muted: false,
-            segments,
-        }
-    };
-    let mut tracks = vec![build_track(TrackKind::Video)];
+    let mut tracks = vec![Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: span_segments(&spans, asset_id, &mut next_id),
+    }];
     if has_audio && !video_only {
-        tracks.push(build_track(TrackKind::Audio));
+        tracks.push(Track {
+            kind: TrackKind::Audio,
+            muted: false,
+            segments: span_segments(&spans, asset_id, &mut next_id),
+        });
     }
     project.timeline = Timeline { tracks };
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
-    let clips = spans
-        .iter()
-        .filter(|s| matches!(s, Span::Media { .. }))
-        .count();
     println!(
         "✓ {} — {} cut(s) → {} clip(s), {} gap(s) @ {}",
         project_path.display(),
@@ -1346,6 +1415,59 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         format_seconds(&fps),
     );
     Ok(())
+}
+
+/// Build the clip/gap segments for a run of spans, allocating clip ids from
+/// `next_id` (unique across tracks).
+fn span_segments(spans: &[Span], asset: u32, next_id: &mut u32) -> Vec<Segment> {
+    let mut segments = Vec::with_capacity(spans.len());
+    for span in spans {
+        match span {
+            Span::Gap { duration } => segments.push(Segment::Gap(Gap {
+                duration: *duration,
+            })),
+            Span::Media { start, end } => {
+                segments.push(Segment::Clip(Clip {
+                    id: *next_id,
+                    asset,
+                    asset_in: *start,
+                    asset_out: *end,
+                }));
+                *next_id += 1;
+            }
+        }
+    }
+    segments
+}
+
+/// Append `segments` to track `ti`, padding with a gap up to `start` so the
+/// appended block begins at a common point on every track (keeps a/v aligned).
+fn append_spans(project: &mut Project, ti: usize, start: Seconds, segments: Vec<Segment>) {
+    if let Some(track) = project.timeline.track_mut(ti) {
+        let end = track.end();
+        if end < start {
+            track.segments.push(Segment::Gap(Gap {
+                duration: start - end,
+            }));
+        }
+        track.segments.extend(segments);
+    }
+}
+
+/// The next free clip id: one past the highest in use. Mirrors
+/// `Project::next_clip_id`, which is crate-private (this is a separate crate).
+fn next_clip_id(project: &Project) -> u32 {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|t| &t.segments)
+        .filter_map(|s| match s {
+            Segment::Clip(c) => Some(c.id),
+            Segment::Gap(_) => None,
+        })
+        .max()
+        .map_or(1, |m| m + 1)
 }
 
 fn cmd_export(
