@@ -1213,6 +1213,9 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('G') | KeyCode::Char('$') => app.seek_to(player, app.total()),
         KeyCode::Char('r') => app.reload_requested = true,
         KeyCode::Char('q') => app.quit = true,
+        // `R` opens the speed prompt for the clip under the playhead; the
+        // command line is pre-filled so it reads as `:speed `.
+        KeyCode::Char('R') => app.mode = Mode::Command("speed ".to_string()),
         KeyCode::Char(':') => app.mode = Mode::Command(String::new()),
         _ => {}
     }
@@ -2636,6 +2639,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
         "motion     j/k cuts · w/b clips · < > (, .) clip start/end",
         "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
+        "           R speed (rate prompt) · e/E extend · [ ] side · m pool",
         "extend     e/E enter · [ ] side · m pool · u undo · r reload · : cmd · q quit",
         "tracks     t/T cycle · <N>t jump to N · :track add video|audio",
     ]
@@ -5547,6 +5551,40 @@ mod tests {
             "no monitor reload: {:?}",
             fake.calls()
         );
+    }
+
+    #[test]
+    fn speed_key_opens_the_rate_prompt() {
+        let mut app = App::new(asset_project(), temp_project_path("speed-key"));
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('R'));
+        assert!(matches!(app.mode, Mode::Command(ref s) if s == "speed "));
+    }
+
+    #[test]
+    fn speed_command_retimes_and_ripples() {
+        let mut app = App::new(asset_project(), temp_project_path("speed-cmd"));
+        app.loaded = true;
+        app.playhead = 0.5; // inside clip #1 [0..3)
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('R')); // -> :speed
+        for c in "0.5".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        // clip #1 at 0.5x: its 3s of source now occupy 6s of timeline, so the
+        // gap and clip #2 slide right (a speed change always ripples).
+        let track = app.project.timeline.video_track().unwrap();
+        let TimelineSegment::Clip(c) = &track.segments[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(c.speed, Seconds::new(1, 2));
+        assert_eq!(track.segments[0].duration(), Seconds::from_integer(6));
+        assert_eq!(track.start_of(1), Seconds::from_integer(6));
     }
 
     #[test]
