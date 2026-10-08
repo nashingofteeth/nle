@@ -379,14 +379,10 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
         return Err(CompileError::NoVideoTrack);
     }
     let mut vcomp = video_labels[0].clone();
-    if video_labels.len() == 1 {
-        graph.push_str(&format!("{vcomp}null[vcomp];\n"));
-    } else {
-        for (k, top) in video_labels[1..].iter().enumerate() {
-            let out = format!("ov{k}");
-            graph.push_str(&format!("{vcomp}{top}overlay=format=auto[{out}];\n"));
-            vcomp = format!("[{out}]");
-        }
+    for (k, top) in video_labels[1..].iter().enumerate() {
+        let out = format!("ov{k}");
+        graph.push_str(&format!("{vcomp}{top}overlay=format=auto[{out}];\n"));
+        vcomp = format!("[{out}]");
     }
     graph.push_str(&format!("{vcomp}format=yuv420p[vout];\n"));
 
@@ -815,6 +811,10 @@ mod tests {
         let plan = compile_export(&p).unwrap();
         let g = &plan.graph;
         assert!(g.contains("amix=inputs=2:normalize=0[aout]"), "{g}");
+        // One video layer must flow straight to [vout] — no dangling
+        // `null[vcomp]` (which ffmpeg rejected with an unconnected pad).
+        assert!(g.contains("[vt0]format=yuv420p[vout]"), "{g}");
+        assert!(!g.contains("null[vcomp]"), "{g}");
         assert_eq!(plan.duration, Seconds::from_integer(15));
     }
 
