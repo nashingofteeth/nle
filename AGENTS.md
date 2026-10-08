@@ -142,10 +142,22 @@ plainly.
   video track. New ops must take the index — don't add fresh
   `video_track()` calls. A stale index returns `TrackNotFound`, never
   panics (`track_at`).
-- **The active track drives everything:** `App::active()` is the clamped
-  index; navigation, edits, and the monitor EDL all follow it. Digits are
-  vim counts, so track selection is `t`/`T` and `<N>t` — **bare `1..9`
-  would break `3l`**.
+- **The active track drives navigation and edits, not the monitor:**
+  `App::active()` is the clamped index; navigation and every edit op follow
+  it, but the monitor plays the **composite** (next entry). Digits are vim
+  counts, so track selection is `t`/`T` and `<N>t` — **bare `1..9` would
+  break `3l`**.
+- **The monitor plays a composite, not a track:** `composite_segments`
+  walks the union of every unmuted video track's cut points and picks the
+  topmost track with a clip per interval; black only where all tracks are a
+  gap. mpv's EDL can pick only one source per span (no blending), so this is
+  fall-through, not `overlay` — real compositing is M5. Switching the active
+  track does not reload the monitor; `nle edl --track N` still previews a
+  single track for debugging.
+- **A track shorter than the timeline pads with a trailing gap** in both the
+  timeline row and the preview (`track_parts` / `segments`), so the row reads
+  "gap" and playback spans the whole timeline instead of stopping at the
+  track's own end.
 - **Export stays byte-identical for the simple case:** one video track +
   no audio track keeps the classic concat path; otherwise each track is
   padded to the timeline length, video layers `overlay` bottom→top (upper
@@ -173,11 +185,17 @@ plainly.
 - Opening the pool notices **"media"**; closing notices **"timeline"**.
 - A key-capturing panel must forward valid actions (undo works while the
   pool is open). `m` is a **toggle**.
+- **Track change works while the pool is open** (`t`/`T`/`<N>t`): it
+  retargets where `enter` inserts but leaves the monitor on the asset preview
+  (`select_active_track` splits selection from the EDL reload; the pool title
+  shows the target track).
 - The pool previews pooled files in mpv: `j/k` assets, `{ }` list ends,
   `h/l/H/L` seek, `f/F` frame, `gg/0` start, `G/$` end, `space` (restart at
   EOF), `enter` insert, `d` remove, `u` undo.
-- Panels hide below a height threshold so the timeline keeps its space;
-  keep hint lines ≲76 cols so they don't wrap and push content off.
+- **The timeline panel sizes to show every track** (`panel_heights`): one row
+  per track + marker row + borders; the keys/message panels drop first when
+  the terminal is short, and tracks window only when they physically can't
+  fit. Keep hint lines ≲76 cols so they don't wrap and push content off.
 
 ## mpv/ffmpeg states worth remembering
 
