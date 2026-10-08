@@ -163,6 +163,17 @@ plainly.
   padded to the timeline length, video layers `overlay` bottom→top (upper
   gaps `black@0.0`/`yuva420p`), audio `amix`es, and muted tracks drop out.
 
+## EDL import (CMX3600) pitfalls
+
+- **Record time starts at `01:00:00:00`** — the timeline origin is the
+  *earliest* event, not 0. Treating 0 as the origin turns the first hour
+  into one giant gap.
+- **`FCM: NON-DROP FRAME` contains the substring "DROP"** — test
+  `!contains("NON")`, or every non-drop EDL is misread as drop-frame.
+- **Source timecodes are file-relative by default**; `--src-offset` maps
+  hour-based media. Audio events whose reel + source match a video event are
+  **linked** and skipped, so embedded audio isn't doubled.
+
 ## Rust gotchas hit this session
 
 - Struct literals need parens in comparisons: `if x == (Foo { .. })`.

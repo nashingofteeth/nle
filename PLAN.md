@@ -1,6 +1,6 @@
 # nle — plan of record
 
-Status: **M4 complete, EDL (CMX3600) import next.** This file is the
+Status: **M4 + EDL (CMX3600) import complete, M5 next.** This file is the
 design/roadmap; the README is the user-facing how-to. Keep it in sync as
 milestones land.
 
@@ -70,7 +70,7 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **M2** | TUI + mpv monitor + vim nav + instant preview + `r` + `:cmd` + `nle edl` | ✅ `344291a` |
 | **M3** | Editing for real | ✅ done |
 | **M4** | Multi-track + separate audio tracks | ✅ done |
-| **M5** | Transitions (`xfade`/`acrossfade`) + effects + proxy cache + thumbnails/waveforms | pending |
+| **M5** | Transitions (`xfade`/`acrossfade`) + effects + proxy cache + thumbnails/waveforms | ⏳ next |
 | **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending |
 | **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
@@ -115,18 +115,29 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 **Deferred:** composite preview (M5); linked a/v detach; a muted sole video
 track is a no-op in the fast path.
 
-## EDL (CMX3600) import — next
+## EDL (CMX3600) import — shipped
 
-Import an edit-decision-list exported from another NLE (Premiere/Resolve/
-Avid) and rebuild the timeline. Cuts only; dissolves/wipes are rejected
-(transitions are M5). A pure parser (`nle-core/src/edl.rs`) reads events and
-`*` comment hints; a resolve step matches reels/clip names against the media
-pool (`--media DIR`, `--map REEL=PATH`, error on any unresolved reel); a
-build step emits clips and record gaps. Source timecode is file-relative by
-default with `--src-offset HH:MM:SS:FF`. `A`/`A2` audio events become real
-audio-track clips (M4 makes that possible); linked audio is skipped to avoid
-doubling each clip's embedded audio. Command:
-`nle import-edl <file.edl> --media DIR [--fps] [--src-offset] [--map]`.
+- **Timecode** (`time.rs`): `Timecode` + `parse_timecode` (colon or
+  drop-frame `;`), `timecode_to_frames` (drop-frame skips 2/4 frame numbers
+  per minute except every tenth), `frames_to_seconds`.
+- **Parser** (`nle-core/src/edl.rs`): `TITLE:`/`FCM:`, event lines (reel,
+  channel, transition, source/record timecodes), and `* FROM CLIP NAME:` /
+  `* SOURCE FILE:` comments. Cuts only — dissolves/wipes error by event.
+- **Build** (`edl.rs::build`): video events → video track 0 (record gaps →
+  `Gap`; origin = the earliest event); one audio track per distinct channel;
+  audio events whose reel + source match a video event are skipped as
+  **linked** (the clip already carries that audio); source TC → file time
+  via `--src-offset`.
+- **CLI:** `nle import-edl FILE --media DIR [--fps] [--src-offset]
+  [--map REEL=PATH]` — probes the directory, resolves reels/clip names
+  (exact file/stem, then a unique substring), infers fps/size from the first
+  event's asset, and refuses to clobber an existing project without
+  `--force`.
+- **Verified:** unit fixtures (cuts, drop-frame, gaps, linked audio) +
+  `./demo.sh` (import → export → red/gap/blue pixels).
+
+**Deferred:** TUI `:edl import`; audio-only EDLs; additive import into an
+existing project.
 
 ## M5 — transitions, effects, proxies (planned)
 

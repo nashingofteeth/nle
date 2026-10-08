@@ -5,11 +5,12 @@ FFmpeg underneath. Built for this machine only.
 
 ## Status
 
-**M4 complete — EDL (CMX3600) import next.** The TUI drives the model
+**M4 + EDL (CMX3600) import complete — M5 next.** The TUI drives the model
 directly: trim in/out, split, delete, yank/paste, insert gap, **extend
 mode**, a **media pool** with file preview, **multi-track editing** (track
 rows, active track, overlay video + mixed audio), and undo/redo —
-auto-saved, instant preview. Full roadmap and current status: `PLAN.md`.
+auto-saved, instant preview. The CLI can also **import a CMX3600 EDL**.
+Full roadmap and current status: `PLAN.md`.
 
 ## Usage
 
@@ -68,6 +69,9 @@ $N show                                # or --json for the raw EDL
 $N remove 2                            # by clip id from `show`
 $N media ls                            # pooled assets + usage
 $N media rm 3                          # drop an unused asset
+$N import-edl sequence.edl --media ~/footage   # CMX3600 → project
+#   reels/clip names match files in --media; --fps, --src-offset, --map
+#   REEL=PATH override; refuses to clobber without --force
 $N export -o final.mp4                 # libx264, frame-exact
 $N export -o fast.mp4 --encoder vaapi  # GPU (also: qsv)
 
