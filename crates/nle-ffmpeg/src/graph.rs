@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nle_core::timeline::Segment;
+use nle_core::timeline::{Segment, TrackKind};
 use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -78,8 +78,21 @@ pub struct ExportPlan {
     pub duration: Seconds,
 }
 
-/// Translate the project's video track into an ffmpeg graph.
+/// Translate the project's tracks into an ffmpeg graph. A single video
+/// track with no separate audio uses the classic concat path (byte-for-
+/// byte unchanged); anything else composites video tracks (`overlay`) and
+/// mixes audio (`amix`).
 pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
+    let video_count = project.timeline.video_tracks().count();
+    let audio_count = project.timeline.audio_tracks().count();
+    if video_count <= 1 && audio_count == 0 {
+        return compile_single_video(project);
+    }
+    compile_multi_track(project)
+}
+
+/// The classic single-video-track graph: per-segment chains, one concat.
+fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
     let track = project
         .timeline
         .video_track()
@@ -181,6 +194,203 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
         frames,
         duration,
     })
+}
+
+/// Multi-track graph: each video track is a layer composited bottom→top
+/// with `overlay` — gaps in an upper layer are transparent (`black@0.0`,
+/// `yuva420p`) so lower layers show through; the bottom layer's gaps are
+/// opaque black. Every track's audio is summed with `amix`. Each layer is
+/// padded to the timeline length so overlay/amix span the whole timeline
+/// regardless of individual track lengths.
+fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
+    let fps = project.fps.ok_or(CompileError::NoFps)?;
+    let settings = project.video.as_ref().ok_or(CompileError::NoSize)?;
+    let (w, h) = (settings.width, settings.height);
+    let fps_s = format!("{}/{}", fps.numer(), fps.denom());
+    let geo = Geometry {
+        w,
+        h,
+        fps_s: &fps_s,
+    };
+    let total = project.timeline.end();
+    if total <= Seconds::from_integer(0) {
+        return Err(CompileError::Empty);
+    }
+    if project.timeline.video_tracks().next().is_none() {
+        return Err(CompileError::NoVideoTrack);
+    }
+
+    let mut graph = String::new();
+    let mut input_of: HashMap<u32, usize> = HashMap::new();
+    let mut inputs: Vec<PathBuf> = Vec::new();
+
+    // Video tracks are always layers (an empty one is a black base or a
+    // no-op transparent overlay); an empty audio track would add only
+    // silence, so it is skipped.
+    let included: Vec<usize> = project
+        .timeline
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.kind == TrackKind::Video || !t.segments.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let base_video = included
+        .iter()
+        .copied()
+        .find(|&i| project.timeline.tracks[i].kind == TrackKind::Video);
+
+    let mut video_labels: Vec<String> = Vec::new();
+    let mut audio_labels: Vec<String> = Vec::new();
+
+    for &ti in &included {
+        let track = &project.timeline.tracks[ti];
+        let is_video = track.kind == TrackKind::Video;
+        // Upper video layers are transparent where they have no clip.
+        let transparent = is_video && Some(ti) != base_video;
+        let mut v_labels: Vec<String> = Vec::new();
+        let mut a_labels: Vec<String> = Vec::new();
+        let mut idx = 0usize;
+
+        for seg in &track.segments {
+            match seg {
+                Segment::Clip(c) => {
+                    let asset = project
+                        .asset(c.asset)
+                        .ok_or(CompileError::MissingAsset(c.asset))?;
+                    let input = *input_of.entry(c.asset).or_insert_with(|| {
+                        inputs.push(asset.path.clone());
+                        inputs.len() - 1
+                    });
+                    let src_start = format_seconds(&c.asset_in);
+                    let dur = format_seconds(&c.duration());
+                    if is_video {
+                        graph.push_str(&format!(
+                            "[{input}:v]trim=start={src_start}:duration={dur},setpts=PTS-STARTPTS,\
+                             scale={w}:{h},setsar=1,fps={fps_s},format=yuva420p[v{ti}_{idx}];\n"
+                        ));
+                        v_labels.push(format!("[v{ti}_{idx}]"));
+                    }
+                    if asset.probe.has_audio() {
+                        graph.push_str(&format!(
+                            "[{input}:a]atrim=start={src_start}:duration={dur},asetpts=PTS-STARTPTS,\
+                             aformat=sample_rates={rate}:channel_layouts={layout}[a{ti}_{idx}];\n",
+                            rate = AUDIO_RATE,
+                            layout = AUDIO_LAYOUT
+                        ));
+                        a_labels.push(format!("[a{ti}_{idx}]"));
+                    } else {
+                        push_audio_silence(&mut graph, &mut a_labels, &dur, ti, idx);
+                    }
+                }
+                Segment::Gap(g) => {
+                    let dur = format_seconds(&g.duration);
+                    if is_video {
+                        push_video_gap(&mut graph, &mut v_labels, &geo, transparent, &dur, ti, idx);
+                    }
+                    push_audio_silence(&mut graph, &mut a_labels, &dur, ti, idx);
+                }
+            }
+            idx += 1;
+        }
+
+        // Pad the layer out to the timeline length so every layer spans it.
+        if track.end() < total {
+            let dur = format_seconds(&(total - track.end()));
+            if is_video {
+                push_video_gap(&mut graph, &mut v_labels, &geo, transparent, &dur, ti, idx);
+            }
+            push_audio_silence(&mut graph, &mut a_labels, &dur, ti, idx);
+            idx += 1;
+        }
+
+        let n = idx;
+        let v_in: String = v_labels.concat();
+        let a_in: String = a_labels.concat();
+        if is_video {
+            graph.push_str(&format!("{v_in}concat=n={n}:v=1:a=0[vt{ti}];\n"));
+            video_labels.push(format!("[vt{ti}]"));
+        }
+        graph.push_str(&format!("{a_in}concat=n={n}:v=0:a=1[at{ti}];\n"));
+        audio_labels.push(format!("[at{ti}]"));
+    }
+
+    // Video: overlay bottom→top (all layers are yuva420p), then drop alpha.
+    let mut vcomp = video_labels[0].clone();
+    if video_labels.len() == 1 {
+        graph.push_str(&format!("{vcomp}null[vcomp];\n"));
+    } else {
+        for (k, top) in video_labels[1..].iter().enumerate() {
+            let out = format!("ov{k}");
+            graph.push_str(&format!("{vcomp}{top}overlay=format=auto[{out}];\n"));
+            vcomp = format!("[{out}]");
+        }
+    }
+    graph.push_str(&format!("{vcomp}format=yuv420p[vout];\n"));
+
+    // Audio: sum every track.
+    if audio_labels.len() == 1 {
+        graph.push_str(&format!("{}anull[aout]\n", audio_labels[0]));
+    } else {
+        let ins: String = audio_labels.concat();
+        let n = audio_labels.len();
+        graph.push_str(&format!("{ins}amix=inputs={n}:normalize=0[aout]\n"));
+    }
+
+    let frames = (secs_f64(&total) * secs_f64(&fps)).round() as i64;
+    Ok(ExportPlan {
+        inputs,
+        graph,
+        width: w,
+        height: h,
+        fps,
+        frames,
+        duration: total,
+    })
+}
+
+/// Output geometry shared by the multi-track emit helpers.
+struct Geometry<'a> {
+    w: u32,
+    h: u32,
+    fps_s: &'a str,
+}
+
+/// A gap on a video layer: opaque black (base) or fully transparent (upper).
+fn push_video_gap(
+    graph: &mut String,
+    labels: &mut Vec<String>,
+    geo: &Geometry,
+    transparent: bool,
+    dur: &str,
+    ti: usize,
+    idx: usize,
+) {
+    let color = if transparent { "black@0.0" } else { "black" };
+    graph.push_str(&format!(
+        "color=c={color}:s={w}x{h}:r={fps}:d={dur},format=yuva420p[v{ti}_{idx}];\n",
+        w = geo.w,
+        h = geo.h,
+        fps = geo.fps_s
+    ));
+    labels.push(format!("[v{ti}_{idx}]"));
+}
+
+/// A silence segment for a track's audio. Pushes its output label too.
+fn push_audio_silence(
+    graph: &mut String,
+    labels: &mut Vec<String>,
+    dur: &str,
+    ti: usize,
+    idx: usize,
+) {
+    graph.push_str(&format!(
+        "anullsrc=r={rate}:cl={layout},atrim=duration={dur},\
+         asetpts=PTS-STARTPTS[a{ti}_{idx}];\n",
+        rate = AUDIO_RATE,
+        layout = AUDIO_LAYOUT
+    ));
+    labels.push(format!("[a{ti}_{idx}]"));
 }
 
 /// Hardware encoders can't sit directly after a software filter graph —
@@ -408,5 +618,66 @@ mod tests {
         let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::Cpu);
         assert_eq!(vmap, "vout");
         assert_eq!(g, "[vout]\n");
+    }
+
+    #[test]
+    fn single_track_graph_has_no_overlay_or_amix() {
+        let p = project_with_two_clips();
+        let g = compile_export(&p).unwrap().graph;
+        assert!(!g.contains("overlay"), "{g}");
+        assert!(!g.contains("amix"), "{g}");
+    }
+
+    /// Two video tracks: the base is `project_with_two_clips`'s track
+    /// (15 s); the upper track ends at 2 s and must be padded to 15 s.
+    fn project_with_two_video_tracks() -> Project {
+        let mut p = project_with_two_clips();
+        let a = p.media[0].id; // a.mp4 (has audio)
+        let ti = p.timeline.add_track(TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+            Segment::Clip(Clip {
+                id: 100,
+                asset: a,
+                asset_in: Seconds::from_integer(1),
+                asset_out: Seconds::from_integer(2),
+            }),
+        ];
+        p
+    }
+
+    #[test]
+    fn two_video_tracks_composite_with_overlay() {
+        let p = project_with_two_video_tracks();
+        let plan = compile_export(&p).unwrap();
+        let g = &plan.graph;
+        assert!(g.contains("overlay=format=auto"), "{g}");
+        assert!(g.contains("[vout]"), "{g}");
+        // The upper layer's gap is transparent; the base layer's is opaque.
+        assert!(g.contains("color=c=black@0.0:s=1920x1080"), "{g}");
+        assert!(g.contains("color=c=black:s=1920x1080"), "{g}");
+        // The upper layer is padded from 2 s to the 15 s timeline.
+        assert!(g.contains("d=13"), "{g}");
+        assert_eq!(plan.duration, Seconds::from_integer(15));
+        assert_eq!(plan.frames, 450);
+    }
+
+    #[test]
+    fn separate_audio_track_mixes_with_amix() {
+        let mut p = project_with_two_clips();
+        let a = p.media[0].id;
+        let ti = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ti].segments = vec![Segment::Clip(Clip {
+            id: 200,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(5),
+        })];
+        let plan = compile_export(&p).unwrap();
+        let g = &plan.graph;
+        assert!(g.contains("amix=inputs=2:normalize=0[aout]"), "{g}");
+        assert_eq!(plan.duration, Seconds::from_integer(15));
     }
 }
