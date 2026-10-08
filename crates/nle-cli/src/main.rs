@@ -367,14 +367,11 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
     save_and_reset_history(&project, project_path)?;
     let clip_count = |p: &Project| {
         p.timeline
-            .video_track()
-            .map(|t| {
-                t.segments
-                    .iter()
-                    .filter(|s| matches!(s, Segment::Clip(_)))
-                    .count()
-            })
-            .unwrap_or(0)
+            .tracks
+            .iter()
+            .flat_map(|t| t.segments.iter())
+            .filter(|s| matches!(s, Segment::Clip(_)))
+            .count()
     };
     println!(
         "· {} — {} assets, {} clip(s)",
