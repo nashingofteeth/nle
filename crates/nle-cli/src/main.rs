@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use nle_core::edit;
-use nle_core::timeline::{Clip, Segment};
+use nle_core::timeline::{Clip, Segment, TrackKind};
 use nle_core::{Asset, Project, Seconds, VideoSettings, format_seconds, parse_rate, parse_time};
 use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
 
@@ -82,6 +82,11 @@ enum Cmd {
     Media {
         #[command(subcommand)]
         action: MediaCmd,
+    },
+    /// Timeline tracks: list, add, mute, remove
+    Track {
+        #[command(subcommand)]
+        action: TrackCmd,
     },
     /// Render the timeline to a file
     Export {
@@ -160,6 +165,35 @@ enum MediaCmd {
     },
 }
 
+/// Track subcommands.
+#[derive(Subcommand)]
+enum TrackCmd {
+    /// List tracks (index, kind, mute, segment count)
+    Ls,
+    /// Append a new track
+    Add {
+        /// Track kind
+        #[arg(value_enum)]
+        kind: TrackKindArg,
+    },
+    /// Toggle a track's mute flag (default: track 1)
+    Mute {
+        /// Track index (1-based, from `nle track ls`)
+        index: Option<usize>,
+    },
+    /// Remove an empty track by index (1-based)
+    Rm {
+        /// Track index (1-based)
+        index: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum TrackKindArg {
+    Video,
+    Audio,
+}
+
 /// CLI spelling of the encoder choices (clap needs ValueEnum to build
 /// an argument parser from it).
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -202,6 +236,7 @@ fn main() -> Result<()> {
         Cmd::Remove { id } => cmd_remove(&cli.project, id),
         Cmd::Show { json } => cmd_show(&cli.project, json),
         Cmd::Media { action } => cmd_media(&cli.project, action),
+        Cmd::Track { action } => cmd_track(&cli.project, action),
         Cmd::Export {
             output,
             encoder,
@@ -529,6 +564,77 @@ fn cmd_media(project_path: &Path, action: MediaCmd) -> Result<()> {
             let removed = project.remove_asset(id)?;
             save_and_reset_history(&project, project_path)?;
             println!("✓ removed asset #{id} ({})", removed.path.display());
+            Ok(())
+        }
+    }
+}
+
+fn cmd_track(project_path: &Path, action: TrackCmd) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    match action {
+        TrackCmd::Ls => {
+            println!(
+                "{} — {} track(s)",
+                project_path.display(),
+                project.timeline.tracks.len()
+            );
+            for (i, t) in project.timeline.tracks.iter().enumerate() {
+                let kind = match t.kind {
+                    TrackKind::Video => "video",
+                    TrackKind::Audio => "audio",
+                };
+                let mute = if t.muted { " (muted)" } else { "" };
+                println!(
+                    "  {:<3} {:<6} {} segment(s){}",
+                    i + 1,
+                    kind,
+                    t.segments.len(),
+                    mute
+                );
+            }
+            Ok(())
+        }
+        TrackCmd::Add { kind } => {
+            let kind = match kind {
+                TrackKindArg::Video => TrackKind::Video,
+                TrackKindArg::Audio => TrackKind::Audio,
+            };
+            let idx = project.timeline.add_track(kind);
+            save_and_reset_history(&project, project_path)?;
+            println!("✓ added track #{}", idx + 1);
+            Ok(())
+        }
+        TrackCmd::Mute { index } => {
+            let idx = index.map(|n| n.saturating_sub(1)).unwrap_or(0);
+            let Some(track) = project.timeline.track_mut(idx) else {
+                bail!("no track #{}", idx + 1);
+            };
+            track.muted = !track.muted;
+            let muted = track.muted;
+            save_and_reset_history(&project, project_path)?;
+            println!(
+                "✓ track #{} {}",
+                idx + 1,
+                if muted { "muted" } else { "unmuted" }
+            );
+            Ok(())
+        }
+        TrackCmd::Rm { index } => {
+            let idx = index.saturating_sub(1);
+            if idx >= project.timeline.tracks.len() {
+                bail!("no track #{index}");
+            }
+            if project.timeline.tracks[idx].kind == TrackKind::Video
+                && project.timeline.video_tracks().count() <= 1
+            {
+                bail!("can't remove the only video track");
+            }
+            if !project.timeline.tracks[idx].segments.is_empty() {
+                bail!("track #{index} isn't empty — delete its clips first");
+            }
+            project.timeline.tracks.remove(idx);
+            save_and_reset_history(&project, project_path)?;
+            println!("✓ removed track #{index}");
             Ok(())
         }
     }

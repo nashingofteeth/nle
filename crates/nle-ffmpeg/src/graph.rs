@@ -226,13 +226,13 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
 
     // Video tracks are always layers (an empty one is a black base or a
     // no-op transparent overlay); an empty audio track would add only
-    // silence, so it is skipped.
+    // silence, so it is skipped. A muted track contributes nothing.
     let included: Vec<usize> = project
         .timeline
         .tracks
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.kind == TrackKind::Video || !t.segments.is_empty())
+        .filter(|(_, t)| !t.muted && (t.kind == TrackKind::Video || !t.segments.is_empty()))
         .map(|(i, _)| i)
         .collect();
     let base_video = included
@@ -316,6 +316,9 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
     }
 
     // Video: overlay bottom→top (all layers are yuva420p), then drop alpha.
+    if video_labels.is_empty() {
+        return Err(CompileError::NoVideoTrack);
+    }
     let mut vcomp = video_labels[0].clone();
     if video_labels.len() == 1 {
         graph.push_str(&format!("{vcomp}null[vcomp];\n"));
@@ -679,5 +682,24 @@ mod tests {
         let g = &plan.graph;
         assert!(g.contains("amix=inputs=2:normalize=0[aout]"), "{g}");
         assert_eq!(plan.duration, Seconds::from_integer(15));
+    }
+
+    #[test]
+    fn muted_tracks_are_skipped() {
+        let mut p = project_with_two_clips();
+        let a = p.media[0].id;
+        let ti = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ti].segments = vec![Segment::Clip(Clip {
+            id: 200,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(5),
+        })];
+        p.timeline.tracks[ti].muted = true;
+        let g = compile_export(&p).unwrap().graph;
+        // The only remaining audio source is the video track's own audio,
+        // so there's nothing to mix.
+        assert!(!g.contains("amix"), "{g}");
+        assert!(g.contains("[aout]"), "{g}");
     }
 }
