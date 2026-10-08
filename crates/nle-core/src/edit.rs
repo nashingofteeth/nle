@@ -23,7 +23,7 @@ use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
 pub const MAX_HISTORY: usize = 100;
 /// Sidecar file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old sidecars start fresh.
-pub const HISTORY_VERSION: u32 = 5;
+pub const HISTORY_VERSION: u32 = 6;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -41,6 +41,8 @@ pub enum EditError {
     NothingToTrim(String),
     #[error("result would be shorter than one frame")]
     TooShort,
+    #[error("speed must be positive (got {0})")]
+    BadSpeed(String),
     #[error("cannot extend clip #{id} — no source after {out} (asset ends at {duration})")]
     BeyondAsset {
         id: u32,
@@ -398,6 +400,10 @@ pub enum Atom {
         asset: u32,
         in_frame: i64,
         out_frame: i64,
+        /// Playback speed as a reduced fraction (`speed_num/speed_den`);
+        /// `1/1` is normal. Kept rational so undo/redo is exact.
+        speed_num: i64,
+        speed_den: i64,
     },
     Gap {
         frames: i64,
@@ -486,6 +492,8 @@ fn atom_from_segment(seg: &Segment, fps: Seconds) -> Atom {
             asset: c.asset,
             in_frame: seconds_to_frames(c.asset_in, fps),
             out_frame: seconds_to_frames(c.asset_out, fps),
+            speed_num: *c.speed.numer(),
+            speed_den: *c.speed.denom(),
         },
         Segment::Gap(g) => Atom::Gap {
             frames: seconds_to_frames(g.duration, fps),
@@ -500,11 +508,14 @@ fn segment_from_atom(atom: &Atom, fps: Seconds) -> Segment {
             asset,
             in_frame,
             out_frame,
+            speed_num,
+            speed_den,
         } => Segment::Clip(Clip {
             id: *id,
             asset: *asset,
             asset_in: frames_to_seconds(*in_frame, fps),
             asset_out: frames_to_seconds(*out_frame, fps),
+            speed: Seconds::new(*speed_num, *speed_den),
         }),
         Atom::Gap { frames } => Segment::Gap(Gap {
             duration: frames_to_seconds(*frames, fps),
@@ -715,22 +726,33 @@ fn gap_region_at(
     Ok((ti, first, last, start, end))
 }
 
+/// A timeline-space span expressed in a clip's source space
+/// (`source = timeline × speed`). Edits are made in timeline time; a clip's
+/// `asset_in/out` are source time, so every delta crossing that boundary
+/// scales by the clip's speed.
+fn source_span(c: &Clip, timeline: Seconds) -> Seconds {
+    timeline * c.speed
+}
+
 /// Merge two newly-adjacent segments into a seamless whole, if they
 /// form one: gaps always merge; clips merge iff same asset + contiguous
-/// source (prev.asset_out == next.asset_in, exact). The merged clip keeps
-/// the earlier segment's id (mirrors split, which keeps the original id
-/// on the left half).
+/// source (prev.asset_out == next.asset_in, exact) and the same speed. The
+/// merged clip keeps the earlier segment's id (mirrors split, which keeps
+/// the original id on the left half).
 fn merge_pair(left: &Segment, right: &Segment) -> Option<Segment> {
     match (left, right) {
         (Segment::Gap(a), Segment::Gap(b)) => Some(Segment::Gap(Gap {
             duration: a.duration + b.duration,
         })),
-        (Segment::Clip(a), Segment::Clip(b)) if a.asset == b.asset && a.asset_out == b.asset_in => {
+        (Segment::Clip(a), Segment::Clip(b))
+            if a.asset == b.asset && a.asset_out == b.asset_in && a.speed == b.speed =>
+        {
             Some(Segment::Clip(Clip {
                 id: a.id,
                 asset: a.asset,
                 asset_in: a.asset_in,
                 asset_out: b.asset_out,
+                speed: a.speed,
             }))
         }
         _ => None,
@@ -786,6 +808,44 @@ fn gap_piece(duration: Seconds) -> Option<Segment> {
 // wrappers resolve the first video track and delegate to the explicit
 // `*_on` operations, which take a track index. The logic lives once, in
 // the `_on` functions; the wrappers only pick the default.
+
+/// Change a clip's playback speed. nle's timeline is a sequence, so a new
+/// duration reflows every follower — **a speed change always ripples**. The
+/// source range is untouched; only the timeline span changes.
+pub fn set_speed_on(
+    project: &Project,
+    track: usize,
+    clip_id: u32,
+    speed: Seconds,
+) -> Result<Batch, EditError> {
+    if speed <= Seconds::from_integer(0) {
+        return Err(EditError::BadSpeed(format_seconds(&speed)));
+    }
+    let ti = track;
+    let tr = track_at(project, ti)?;
+    let si = tr
+        .clip_index(clip_id)
+        .ok_or(EditError::ClipNotFound(clip_id))?;
+    let c = match &tr.segments[si] {
+        Segment::Clip(c) => c.clone(),
+        Segment::Gap(_) => return Err(EditError::ClipNotFound(clip_id)),
+    };
+    let before = Segment::Clip(c.clone());
+    let after = Segment::Clip(Clip { speed, ..c });
+    Ok(Batch {
+        ops: vec![EditOp::Replace {
+            track: ti,
+            index: si,
+            before,
+            after,
+        }],
+        desc: format!("speed clip #{} to {}x", clip_id, format_seconds(&speed)),
+    })
+}
+
+pub fn set_speed(project: &Project, clip_id: u32, speed: Seconds) -> Result<Batch, EditError> {
+    set_speed_on(project, video_track_index(project)?, clip_id, speed)
+}
 
 pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     trim_in_on(project, video_track_index(project)?, playhead)
@@ -947,8 +1007,9 @@ pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batc
         let after = Clip {
             id: c.id,
             asset: c.asset,
-            asset_in: c.asset_in + delta,
+            asset_in: c.asset_in + source_span(c, delta),
             asset_out: c.asset_out,
+            speed: c.speed,
         };
         at_least_a_frame(project, &after.duration())?;
         let mut ops = vec![EditOp::Replace {
@@ -1005,7 +1066,7 @@ pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batc
             Segment::Gap(_) => unreachable!("region merges adjacent gaps"),
         };
         let mut after = prev.clone();
-        after.asset_out = prev.asset_out + delta;
+        after.asset_out = prev.asset_out + source_span(&prev, delta);
         let asset = project
             .asset(after.asset)
             .ok_or(EditError::ClipNotFound(after.asset))?;
@@ -1062,7 +1123,8 @@ pub fn trim_out_on(project: &Project, track: usize, playhead: f64) -> Result<Bat
             id: c.id,
             asset: c.asset,
             asset_in: c.asset_in,
-            asset_out: c.asset_in + new_len,
+            asset_out: c.asset_in + source_span(c, new_len),
+            speed: c.speed,
         };
         at_least_a_frame(project, &after.duration())?;
         let trimmed = seg_start + c.duration() - t;
@@ -1118,11 +1180,11 @@ pub fn trim_out_on(project: &Project, track: usize, playhead: f64) -> Result<Bat
             Segment::Gap(_) => unreachable!("region merges adjacent gaps"),
         };
         let mut after = next.clone();
-        after.asset_in = next.asset_in - delta;
+        after.asset_in = next.asset_in - source_span(&next, delta);
         if after.asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: next.id,
-                needed: stamp(project, &delta),
+                needed: stamp(project, &source_span(&next, delta)),
                 ain: stamp(project, &next.asset_in),
             });
         }
@@ -1359,13 +1421,15 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
         id: c.id,
         asset: c.asset,
         asset_in: c.asset_in,
-        asset_out: c.asset_in + left_len,
+        asset_out: c.asset_in + source_span(&c, left_len),
+        speed: c.speed,
     });
     let right = Segment::Clip(Clip {
         id: project.next_clip_id(),
         asset: c.asset,
-        asset_in: c.asset_in + (t - seg_start),
+        asset_in: c.asset_in + source_span(&c, t - seg_start),
         asset_out: c.asset_out,
+        speed: c.speed,
     });
     Ok(Batch {
         ops: replace_with_many(ti, si, &Segment::Clip(c.clone()), vec![left, right]),
@@ -1561,6 +1625,7 @@ fn pasted_piece(snapshot: &Segment, new_id: u32) -> Segment {
             asset: c.asset,
             asset_in: c.asset_in,
             asset_out: c.asset_out,
+            speed: c.speed,
         }),
         Segment::Gap(g) => Segment::Gap(Gap {
             duration: g.duration,
@@ -1694,8 +1759,9 @@ pub fn paste_on(
                         Some(Segment::Clip(Clip {
                             id,
                             asset: c.asset,
-                            asset_in: c.asset_in + off,
+                            asset_in: c.asset_in + source_span(c, off),
                             asset_out: c.asset_out,
+                            speed: c.speed,
                         }))
                     }
                 }
@@ -1713,7 +1779,7 @@ pub fn paste_on(
         match &seg {
             Segment::Gap(_) => pieces.push(Segment::Gap(Gap { duration: left_len })),
             Segment::Clip(c) => pieces.push(Segment::Clip(Clip {
-                asset_out: c.asset_in + left_len,
+                asset_out: c.asset_in + source_span(c, left_len),
                 ..c.clone()
             })),
         }
@@ -1841,7 +1907,8 @@ pub fn insert_gap_on(
                     id: c.id,
                     asset: c.asset,
                     asset_in: c.asset_in,
-                    asset_out: c.asset_in + off,
+                    asset_out: c.asset_in + source_span(c, off),
+                    speed: c.speed,
                 }));
             }
             pieces.push(gap);
@@ -1850,8 +1917,9 @@ pub fn insert_gap_on(
             pieces.push(Segment::Clip(Clip {
                 id: if at_edge { c.id } else { pid },
                 asset: c.asset,
-                asset_in: c.asset_in + off,
+                asset_in: c.asset_in + source_span(c, off),
                 asset_out: c.asset_out,
+                speed: c.speed,
             }));
             Ok(Batch {
                 ops: replace_with_many(ti, si, &seg, pieces),
@@ -1943,7 +2011,8 @@ pub fn paste_ripple_on(
                     id: c.id,
                     asset: c.asset,
                     asset_in: c.asset_in,
-                    asset_out: c.asset_in + head_len,
+                    asset_out: c.asset_in + source_span(c, head_len),
+                    speed: c.speed,
                 }));
             }
             pieces.push(pasted_piece(snapshot, pid));
@@ -1952,16 +2021,18 @@ pub fn paste_ripple_on(
                 pieces.push(Segment::Clip(Clip {
                     id: c.id,
                     asset: c.asset,
-                    asset_in: c.asset_in + head_len,
+                    asset_in: c.asset_in + source_span(c, head_len),
                     asset_out: c.asset_out,
+                    speed: c.speed,
                 }));
             } else {
                 // split: the right half is a new clip
                 pieces.push(Segment::Clip(Clip {
                     id: pid + 1,
                     asset: c.asset,
-                    asset_in: c.asset_in + head_len,
+                    asset_in: c.asset_in + source_span(c, head_len),
                     asset_out: c.asset_out,
+                    speed: c.speed,
                 }));
             }
             pieces
@@ -2152,11 +2223,11 @@ pub fn extend_edge_on(
             return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let delta = edge - t;
-        let asset_in = c.asset_in - delta;
+        let asset_in = c.asset_in - source_span(&c, delta);
         if asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: c.id,
-                needed: stamp(project, &delta),
+                needed: stamp(project, &source_span(&c, delta)),
                 ain: stamp(project, &c.asset_in),
             });
         }
@@ -2165,7 +2236,7 @@ pub fn extend_edge_on(
         if t <= edge {
             return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
-        let asset_out = c.asset_out + (t - edge);
+        let asset_out = c.asset_out + source_span(&c, t - edge);
         let asset = project
             .asset(c.asset)
             .ok_or(EditError::ClipNotFound(c.asset))?;
@@ -2477,11 +2548,11 @@ pub fn absorb_outward_on(
             return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
         let delta = edge - t;
-        let asset_in = c.asset_in - delta;
+        let asset_in = c.asset_in - source_span(&c, delta);
         if asset_in < Seconds::from_integer(0) {
             return Err(EditError::BeforeAsset {
                 id: c.id,
-                needed: stamp(project, &delta),
+                needed: stamp(project, &source_span(&c, delta)),
                 ain: stamp(project, &c.asset_in),
             });
         }
@@ -2493,7 +2564,7 @@ pub fn absorb_outward_on(
         if t <= edge {
             return Err(EditError::NothingToTrim(stamp(project, &t)));
         }
-        let asset_out = c.asset_out + (t - edge);
+        let asset_out = c.asset_out + source_span(&c, t - edge);
         let asset = project
             .asset(c.asset)
             .ok_or(EditError::ClipNotFound(c.asset))?;
@@ -2668,7 +2739,7 @@ fn trim_or_absorb_head(
                 return Ok(());
             }
             let after = Clip {
-                asset_in: c.asset_in + (t - start),
+                asset_in: c.asset_in + source_span(&c, t - start),
                 ..c.clone()
             };
             absorbed.push(format!("trimmed clip #{}", c.id));
@@ -2719,7 +2790,7 @@ fn trim_or_absorb_tail(
                 return Ok(());
             }
             let after = Clip {
-                asset_out: c.asset_in + remainder,
+                asset_out: c.asset_in + source_span(&c, remainder),
                 ..c.clone()
             };
             absorbed.push(format!("trimmed clip #{}", c.id));
@@ -2774,6 +2845,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(1),
                 asset_out: Seconds::from_integer(3),
+                speed: Seconds::from_integer(1),
             }),
             Segment::Gap(Gap {
                 duration: Seconds::from_integer(1),
@@ -2783,6 +2855,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }),
         ];
         p
@@ -3015,6 +3088,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(1),
             asset_out: Seconds::from_integer(3),
+            speed: Seconds::from_integer(1),
         });
         let mut h = History::default();
         let batch = trim_out(&p, 2.5).unwrap();
@@ -3069,6 +3143,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }),
         ];
         let mut h = History::default();
@@ -3172,6 +3247,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(1),
                 asset_out: Seconds::from_integer(3),
+                speed: Seconds::from_integer(1),
             }),
             Segment::Gap(Gap {
                 duration: Seconds::from_integer(1),
@@ -3181,6 +3257,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(3),
                 asset_out: Seconds::from_integer(5),
+                speed: Seconds::from_integer(1),
             }),
         ];
         let mut h = History::default();
@@ -3226,6 +3303,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }),
             Segment::Gap(Gap {
                 duration: Seconds::from_integer(3),
@@ -3260,6 +3338,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }),
             Segment::Gap(Gap {
                 duration: Seconds::from_integer(1),
@@ -3322,6 +3401,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(3),
+            speed: Seconds::from_integer(1),
         };
         let batch = paste(&p, &Segment::Clip(three.clone()), 2.0).unwrap();
         assert!(batch.desc.contains("replaced clip #2"), "{}", batch.desc);
@@ -3342,6 +3422,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::new(1, 2),
+            speed: Seconds::from_integer(1),
         };
         let batch = paste(&p, &Segment::Clip(half.clone()), 1.0).unwrap();
         h.apply(&mut p, batch, 0).unwrap();
@@ -3384,6 +3465,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::new(1, 2), // 0.5s
+            speed: Seconds::from_integer(1),
         };
 
         // mid-clip: split + insert between
@@ -3504,6 +3586,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(1),
             asset_out: Seconds::from_integer(3),
+            speed: Seconds::from_integer(1),
         });
         let mut h = History::default();
         let batch = extend_edge(&p, 2, true, 2.5).unwrap();
@@ -3968,6 +4051,7 @@ mod tests {
                 asset: 1,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }));
         }
         let mut h = History::default();
@@ -3995,6 +4079,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(2),
             asset_out: Seconds::from_integer(4),
+            speed: Seconds::from_integer(1),
         });
         let mut h = History::default();
         let batch = absorb_outward(&p, 2, true, 1.0).unwrap();
@@ -4019,6 +4104,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::new(99, 50),
+            speed: Seconds::from_integer(1),
         }); // C2 [3..4.98)
         let mut h = History::default();
         // 4.97 snaps to frame 149 (4.9667), leaving a 0.013s stump:
@@ -4091,7 +4177,10 @@ mod tests {
         h.save(&path).unwrap();
 
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\": 5"), "{text}");
+        assert!(
+            text.contains(&format!("\"version\": {HISTORY_VERSION}")),
+            "{text}"
+        );
         assert!(!text.contains("undone"), "{text}");
         assert!(!text.contains("30/1"), "{text}");
 
@@ -4331,6 +4420,7 @@ mod tests {
         let bad = match seg {
             Segment::Clip(c) => Segment::Clip(Clip {
                 asset_out: c.asset_in,
+                speed: Seconds::from_integer(1),
                 ..c
             }),
             Segment::Gap(_) => unreachable!(),
@@ -4377,6 +4467,7 @@ mod tests {
             asset: a,
             asset_in: Seconds::from_integer(1),
             asset_out: Seconds::from_integer(3),
+            speed: Seconds::from_integer(1),
         })];
         let ai = p.timeline.add_track(TrackKind::Audio);
         p.timeline.tracks[ai].segments = vec![Segment::Clip(Clip {
@@ -4384,6 +4475,7 @@ mod tests {
             asset: a,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(4),
+            speed: Seconds::from_integer(1),
         })];
         p
     }
@@ -4457,6 +4549,102 @@ mod tests {
         assert!(matches!(
             delete_under_on(&p, 9, 0.0),
             Err(EditError::TrackNotFound(9))
+        ));
+    }
+
+    #[test]
+    fn speed_change_always_ripples() {
+        let mut p = fixture(); // #1 [0,2), gap 1s, #2 [0,2)
+        let mut h = History::default();
+        // Slow #1 to 0.5x: its 2s of source now occupies 4s of timeline, so
+        // the gap and #2 slide right by 2s and the track grows.
+        let batch = set_speed(&p, 1, Seconds::new(1, 2)).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let t = p.timeline.video_track().unwrap();
+        assert_eq!(t.segments[0].duration(), Seconds::from_integer(4));
+        assert_eq!(t.start_of(1), Seconds::from_integer(4));
+        assert_eq!(t.end(), Seconds::from_integer(7));
+        let Segment::Clip(c) = &t.segments[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(c.source_duration(), Seconds::from_integer(2)); // untouched
+        assert_eq!(c.speed, Seconds::new(1, 2));
+    }
+
+    #[test]
+    fn speed_round_trips_through_undo() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = set_speed(&p, 2, Seconds::from_integer(2)).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(clip_by_id(&p, 2).speed, Seconds::from_integer(2));
+        h.undo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 2).speed, Seconds::from_integer(1));
+        h.redo(&mut p).unwrap();
+        assert_eq!(clip_by_id(&p, 2).speed, Seconds::from_integer(2));
+    }
+
+    #[test]
+    fn split_maps_timeline_to_source_at_speed() {
+        // A 2x clip reading source [0,4) occupies timeline [0,2).
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(4),
+            speed: Seconds::from_integer(2),
+        })];
+        let mut h = History::default();
+        let batch = split(&p, 1.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let segs = &p.timeline.video_track().unwrap().segments;
+        let (Segment::Clip(l), Segment::Clip(r)) = (&segs[0], &segs[1]) else {
+            panic!("expected two clips")
+        };
+        // 1s of timeline at 2x = 2s of source
+        assert_eq!(l.asset_out, Seconds::from_integer(2));
+        assert_eq!(r.asset_in, Seconds::from_integer(2));
+        assert_eq!(l.duration(), Seconds::from_integer(1));
+        assert_eq!(r.duration(), Seconds::from_integer(1));
+        assert_eq!(l.speed, Seconds::from_integer(2));
+    }
+
+    #[test]
+    fn trim_scales_timeline_delta_into_source() {
+        // A 0.5x clip reading source [0,4) occupies timeline [0,8).
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(4),
+            speed: Seconds::new(1, 2),
+        })];
+        let mut h = History::default();
+        // trim the head to timeline 2.0: 2s of timeline = 1s of source
+        let batch = trim_in(&p, 2.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(clip_by_id(&p, 1).asset_in, Seconds::from_integer(1));
+        // the trimmed head became a 2s gap (timeline space)
+        assert_eq!(
+            p.timeline.video_track().unwrap().segments[0],
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(2)
+            })
+        );
+    }
+
+    #[test]
+    fn set_speed_rejects_non_positive() {
+        let p = fixture();
+        assert!(matches!(
+            set_speed(&p, 1, Seconds::from_integer(0)),
+            Err(EditError::BadSpeed(_))
         ));
     }
 }

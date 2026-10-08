@@ -54,13 +54,63 @@ pub enum ExportError {
 enum Piece {
     Clip {
         input: usize,
+        /// Source in-point (seconds into the file).
         src_start: String,
-        dur: String,
+        /// Source span to trim (seconds of the file).
+        src_dur: String,
+        /// Timeline span the clip occupies (source / speed).
+        out_dur: String,
+        /// Playback rate; `1` is a no-op retime.
+        speed: Seconds,
         has_audio: bool,
     },
     Gap {
         dur: String,
     },
+}
+
+/// The video retime stage. At 1× this is exactly the old
+/// `setpts=PTS-STARTPTS`, so the simple-case graph stays byte-identical.
+fn video_setpts(speed: &Seconds) -> String {
+    if *speed == Seconds::from_integer(1) {
+        "setpts=PTS-STARTPTS".to_string()
+    } else {
+        format!("setpts=(PTS-STARTPTS)/{}", format_seconds(speed))
+    }
+}
+
+/// The audio retime stage (empty at 1×). `atempo` only accepts a limited
+/// factor range, so an extreme speed (e.g. 0.4×) is split into a chain.
+fn audio_atempo(speed: &Seconds) -> String {
+    if *speed == Seconds::from_integer(1) {
+        return String::new();
+    }
+    let mut f = secs_f64(speed);
+    let mut parts: Vec<f64> = Vec::new();
+    while f < 0.5 {
+        parts.push(0.5);
+        f /= 0.5;
+    }
+    while f > 2.0 {
+        parts.push(2.0);
+        f /= 2.0;
+    }
+    parts.push(f);
+    parts
+        .iter()
+        .map(|p| format!(",atempo={}", trim_f64(*p)))
+        .collect()
+}
+
+/// Compact decimal for a filter factor (avoids trailing zeros).
+fn trim_f64(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// A compiled, ready-to-run export.
@@ -124,7 +174,9 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
                 pieces.push(Piece::Clip {
                     input,
                     src_start: format_seconds(&c.asset_in),
-                    dur: format_seconds(&c.duration()),
+                    src_dur: format_seconds(&c.source_duration()),
+                    out_dur: format_seconds(&c.duration()),
+                    speed: c.speed,
                     has_audio: asset.probe.has_audio(),
                 });
             }
@@ -141,23 +193,27 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
             Piece::Clip {
                 input,
                 src_start,
-                dur,
+                src_dur,
+                out_dur,
+                speed,
                 has_audio,
             } => {
                 graph.push_str(&format!(
-                    "[{input}:v]trim=start={src_start}:duration={dur},setpts=PTS-STARTPTS,\
-                     scale={w}:{h},setsar=1,fps={fps_s},format=yuv420p[v{i}];\n"
+                    "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},\
+                     scale={w}:{h},setsar=1,fps={fps_s},format=yuv420p[v{i}];\n",
+                    setpts = video_setpts(speed),
                 ));
                 if *has_audio {
                     graph.push_str(&format!(
-                        "[{input}:a]atrim=start={src_start}:duration={dur},asetpts=PTS-STARTPTS,\
+                        "[{input}:a]atrim=start={src_start}:duration={src_dur},asetpts=PTS-STARTPTS{atempo},\
                          aformat=sample_rates={rate}:channel_layouts={layout}[a{i}];\n",
+                        atempo = audio_atempo(speed),
                         rate = AUDIO_RATE,
                         layout = AUDIO_LAYOUT
                     ));
                 } else {
                     graph.push_str(&format!(
-                        "anullsrc=r={rate}:cl={layout},atrim=duration={dur},\
+                        "anullsrc=r={rate}:cl={layout},atrim=duration={out_dur},\
                          asetpts=PTS-STARTPTS[a{i}];\n",
                         rate = AUDIO_RATE,
                         layout = AUDIO_LAYOUT
@@ -263,24 +319,27 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
                         inputs.len() - 1
                     });
                     let src_start = format_seconds(&c.asset_in);
-                    let dur = format_seconds(&c.duration());
+                    let src_dur = format_seconds(&c.source_duration());
+                    let out_dur = format_seconds(&c.duration());
                     if is_video {
                         graph.push_str(&format!(
-                            "[{input}:v]trim=start={src_start}:duration={dur},setpts=PTS-STARTPTS,\
-                             scale={w}:{h},setsar=1,fps={fps_s},format=yuva420p[v{ti}_{idx}];\n"
+                            "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},\
+                             scale={w}:{h},setsar=1,fps={fps_s},format=yuva420p[v{ti}_{idx}];\n",
+                            setpts = video_setpts(&c.speed),
                         ));
                         v_labels.push(format!("[v{ti}_{idx}]"));
                     }
                     if asset.probe.has_audio() {
                         graph.push_str(&format!(
-                            "[{input}:a]atrim=start={src_start}:duration={dur},asetpts=PTS-STARTPTS,\
+                            "[{input}:a]atrim=start={src_start}:duration={src_dur},asetpts=PTS-STARTPTS{atempo},\
                              aformat=sample_rates={rate}:channel_layouts={layout}[a{ti}_{idx}];\n",
+                            atempo = audio_atempo(&c.speed),
                             rate = AUDIO_RATE,
                             layout = AUDIO_LAYOUT
                         ));
                         a_labels.push(format!("[a{ti}_{idx}]"));
                     } else {
-                        push_audio_silence(&mut graph, &mut a_labels, &dur, ti, idx);
+                        push_audio_silence(&mut graph, &mut a_labels, &out_dur, ti, idx);
                     }
                 }
                 Segment::Gap(g) => {
@@ -532,6 +591,7 @@ mod tests {
                 asset: a0,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(10),
+                speed: Seconds::from_integer(1),
             }),
             Segment::Gap(Gap {
                 duration: Seconds::from_integer(2),
@@ -541,6 +601,7 @@ mod tests {
                 asset: a1,
                 asset_in: Seconds::from_integer(2),
                 asset_out: Seconds::from_integer(5),
+                speed: Seconds::from_integer(1),
             }),
         ];
         p
@@ -578,6 +639,77 @@ mod tests {
         // frame math: 300 + 60 + 90 = 450 frames @ 30fps
         assert_eq!(plan.frames, 450);
         assert_eq!(plan.duration, Seconds::from_integer(15));
+    }
+
+    #[test]
+    fn speed_clip_retimes_the_graph() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(24));
+        p.video = Some(VideoSettings {
+            width: 1920,
+            height: 1080,
+        });
+        let (a, _) = p.add_asset(
+            "a.mp4".into(),
+            probe_report("10", 1920, 1080, "30000/1001", true),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(5),
+            speed: Seconds::new(1001, 1250), // 24 / (30000/1001) = 0.8008x
+        })];
+        let plan = compile_export(&p).unwrap();
+        let g = &plan.graph;
+        assert!(g.contains("setpts=(PTS-STARTPTS)/0.8008"), "{g}");
+        assert!(g.contains("atempo=0.8008"), "{g}");
+        // the trim is the SOURCE span (5s), not the 6.24s timeline span
+        assert!(g.contains("duration=5,"), "{g}");
+        assert_eq!(
+            plan.duration,
+            Seconds::from_integer(5) / Seconds::new(1001, 1250)
+        );
+    }
+
+    #[test]
+    fn extreme_slowdown_chains_atempo() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(24));
+        p.video = Some(VideoSettings {
+            width: 1920,
+            height: 1080,
+        });
+        let (a, _) = p.add_asset(
+            "a.mp4".into(),
+            probe_report("10", 1920, 1080, "60000/1001", true),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(4),
+            speed: Seconds::new(1001, 2500), // 24 / (60000/1001) = 0.4004x
+        })];
+        let plan = compile_export(&p).unwrap();
+        // atempo can't do 0.4x in one step; it splits into 0.5 x 0.8008
+        assert!(
+            plan.graph.contains("atempo=0.5,atempo=0.8008"),
+            "{}",
+            plan.graph
+        );
+    }
+
+    #[test]
+    fn one_x_graph_has_no_retime() {
+        let p = project_with_two_clips();
+        let plan = compile_export(&p).unwrap();
+        assert!(
+            !plan.graph.contains("setpts=(PTS-STARTPTS)/"),
+            "{}",
+            plan.graph
+        );
+        assert!(!plan.graph.contains("atempo"), "{}", plan.graph);
     }
 
     #[test]
@@ -646,6 +778,7 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(1),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }),
         ];
         p
@@ -677,6 +810,7 @@ mod tests {
             asset: a,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(5),
+            speed: Seconds::from_integer(1),
         })];
         let plan = compile_export(&p).unwrap();
         let g = &plan.graph;
@@ -694,6 +828,7 @@ mod tests {
             asset: a,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(5),
+            speed: Seconds::from_integer(1),
         })];
         p.timeline.tracks[ti].muted = true;
         let g = compile_export(&p).unwrap().graph;

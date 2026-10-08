@@ -39,11 +39,34 @@ pub struct Clip {
     pub asset_in: Seconds,
     #[serde(with = "rational_ser")]
     pub asset_out: Seconds,
+    /// Playback rate relative to the source: timeline duration is
+    /// `(asset_out - asset_in) / speed`. `1` is normal speed; a Kdenlive
+    /// rate conform (e.g. 24 fps project over 29.97 fps media) is
+    /// `project_rate / media_rate`. Never zero or negative.
+    #[serde(with = "rational_ser")]
+    pub speed: Seconds,
 }
 
 impl Clip {
-    pub fn duration(&self) -> Seconds {
+    /// A normal-speed clip (`speed = 1`).
+    pub fn new(id: u32, asset: u32, asset_in: Seconds, asset_out: Seconds) -> Self {
+        Self {
+            id,
+            asset,
+            asset_in,
+            asset_out,
+            speed: Seconds::from_integer(1),
+        }
+    }
+
+    /// The source span the clip reads, before the speed factor.
+    pub fn source_duration(&self) -> Seconds {
         self.asset_out - self.asset_in
+    }
+
+    /// The timeline span the clip occupies (source scaled by `speed`).
+    pub fn duration(&self) -> Seconds {
+        self.source_duration() / self.speed
     }
 }
 
@@ -225,6 +248,9 @@ impl Timeline {
                         if c.asset_out <= c.asset_in {
                             return Err(bad("clip has a non-positive source span"));
                         }
+                        if c.speed <= Seconds::from_integer(0) {
+                            return Err(bad("clip has a non-positive speed"));
+                        }
                     }
                     Segment::Gap(g) => {
                         if g.duration <= Seconds::from_integer(0) {
@@ -252,6 +278,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(dur),
+            speed: Seconds::from_integer(1),
         })
     }
 
@@ -311,6 +338,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(2),
             asset_out: Seconds::from_integer(2),
+            speed: Seconds::from_integer(1),
         })];
         assert!(p_timeline.validate().is_err());
         p_timeline.tracks[0].segments = vec![gap(0)];

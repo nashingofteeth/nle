@@ -15,8 +15,8 @@ pub mod timeline;
 
 pub use edit::{
     Atom, Batch, Change, EditError, EditOp, History, absorb_outward, delete_clip_by_id,
-    delete_ripple, delete_under, extend_edge, extend_gap_end, paste, paste_ripple, split, trim_in,
-    trim_in_ripple, trim_out, trim_out_ripple,
+    delete_ripple, delete_under, extend_edge, extend_gap_end, paste, paste_ripple, set_speed,
+    split, trim_in, trim_in_ripple, trim_out, trim_out_ripple,
 };
 pub use edl::{EdlDoc, EdlError, EdlEvent};
 pub use media::{RawFormat, RawProbe, RawStream};

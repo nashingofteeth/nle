@@ -97,6 +97,20 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
     Ok(segs)
 }
 
+/// A notice for the monitor when any clip plays at a non-1× speed: mpv's
+/// EDL has no speed concept, so the monitor plays those clips at 1× and
+/// reads the wrong source span. Editing and export are unaffected.
+pub fn speed_notice(project: &Project) -> Option<String> {
+    let n = project
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|t| t.segments.iter())
+        .filter(|s| matches!(s, TimelineSegment::Clip(c) if c.speed != Seconds::from_integer(1)))
+        .count();
+    (n > 0).then(|| format!("monitor is 1x: {n} speed clip(s) play at normal speed"))
+}
+
 /// Flatten the video tracks into one preview sequence, topmost first: at
 /// each instant the highest unmuted video track with a clip wins, and only
 /// where every track is a gap does the preview show black. This is what the
@@ -383,7 +397,19 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(ain),
             asset_out: Seconds::from_integer(aout),
+            speed: Seconds::from_integer(1),
         })
+    }
+
+    #[test]
+    fn speed_notice_flags_non_unit_speed() {
+        let mut p = project_with_gap();
+        assert!(speed_notice(&p).is_none());
+        if let TimelineSegment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            c.speed = Seconds::new(1, 2);
+        }
+        let notice = speed_notice(&p).expect("notice");
+        assert!(notice.contains("1 speed clip"), "{notice}");
     }
 
     fn project_with_gap() -> Project {
@@ -493,6 +519,7 @@ mod tests {
             asset: low,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(4),
+            speed: Seconds::from_integer(1),
         })];
         let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
         p.timeline.tracks[ti].segments = vec![
@@ -504,6 +531,7 @@ mod tests {
                 asset: high,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(1),
+                speed: Seconds::from_integer(1),
             }),
             TimelineSegment::Gap(TimelineGap {
                 duration: Seconds::from_integer(2),
@@ -554,6 +582,7 @@ mod tests {
             asset: high,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
+            speed: Seconds::from_integer(1),
         })];
         let segs = composite_segments(&p).unwrap();
         assert_eq!(

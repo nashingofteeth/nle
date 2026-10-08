@@ -18,7 +18,7 @@ use crate::timeline::{Segment, Timeline, TimelineError};
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
 /// never silently misread. v3 adds the per-track `muted` flag (tracks).
-pub const PROJECT_VERSION: u32 = 3;
+pub const PROJECT_VERSION: u32 = 4;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -279,6 +279,7 @@ mod tests {
                 asset: a0,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }),
             0.0,
         )
@@ -291,6 +292,7 @@ mod tests {
                 asset: a1,
                 asset_in: Seconds::from_integer(2),
                 asset_out: Seconds::from_integer(5),
+                speed: Seconds::from_integer(1),
             }),
             2.0,
         )

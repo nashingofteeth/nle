@@ -228,6 +228,7 @@ pub fn build(
                     asset,
                     asset_in: frames_to_seconds(src_in, fps),
                     asset_out: frames_to_seconds(src_out, fps),
+                    speed: Seconds::from_integer(1),
                 }));
                 next_id += 1;
                 cursor = rec_out;

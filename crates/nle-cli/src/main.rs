@@ -79,6 +79,16 @@ enum Cmd {
         /// Clip id
         id: u32,
     },
+    /// Change a clip's playback speed (the track ripples to fit)
+    Speed {
+        /// Clip id (from `nle show`)
+        id: u32,
+        /// New speed: 1, 2, 0.5, 0.8, 24/25 … (a rate, not a duration)
+        rate: String,
+        /// Track index (0-based; default 0)
+        #[arg(long, default_value_t = 0)]
+        track: usize,
+    },
     /// Show the timeline
     Show {
         /// Print the raw project JSON
@@ -284,6 +294,7 @@ fn main() -> Result<()> {
             out_point.as_deref(),
         ),
         Cmd::Remove { id } => cmd_remove(&cli.project, id),
+        Cmd::Speed { id, rate, track } => cmd_speed(&cli.project, id, &rate, track),
         Cmd::Show { json } => cmd_show(&cli.project, json),
         Cmd::Media { action } => cmd_media(&cli.project, action),
         Cmd::Track { action } => cmd_track(&cli.project, action),
@@ -532,6 +543,7 @@ fn cmd_add(
         asset: asset_id,
         asset_in: in_t,
         asset_out: out_t,
+        speed: Seconds::from_integer(1),
     });
     let mut history = edit::History::default();
     let batch = edit::paste_ripple_on(&project, track, &scratch, secs_f64(&append_at))?;
@@ -560,6 +572,17 @@ fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
     history.apply(&mut project, batch, 0)?;
     save_and_reset_history(&project, project_path)?;
     println!("✓ removed clip #{id}");
+    Ok(())
+}
+
+fn cmd_speed(project_path: &Path, id: u32, rate: &str, track: usize) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    let speed = parse_speed_arg(rate)?;
+    let batch = edit::set_speed_on(&project, track, id, speed)?;
+    let mut history = edit::History::default();
+    history.apply(&mut project, batch, 0)?;
+    save_and_reset_history(&project, project_path)?;
+    println!("✓ clip #{id} → {}× (track rippled)", format_seconds(&speed));
     Ok(())
 }
 
@@ -614,8 +637,13 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
                         .unwrap_or_else(|| "?".into());
                     let start = cursor;
                     let end = start + clip.duration();
+                    let speed = if clip.speed != Seconds::from_integer(1) {
+                        format!(" @{}×", format_seconds(&clip.speed))
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "    #{:<4}{:>9} – {:<9} {}  (src {}–{})",
+                        "    #{:<4}{:>9} – {:<9} {}{speed}  (src {}–{})",
                         clip.id,
                         format_seconds(&start),
                         format_seconds(&end),
@@ -776,6 +804,22 @@ fn parse_fps_arg(s: &str) -> Result<Seconds> {
             Ok(Seconds::from_integer(n))
         }
     }
+}
+
+/// A speed accepts `n/d` or a positive decimal (`1`, `0.5`, `0.8`, `2`).
+fn parse_speed_arg(s: &str) -> Result<Seconds> {
+    if let Some(r) = parse_rate(s) {
+        return Ok(r);
+    }
+    let v: f64 = s
+        .parse()
+        .with_context(|| format!("invalid speed {s:?} (try 1, 0.5, 2, or 24/25)"))?;
+    if !v.is_finite() || v <= 0.0 {
+        bail!("speed must be positive (got {s:?})");
+    }
+    Seconds::approximate_float(v)
+        .filter(|r| *r > Seconds::from_integer(0))
+        .with_context(|| format!("speed {s:?} is not representable"))
 }
 
 /// Match a reel/clip name to a pooled asset: exact filename, then stem,

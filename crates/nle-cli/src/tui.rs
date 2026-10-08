@@ -446,6 +446,9 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
     app.history = history;
+    if let Some(notice) = preview::speed_notice(&app.project) {
+        app.set_message(&notice);
+    }
     // Media title (MPRIS "Now playing") follows the clip under the playhead.
     let mut last_media_title: Option<String> = None;
 
@@ -456,7 +459,11 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         if app.reload_requested {
             app.reload_requested = false;
             match reload_project(&mut app, &player) {
-                Ok(()) => app.set_message("timeline reloaded"),
+                Ok(()) => {
+                    let msg = preview::speed_notice(&app.project)
+                        .unwrap_or_else(|| "timeline reloaded".to_string());
+                    app.set_message(&msg);
+                }
                 Err(e) => app.set_message(&format!("reload failed: {e}")),
             }
         }
@@ -568,7 +575,7 @@ pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             Mode::Command(buf) => buf,
             _ => unreachable!("checked above"),
         };
-        command_key(app, buf, key);
+        command_key(app, player, buf, key);
     } else if matches!(app.mode, Mode::Extend(_)) {
         extend_key(app, player, key);
     } else if is_pool(app) {
@@ -872,6 +879,7 @@ fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
         asset: asset.id,
         asset_in: Seconds::from_integer(0),
         asset_out: whole,
+        speed: Seconds::from_integer(1),
     });
     let _ = run_edit(
         app,
@@ -964,7 +972,7 @@ fn track_command(app: &mut App, cmd: &str) -> String {
     }
 }
 
-fn command_key(app: &mut App, buf: String, key: KeyEvent) {
+fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
             let cmd = buf.trim().to_string();
@@ -978,6 +986,10 @@ fn command_key(app: &mut App, buf: String, key: KeyEvent) {
                 other if other == "track" || other.starts_with("track ") => {
                     let msg = track_command(app, other);
                     app.set_message(&msg);
+                }
+                other if other == "speed" || other.starts_with("speed ") => {
+                    let arg = other.strip_prefix("speed").unwrap_or("").trim();
+                    speed_command(app, player, arg);
                 }
                 other => app.set_message(&format!("unknown command: {other}  (try :q)")),
             }
@@ -1801,6 +1813,29 @@ fn run_edit(app: &mut App, player: &dyn Mpv, result: Result<Batch, EditError>) -
             false
         }
     }
+}
+
+/// `:speed <rate>` — retime the clip under the playhead. The track ripples
+/// to fit (nle's timeline is a sequence, so a new duration moves followers).
+fn speed_command(app: &mut App, player: &dyn Mpv, arg: &str) {
+    if arg.is_empty() {
+        app.set_message("usage: :speed 0.5  (rate for the clip under the playhead)");
+        return;
+    }
+    let speed = match crate::parse_speed_arg(arg) {
+        Ok(s) => s,
+        Err(e) => {
+            app.set_message(&e.to_string());
+            return;
+        }
+    };
+    let ti = app.active();
+    let Some(id) = clip_under(&app.project, app.playhead, ti).map(|c| c.id) else {
+        app.set_message("no clip under the playhead");
+        return;
+    };
+    let result = edit::set_speed_on(&app.project, ti, id, speed);
+    run_edit(app, player, result);
 }
 
 /// Atomic save + view refresh. Called after every successful edit (and
@@ -3350,6 +3385,7 @@ mod tests {
                         asset: a,
                         asset_in: Seconds::from_integer(1),
                         asset_out: Seconds::from_integer(4),
+                        speed: Seconds::from_integer(1),
                     }),
                     TimelineSegment::Gap(TimelineGap {
                         duration: Seconds::from_integer(2),
@@ -3359,6 +3395,7 @@ mod tests {
                         asset: a,
                         asset_in: Seconds::from_integer(0),
                         asset_out: Seconds::from_integer(2),
+                        speed: Seconds::from_integer(1),
                     }),
                 ],
             }],
@@ -3621,6 +3658,7 @@ mod tests {
             asset: a,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
+            speed: Seconds::from_integer(1),
         })];
         // The 2 s track is padded to the 7 s timeline with a 5 s gap.
         let parts = track_parts(&p, &p.timeline.tracks[ti], 7.0);
@@ -3907,12 +3945,14 @@ mod tests {
                 asset: a,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(3),
+                speed: Seconds::from_integer(1),
             }),
             TimelineSegment::Clip(nle_core::Clip {
                 id: 2,
                 asset: a,
                 asset_in: Seconds::new(1, 2),
                 asset_out: Seconds::new(7, 2),
+                speed: Seconds::from_integer(1),
             }),
         ];
         let (armed, edge) = resolve_armed(&p, 6.0, 0).unwrap();
@@ -4392,6 +4432,7 @@ mod tests {
             asset: a,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
+            speed: Seconds::from_integer(1),
         })];
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.active_track = ti;
@@ -4482,18 +4523,21 @@ mod tests {
                 asset: 1,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }),
             TimelineSegment::Clip(nle_core::Clip {
                 id: 2,
                 asset: 1,
                 asset_in: Seconds::from_integer(4),
                 asset_out: Seconds::from_integer(6),
+                speed: Seconds::from_integer(1),
             }),
             TimelineSegment::Clip(nle_core::Clip {
                 id: 3,
                 asset: 1,
                 asset_in: Seconds::from_integer(8),
                 asset_out: Seconds::from_integer(10),
+                speed: Seconds::from_integer(1),
             }),
         ];
         let mut app = App::new(p, PathBuf::from("t.json"));
@@ -4594,6 +4638,7 @@ mod tests {
             asset: spare,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(5),
+            speed: Seconds::from_integer(1),
         });
         let batch = edit::paste_ripple(&p, &snapshot, 0.0).unwrap();
         p.timeline = {
@@ -4636,6 +4681,7 @@ mod tests {
             asset: app.project.media[0].id,
             asset_in: Seconds::from_integer(0),
             asset_out: app.project.media[0].duration().unwrap(),
+            speed: Seconds::from_integer(1),
         });
         let batch = edit::paste_ripple(&app.project, &snapshot, app.playhead).unwrap();
         let frame = frame_of(app.project.fps.as_ref(), 0.0);
@@ -4672,6 +4718,7 @@ mod tests {
                     asset: 1,
                     asset_in: Seconds::from_integer(0),
                     asset_out: Seconds::from_integer(3),
+                    speed: Seconds::from_integer(1),
                 })
             })
             .collect();
@@ -4755,6 +4802,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: whole,
+            speed: Seconds::from_integer(1),
         });
         let batch = edit::paste_ripple(&app.project, &snapshot, 0.0).unwrap();
         app.history.apply(&mut app.project, batch, 0).unwrap();
@@ -4957,6 +5005,7 @@ mod tests {
                 asset: 1,
                 asset_in: Seconds::from_integer(1),
                 asset_out: Seconds::from_integer(3),
+                speed: Seconds::from_integer(1),
             });
         }
         let (head2, edge) = resolve_armed(&p, 4.0, 0).unwrap();
@@ -5098,6 +5147,7 @@ mod tests {
                 asset: 1,
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
             }));
         let mut app = App::new(p, PathBuf::from("t.json"));
         let head2 = Armed::Clip { id: 2, head: true };
@@ -5140,6 +5190,7 @@ mod tests {
             asset: 1,
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(dur),
+            speed: Seconds::from_integer(1),
         })
     }
 

@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::time::{Seconds, format_seconds};
+use crate::time::Seconds;
 use crate::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 
 #[derive(Debug, Error, PartialEq)]
@@ -331,8 +331,6 @@ fn hex(c: u8) -> Option<u8> {
 pub enum BuildError {
     #[error("clip {name:?}: no pooled asset matches its path")]
     Unresolved { name: String },
-    #[error("clip {name:?}: {speed}× speed is not supported yet")]
-    Speed { name: String, speed: String },
 }
 
 /// Turn a parsed document into a [`Timeline`]. `resolve` maps a clip's
@@ -349,12 +347,6 @@ pub fn build(
             match item {
                 OtioItem::Gap(d) => segments.push(Segment::Gap(Gap { duration: *d })),
                 OtioItem::Clip(c) => {
-                    if c.speed != Seconds::from_integer(1) {
-                        return Err(BuildError::Speed {
-                            name: c.name.clone(),
-                            speed: format_seconds(&c.speed),
-                        });
-                    }
                     let asset = resolve(&c.path).ok_or_else(|| BuildError::Unresolved {
                         name: c.name.clone(),
                     })?;
@@ -363,6 +355,7 @@ pub fn build(
                         asset,
                         asset_in: c.asset_in,
                         asset_out: c.asset_out,
+                        speed: c.speed,
                     }));
                     next_id += 1;
                 }
@@ -551,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn build_refuses_speed_instead_of_silently_wrong() {
+    fn build_carries_speed() {
         let doc = parse(
             r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
               { "OTIO_SCHEMA": "Track.1", "kind": "Video", "children": [
@@ -568,8 +561,13 @@ mod tests {
             ] } }"#,
         )
         .unwrap();
-        let err = build(&doc, &|_| Some(1)).unwrap_err();
-        assert!(matches!(err, BuildError::Speed { ref name, .. } if name == "slow.mp4"));
+        let timeline = build(&doc, &|_| Some(1)).unwrap();
+        let Segment::Clip(c) = &timeline.tracks[0].segments[0] else {
+            panic!("expected clip");
+        };
+        assert_eq!(c.speed, Seconds::from_integer(24) / Seconds::new(2997, 100));
+        // Timeline duration is the project frame span, 240/24 = 10 s.
+        assert_eq!(c.duration(), Seconds::from_integer(10));
     }
 
     #[test]
