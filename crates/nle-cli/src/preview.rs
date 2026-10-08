@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nle_core::timeline::Segment as TimelineSegment;
+use nle_core::timeline::{Segment as TimelineSegment, Track};
 use nle_core::{Project, Seconds, format_seconds};
 use thiserror::Error;
 
@@ -97,11 +97,85 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
     Ok(segs)
 }
 
+/// Flatten the video tracks into one preview sequence, topmost first: at
+/// each instant the highest unmuted video track with a clip wins, and only
+/// where every track is a gap does the preview show black. This is what the
+/// monitor plays, so a gap in an upper layer reveals the layer below rather
+/// than stopping playback.
+pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
+    let total = project.timeline.end();
+    if total <= Seconds::from_integer(0) {
+        return Err(PreviewError::Empty);
+    }
+    // Stacking order is bottom→top, so the last video track is on top.
+    let video: Vec<&Track> = project
+        .timeline
+        .video_tracks()
+        .filter(|t| !t.muted)
+        .collect();
+    if video.is_empty() {
+        return Err(PreviewError::NoVideoTrack);
+    }
+
+    // Union of every video track's segment boundaries.
+    let mut cuts = vec![Seconds::from_integer(0), total];
+    for t in &video {
+        let mut acc = Seconds::from_integer(0);
+        for seg in &t.segments {
+            cuts.push(acc);
+            acc += seg.duration();
+            cuts.push(acc);
+        }
+    }
+    cuts.sort();
+    cuts.dedup();
+
+    let mut segs: Vec<Segment> = Vec::new();
+    for w in cuts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if b <= a {
+            continue;
+        }
+        // The topmost track with a clip covering [a, b).
+        let picked = video.iter().rev().find_map(|t| {
+            let si = t.index_at(a)?;
+            match &t.segments[si] {
+                TimelineSegment::Clip(c) => Some((c, t.start_of(si))),
+                TimelineSegment::Gap(_) => None,
+            }
+        });
+        match picked {
+            Some((c, seg_start)) => {
+                let asset = project
+                    .asset(c.asset)
+                    .ok_or(PreviewError::MissingAsset(c.asset))?;
+                segs.push(Segment::Clip {
+                    path: asset.path.clone(),
+                    // `a` is inside the clip: offset into its source.
+                    start: c.asset_in + (a - seg_start),
+                    length: b - a,
+                });
+            }
+            None => push_gap(&mut segs, b - a),
+        }
+    }
+    Ok(segs)
+}
+
+/// Append a gap, fusing it with a preceding gap so a black span is one
+/// entry.
+fn push_gap(segs: &mut Vec<Segment>, length: Seconds) {
+    if let Some(Segment::Gap { length: last }) = segs.last_mut() {
+        *last += length;
+    } else {
+        segs.push(Segment::Gap { length });
+    }
+}
+
 /// Length of the cached black filler file in seconds. Gaps longer than
 /// this are emitted as multiple EDL entries (mpv can't seek past a
 /// segment's source length).
 pub const BLACK_FILE_SECS: i64 = 10;
-
 /// Render segments to EDL entries (the part after `edl://`).
 /// `black` is required only when a gap exists. Gaps longer than the
 /// black file are split into `BLACK_FILE_SECS`-sized chunks.
@@ -195,9 +269,22 @@ pub fn build_black_preview(
 pub const EXTEND_PREVIEW_SECS: i64 = 3600;
 
 /// Build the full `edl://` URL for track `ti`, generating the black gap
-/// file if the timeline has gaps.
+/// file if the timeline has gaps. Used by the CLI (`nle edl --track N`); the
+/// monitor plays the composite (see `build_composite_edl`).
 pub fn build_edl(project: &Project, ti: usize) -> Result<String, PreviewError> {
-    let segs = segments(project, ti)?;
+    edl_from_segments(project, &segments(project, ti)?)
+}
+
+/// Build the `edl://` URL for the whole timeline — the composite of every
+/// unmuted video track, topmost clip winning. This is what the monitor
+/// plays, so a gap falls through to the layer below.
+pub fn build_composite_edl(project: &Project) -> Result<String, PreviewError> {
+    edl_from_segments(project, &composite_segments(project)?)
+}
+
+/// Render preview segments to an `edl://` URL, generating the cached black
+/// filler file when a gap is present.
+fn edl_from_segments(project: &Project, segs: &[Segment]) -> Result<String, PreviewError> {
     let has_gap = segs.iter().any(|s| matches!(s, Segment::Gap { .. }));
     let black = if has_gap {
         let size = project.video.as_ref().ok_or(PreviewError::NoSize)?;
@@ -206,7 +293,7 @@ pub fn build_edl(project: &Project, ti: usize) -> Result<String, PreviewError> {
     } else {
         None
     };
-    Ok(format!("edl://{}", assemble_edl(&segs, black.as_deref())?))
+    Ok(format!("edl://{}", assemble_edl(segs, black.as_deref())?))
 }
 
 /// Cache dir for black gap files: `$XDG_CACHE_HOME/nle/black` or `~/.cache/nle/black`.
@@ -391,6 +478,112 @@ mod tests {
             segs,
             vec![Segment::Gap {
                 length: Seconds::from_integer(8)
+            }]
+        );
+    }
+
+    // Two video tracks: low holds a 4 s clip; high is gap / 1 s clip / gap.
+    fn composite_project() -> Project {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let (low, _) = p.add_asset("/media/low.mp4".into(), probe_report("10"));
+        let (high, _) = p.add_asset("/media/high.mp4".into(), probe_report("10"));
+        p.timeline.tracks[0].segments = vec![TimelineSegment::Clip(TimelineClip {
+            id: 1,
+            asset: low,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(4),
+        })];
+        let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(1),
+            }),
+            TimelineSegment::Clip(TimelineClip {
+                id: 2,
+                asset: high,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(1),
+            }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
+        ];
+        p
+    }
+
+    #[test]
+    fn composite_picks_the_topmost_clip_and_falls_through_gaps() {
+        let p = composite_project();
+        let segs = composite_segments(&p).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                // [0,1) top is a gap → the low clip shows, source 0..1.
+                Segment::Clip {
+                    path: "/media/low.mp4".into(),
+                    start: Seconds::from_integer(0),
+                    length: Seconds::from_integer(1),
+                },
+                // [1,2) top clip wins.
+                Segment::Clip {
+                    path: "/media/high.mp4".into(),
+                    start: Seconds::from_integer(0),
+                    length: Seconds::from_integer(1),
+                },
+                // [2,4) top is a gap again → low clip, source 2..4.
+                Segment::Clip {
+                    path: "/media/low.mp4".into(),
+                    start: Seconds::from_integer(2),
+                    length: Seconds::from_integer(2),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn composite_top_clip_wins_over_a_lower_clip() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let _ = p.add_asset("/media/low.mp4".into(), probe_report("10"));
+        let (high, _) = p.add_asset("/media/high.mp4".into(), probe_report("10"));
+        p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 2)]; // asset 1 (low)
+        let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(TimelineClip {
+            id: 2,
+            asset: high,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(2),
+        })];
+        let segs = composite_segments(&p).unwrap();
+        assert_eq!(
+            segs,
+            vec![Segment::Clip {
+                path: "/media/high.mp4".into(),
+                start: Seconds::from_integer(0),
+                length: Seconds::from_integer(2),
+            }]
+        );
+    }
+
+    #[test]
+    fn composite_is_black_only_when_every_track_is_a_gap() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let _ = p.add_asset("/media/low.mp4".into(), probe_report("10"));
+        p.timeline.tracks[0].segments = vec![TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(3),
+        })];
+        let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(2),
+        })];
+        // Timeline end is the longer track (3 s); both gaps read black.
+        let segs = composite_segments(&p).unwrap();
+        assert_eq!(
+            segs,
+            vec![Segment::Gap {
+                length: Seconds::from_integer(3)
             }]
         );
     }

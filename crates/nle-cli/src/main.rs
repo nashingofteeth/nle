@@ -290,12 +290,12 @@ fn main() -> Result<()> {
 #[cfg(feature = "tui")]
 fn cmd_edit(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
-    let empty = project
+    // The monitor plays the composite, so any video track with a clip counts.
+    let has_clip = project
         .timeline
-        .video_track()
-        .map(|t| t.segments.iter().all(|s| matches!(s, Segment::Gap(_))))
-        .unwrap_or(true);
-    if empty {
+        .video_tracks()
+        .any(|t| t.segments.iter().any(|s| matches!(s, Segment::Clip(_))));
+    if !has_clip {
         bail!("timeline is empty — add clips first (the monitor needs content)");
     }
     let media_title = format!(
@@ -310,7 +310,7 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
         &media_title,
     )?;
     player.observe()?;
-    let edl = preview::build_edl(&project, 0)?;
+    let edl = preview::build_composite_edl(&project)?;
     player.load(&edl, None);
     tui::run(project, project_path.to_path_buf(), player)?;
     Ok(())

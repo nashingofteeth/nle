@@ -514,7 +514,7 @@ fn reload_project(app: &mut App, player: &dyn Mpv) -> anyhow::Result<()> {
         .active_track
         .min(app.project.timeline.tracks.len().saturating_sub(1));
     app.history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
-    let edl = preview::build_edl(&app.project, app.active())?;
+    let edl = preview::build_composite_edl(&app.project)?;
     player.load(&edl, Some(app.playhead));
     Ok(())
 }
@@ -739,7 +739,7 @@ fn close_pool(app: &mut App, player: &dyn Mpv) {
         app.last_pool_sel = sel; // capture on exit so reopening returns here
     }
     app.mode = Mode::Normal;
-    if let Ok(edl) = preview::build_edl(&app.project, app.active()) {
+    if let Ok(edl) = preview::build_composite_edl(&app.project) {
         player.load(&edl, Some(resume.max(0.0)));
     }
     app.playhead = resume;
@@ -1179,7 +1179,7 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             } else {
                 (app.active() + 1) % n.max(1)
             };
-            set_active_track(app, player, idx);
+            set_active_track(app, idx);
         }
         KeyCode::Char('T') => {
             let n = app.project.timeline.tracks.len();
@@ -1188,7 +1188,7 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             } else {
                 (app.active() + n.max(1) - 1) % n.max(1)
             };
-            set_active_track(app, player, idx);
+            set_active_track(app, idx);
         }
         KeyCode::Char('e') => enter_extend(app, player, false),
         KeyCode::Char('E') => enter_extend(app, player, true),
@@ -1828,7 +1828,7 @@ fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
         crate::log::line(&format!("load pool preview #{sel}"));
         load_pool_preview(app, player);
     } else {
-        match preview::build_edl(&app.project, app.active()) {
+        match preview::build_composite_edl(&app.project) {
             Ok(edl) => {
                 crate::log::line(&format!("load timeline EDL at {:.3}", app.playhead));
                 player.load(&edl, Some(app.playhead));
@@ -2150,7 +2150,7 @@ fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
 /// Leave extend mode: project timeline back on the monitor, playhead at
 /// `pos`.
 fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
-    match preview::build_edl(&app.project, app.active()) {
+    match preview::build_composite_edl(&app.project) {
         Ok(edl) => player.load(&edl, Some(pos.max(0.0))),
         Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
     }
@@ -2838,18 +2838,11 @@ fn select_active_track(app: &mut App, idx: usize) -> Option<String> {
     Some(track_label(&app.project, app.active_track))
 }
 
-/// Make track `idx` active and point the monitor at its timeline EDL.
-fn set_active_track(app: &mut App, player: &dyn Mpv, idx: usize) {
-    let Some(label) = select_active_track(app, idx) else {
-        return;
-    };
-    // The monitor follows the active track.
-    match preview::build_edl(&app.project, app.active()) {
-        Ok(edl) => {
-            player.load(&edl, Some(app.playhead));
-            app.set_message(&format!("track {label}"));
-        }
-        Err(e) => app.set_message(&format!("track {label} — preview: {e}")),
+/// Make track `idx` active and announce it. The monitor plays the composite
+/// of all video tracks, so switching tracks does not reload it.
+fn set_active_track(app: &mut App, idx: usize) {
+    if let Some(label) = select_active_track(app, idx) {
+        app.set_message(&format!("track {label}"));
     }
 }
 
@@ -5488,26 +5481,21 @@ mod tests {
     }
 
     #[test]
-    fn switching_track_reloads_the_monitor_for_that_track() {
+    fn switching_track_keeps_the_composite_monitor() {
         let mut p = asset_project();
-        let a = p.media[0].id;
-        let ti = p.timeline.add_track(TrackKind::Audio);
-        p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(nle_core::Clip {
-            id: 9,
-            asset: a,
-            asset_in: Seconds::from_integer(0),
-            // Spans the timeline so the preview needs no black filler file.
-            asset_out: Seconds::from_integer(7),
-        })];
+        p.timeline.add_track(TrackKind::Audio);
         let mut app = App::new(p, temp_project_path("track-switch"));
         let fake = FakeMpv::new();
-        set_active_track(&mut app, &fake, 1);
+        set_active_track(&mut app, 1);
         assert_eq!(app.active(), 1);
-        match &fake.calls()[0] {
-            Call::Load(url, _) => assert!(url.starts_with("edl://"), "{url}"),
-            other => panic!("expected a load, got {other:?}"),
-        }
         assert!(app.message.contains("a1"), "{}", app.message);
+        // The monitor plays the composite of all video tracks, so switching
+        // the edit target does not disturb it.
+        assert!(
+            fake.calls().is_empty(),
+            "no monitor reload: {:?}",
+            fake.calls()
+        );
     }
 
     #[test]
@@ -5650,7 +5638,7 @@ mod tests {
     fn pool_reopen_returns_to_the_last_row() {
         let mut p = asset_project();
         p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
-        // Drop the gap so close_pool's build_edl needs no black file (ffmpeg).
+        // Drop the gap so close_pool's composite EDL needs no black file (ffmpeg).
         p.timeline.video_track_mut().unwrap().segments.remove(1);
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.loaded = true;
