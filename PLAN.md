@@ -1,6 +1,6 @@
 # nle — plan of record
 
-Status: **M4 + EDL (CMX3600) import complete, M5 next.** This file is the
+Status: **M4 + EDL/OTIO import + clip speed complete, M5 next.** This file is the
 design/roadmap; the README is the user-facing how-to. Keep it in sync as
 milestones land.
 
@@ -138,6 +138,35 @@ track is a no-op in the fast path.
 
 **Deferred:** TUI `:edl import`; audio-only EDLs; additive import into an
 existing project.
+
+## OTIO import + clip speed — shipped
+
+- **OTIO import** (`nle-core/src/otio.rs`): reads a `Timeline`/`Stack`/
+  `Track`/`Clip`/`Gap` document from `serde_json::Value`, dispatching on the
+  schema *name* (the part before the `.`) — tags are versioned (`Clip.1`,
+  `Clip.2`), so a tagged enum would break on a version bump. `nle import-otio
+  FILE [--media DIR] [--fps] [--remap OLD=NEW]` resolves each clip's
+  `ExternalReference.target_url`, probes it into the pool, and builds a
+  multi-track timeline. Transitions/nesting are **warned**, never silently
+  dropped.
+- **Rate conforms:** Kdenlive emits **no `LinearTimeWarp`** — it writes the
+  clip's `source_range` in *project* frames and the media's `available_range`
+  in the *media* rate, so `speed = source_rate / media_rate` and source
+  seconds = `frame / media_rate`. Validated on a real 26-min project (27
+  clips: 26× 0.8008 + 1× 0.4004, total exactly 37538/24 s).
+- **Clip speed** (`timeline.rs`): `Clip.speed` (rational, default 1); timeline
+  duration = `(asset_out - asset_in) / speed`. `PROJECT_VERSION` → 4,
+  `HISTORY_VERSION` → 6 (the `Atom` carries speed as num/den, so undo/redo is
+  exact).
+- **Editing:** timeline↔source deltas scale by speed (`source_span`); a speed
+  change **always ripples** (`set_speed` / `:speed` / `nle speed`).
+- **Export:** `setpts=(PTS-STARTPTS)/speed`, `atempo` (chained outside its
+  range, e.g. 0.4× → 0.5 × 0.8008), source-span trim; the 1× graph stays
+  byte-identical. Preview plays speed clips at 1× with a notice (mpv's EDL has
+  no speed).
+
+**Deferred:** a TUI speed key (only `:speed` today); OTIO transitions/nesting;
+audio-only OTIO.
 
 ## M5 — transitions, effects, proxies (planned)
 

@@ -162,6 +162,12 @@ plainly.
   no audio track keeps the classic concat path; otherwise each track is
   padded to the timeline length, video layers `overlay` bottom→top (upper
   gaps `black@0.0`/`yuva420p`), audio `amix`es, and muted tracks drop out.
+- **Speed:** `Clip.speed` is a rational rate (default 1); timeline duration =
+  source / speed. Every edit that turns a timeline delta into `asset_in/out`
+  scales by speed (`source_span`). **A speed change always ripples** — the
+  timeline is a sequence, so a new duration moves every follower. Export
+  retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained outside
+  [0.5, 2]); the 1× graph stays byte-identical.
 
 ## EDL import (CMX3600) pitfalls
 
@@ -173,6 +179,19 @@ plainly.
 - **Source timecodes are file-relative by default**; `--src-offset` maps
   hour-based media. Audio events whose reel + source match a video event are
   **linked** and skipped, so embedded audio isn't doubled.
+
+## OTIO import pitfalls
+
+- **Kdenlive's OTIO export has no `LinearTimeWarp`.** It encodes a rate
+  conform as `source_range` in *project* frames + `available_range` in the
+  *media* rate, so derive `speed = source_rate / media_rate` and source
+  seconds as `frame / media_rate`. (A real 24 fps project over 29.97 fps
+  media comes out as 1001/1250, not a rounded 0.8.)
+- **Dispatch on the OTIO schema *name*, not the tag:** `OTIO_SCHEMA` is
+  versioned (`Clip.1`, `Clip.2`), so match the part before the `.` over
+  `serde_json::Value`; a `#[serde(tag)]` enum breaks on a version bump.
+- **`Clip.2` nests media under `media_references.DEFAULT_MEDIA`** (a map),
+  while `Clip.1` uses a singular `media_reference` — handle both.
 
 ## Rust gotchas hit this session
 
