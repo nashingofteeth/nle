@@ -618,6 +618,16 @@ fn video_track_index(project: &Project) -> Result<usize, EditError> {
         .ok_or(EditError::Timeline(TimelineError::NoVideoTrack))
 }
 
+/// The track at `ti`, or `TrackNotFound` — `*_on` ops take a caller-supplied
+/// index, so a stale/out-of-range one must error, not panic.
+fn track_at(project: &Project, ti: usize) -> Result<&Track, EditError> {
+    project
+        .timeline
+        .tracks
+        .get(ti)
+        .ok_or(EditError::TrackNotFound(ti))
+}
+
 /// Snap a float playhead to the nearest frame of the project's fps.
 /// Without a known fps (empty project), whole seconds are the grid.
 fn snap(project: &Project, t: f64) -> Result<Seconds, EditError> {
@@ -656,9 +666,17 @@ fn at_least_a_frame(project: &Project, dur: &Seconds) -> Result<(), EditError> {
 }
 
 /// The clip segment containing the (snapped) playhead.
-fn clip_at(project: &Project, t: &Seconds) -> Result<(usize, usize, Clip), EditError> {
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+fn clip_at(
+    project: &Project,
+    track: usize,
+    t: &Seconds,
+) -> Result<(usize, usize, Clip), EditError> {
+    let ti = track;
+    let track = project
+        .timeline
+        .tracks
+        .get(ti)
+        .ok_or(EditError::TrackNotFound(ti))?;
     let si = track.index_at(*t).ok_or(EditError::NoSegment)?;
     match &track.segments[si] {
         Segment::Clip(c) => Ok((ti, si, c.clone())),
@@ -671,10 +689,15 @@ fn clip_at(project: &Project, t: &Seconds) -> Result<(usize, usize, Clip), EditE
 /// (track, first index, last index, region start, region end).
 fn gap_region_at(
     project: &Project,
+    track: usize,
     t: &Seconds,
 ) -> Result<(usize, usize, usize, Seconds, Seconds), EditError> {
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = project
+        .timeline
+        .tracks
+        .get(ti)
+        .ok_or(EditError::TrackNotFound(ti))?;
     let si = track.index_at(*t).ok_or(EditError::NoSegment)?;
     if !matches!(track.segments[si], Segment::Gap(_)) {
         return Err(EditError::NoGap); // inside a clip
@@ -757,6 +780,151 @@ fn gap_piece(duration: Seconds) -> Option<Segment> {
     }
 }
 
+// ---------------------------------------------- default-track wrappers
+//
+// The CLI and the single-track tests edit "the" video track. These thin
+// wrappers resolve the first video track and delegate to the explicit
+// `*_on` operations, which take a track index. The logic lives once, in
+// the `_on` functions; the wrappers only pick the default.
+
+pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    trim_in_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    trim_out_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn is_gap_at(project: &Project, playhead: f64) -> bool {
+    video_track_index(project)
+        .map(|ti| is_gap_at_on(project, ti, playhead))
+        .unwrap_or(false)
+}
+
+pub fn ripple_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    ripple_gap_in_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn ripple_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    ripple_gap_out_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn trim_in_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    trim_in_ripple_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn trim_out_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    trim_out_ripple_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn split(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    split_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn delete_under(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    delete_under_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn delete_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    delete_ripple_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn delete_clip_ripple_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
+    delete_clip_ripple_by_id_on(project, video_track_index(project)?, clip_id)
+}
+
+pub fn paste(project: &Project, snapshot: &Segment, playhead: f64) -> Result<Batch, EditError> {
+    paste_on(project, video_track_index(project)?, snapshot, playhead)
+}
+
+pub fn insert_gap(project: &Project, playhead: f64, frames: i64) -> Result<Batch, EditError> {
+    insert_gap_on(project, video_track_index(project)?, playhead, frames)
+}
+
+pub fn paste_ripple(
+    project: &Project,
+    snapshot: &Segment,
+    playhead: f64,
+) -> Result<Batch, EditError> {
+    paste_ripple_on(project, video_track_index(project)?, snapshot, playhead)
+}
+
+pub fn delete_segment(project: &Project, index: usize, ripple: bool) -> Result<Batch, EditError> {
+    delete_segment_on(project, video_track_index(project)?, index, ripple)
+}
+
+pub fn trim_consume_target(project: &Project, playhead: f64, out: bool) -> Option<usize> {
+    trim_consume_target_on(project, video_track_index(project).ok()?, playhead, out)
+}
+
+pub fn delete_clip_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
+    delete_clip_by_id_on(project, video_track_index(project)?, clip_id)
+}
+
+pub fn extend_edge(
+    project: &Project,
+    clip_id: u32,
+    head: bool,
+    playhead: f64,
+) -> Result<Batch, EditError> {
+    extend_edge_on(
+        project,
+        video_track_index(project)?,
+        clip_id,
+        head,
+        playhead,
+    )
+}
+
+pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+    extend_gap_end_on(project, video_track_index(project)?, playhead)
+}
+
+pub fn extend_gap_tail(
+    project: &Project,
+    index: usize,
+    playhead: f64,
+    ripple: bool,
+) -> Result<Batch, EditError> {
+    extend_gap_tail_on(
+        project,
+        video_track_index(project)?,
+        index,
+        playhead,
+        ripple,
+    )
+}
+
+pub fn extend_gap_head(
+    project: &Project,
+    index: usize,
+    playhead: f64,
+    ripple: bool,
+) -> Result<Batch, EditError> {
+    extend_gap_head_on(
+        project,
+        video_track_index(project)?,
+        index,
+        playhead,
+        ripple,
+    )
+}
+
+pub fn absorb_outward(
+    project: &Project,
+    clip_id: u32,
+    head: bool,
+    playhead: f64,
+) -> Result<Batch, EditError> {
+    absorb_outward_on(
+        project,
+        video_track_index(project)?,
+        clip_id,
+        head,
+        playhead,
+    )
+}
+
 // ------------------------------------------------------------ operations
 
 /// `i` — trim the in-edge of whatever is under the playhead:
@@ -764,10 +932,10 @@ fn gap_piece(duration: Seconds) -> Option<Segment> {
 ///   material takes its place (everything else stays put);
 /// - gap: the previous clip's tail extends into it (material permitting);
 ///   a leading gap shortens from the front.
-pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     let si = track.index_at(t).ok_or(EditError::NoSegment)?;
 
     if let Segment::Clip(c) = &track.segments[si] {
@@ -823,7 +991,7 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
 
     // Gap region: [first..=last] are Gap segments; the playhead trims the
     // region's in-edge.
-    let (ti, first, last, rs, _re) = gap_region_at(project, &t)?;
+    let (ti, first, last, rs, _re) = gap_region_at(project, ti, &t)?;
     let delta = t - rs;
     if delta <= Seconds::from_integer(0) {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
@@ -878,10 +1046,10 @@ pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
 ///   material takes its place (everything else stays put);
 /// - gap: the next clip's head extends back into it (material
 ///   permitting); a trailing gap shortens to the playhead.
-pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn trim_out_on(project: &Project, track: usize, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     let si = track.index_at(t).ok_or(EditError::NoSegment)?;
 
     if let Segment::Clip(c) = &track.segments[si] {
@@ -936,7 +1104,7 @@ pub fn trim_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     }
 
     // Gap region: the playhead trims the region's out-edge.
-    let (ti, first, last, _rs, re) = gap_region_at(project, &t)?;
+    let (ti, first, last, _rs, re) = gap_region_at(project, ti, &t)?;
     let delta = re - t;
     if delta <= Seconds::from_integer(0) {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
@@ -1050,9 +1218,9 @@ fn shrink_gap_region(
 }
 
 /// Is the (snapped) playhead inside a gap?
-pub fn is_gap_at(project: &Project, playhead: f64) -> bool {
+pub fn is_gap_at_on(project: &Project, track: usize, playhead: f64) -> bool {
     match snap(project, playhead) {
-        Ok(t) => gap_region_at(project, &t).is_ok(),
+        Ok(t) => gap_region_at(project, track, &t).is_ok(),
         Err(_) => false,
     }
 }
@@ -1060,16 +1228,20 @@ pub fn is_gap_at(project: &Project, playhead: f64) -> bool {
 /// `i`/`I` on a gap: ripple-trim the region's in-edge. Unlike `trim_in`,
 /// no neighbouring clip grows into the gap — it simply loses `delta` and
 /// the followers slide left.
-pub fn ripple_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn ripple_gap_in_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let (ti, first, last, rs, _re) = gap_region_at(project, &t)?;
+    let (ti, first, last, rs, _re) = gap_region_at(project, track, &t)?;
     let delta = t - rs;
     if delta <= Seconds::from_integer(0) {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     let ops = shrink_gap_region(
         ti,
-        &project.timeline.tracks[ti].segments,
+        &track_at(project, ti)?.segments,
         first,
         last,
         delta,
@@ -1083,16 +1255,20 @@ pub fn ripple_gap_in(project: &Project, playhead: f64) -> Result<Batch, EditErro
 
 /// `o`/`O` on a gap: ripple-trim the region's out-edge, the mirror of
 /// `ripple_gap_in`.
-pub fn ripple_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn ripple_gap_out_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let (ti, first, last, _rs, re) = gap_region_at(project, &t)?;
+    let (ti, first, last, _rs, re) = gap_region_at(project, track, &t)?;
     let delta = re - t;
     if delta <= Seconds::from_integer(0) {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
     }
     let ops = shrink_gap_region(
         ti,
-        &project.timeline.tracks[ti].segments,
+        &track_at(project, ti)?.segments,
         first,
         last,
         delta,
@@ -1107,11 +1283,15 @@ pub fn ripple_gap_out(project: &Project, playhead: f64) -> Result<Batch, EditErr
 /// `I` — ripple trim-in: the clip's head is cut at the playhead and the
 /// followers slide left (no gap is left behind). On a gap, identical to
 /// `i` (gap trims are inherently ripple).
-pub fn trim_in_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn trim_in_ripple_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+) -> Result<Batch, EditError> {
     // Ripple strips the leftover-gap ops, but only when the playhead is
     // on a clip (gap-region trims are inherently ripple and keep theirs).
-    let on_clip = clip_at(project, &snap(project, playhead)?).is_ok();
-    match trim_in(project, playhead) {
+    let on_clip = clip_at(project, track, &snap(project, playhead)?).is_ok();
+    match trim_in_on(project, track, playhead) {
         Ok(mut batch) => {
             if on_clip {
                 batch.ops.retain(|op| {
@@ -1135,9 +1315,13 @@ pub fn trim_in_ripple(project: &Project, playhead: f64) -> Result<Batch, EditErr
 
 /// `O` — ripple trim-out: the clip's tail is cut at the playhead and the
 /// followers slide left (no gap left behind). On a gap, identical to `o`.
-pub fn trim_out_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
-    let on_clip = clip_at(project, &snap(project, playhead)?).is_ok();
-    match trim_out(project, playhead) {
+pub fn trim_out_ripple_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+) -> Result<Batch, EditError> {
+    let on_clip = clip_at(project, track, &snap(project, playhead)?).is_ok();
+    match trim_out_on(project, track, playhead) {
         Ok(mut batch) => {
             if on_clip {
                 batch.ops.retain(|op| {
@@ -1160,10 +1344,10 @@ pub fn trim_out_ripple(project: &Project, playhead: f64) -> Result<Batch, EditEr
 }
 
 /// `s` — split the clip under the playhead into two clips.
-pub fn split(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let (ti, si, c) = clip_at(project, &t)?;
-    let seg_start = project.timeline.tracks[ti].start_of(si);
+    let (ti, si, c) = clip_at(project, track, &t)?;
+    let seg_start = track_at(project, ti)?.start_of(si);
     let left_len = t - seg_start;
     if left_len <= Seconds::from_integer(0) || left_len >= c.duration() {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
@@ -1192,16 +1376,16 @@ pub fn split(project: &Project, playhead: f64) -> Result<Batch, EditError> {
 /// `dd` — delete what's under the playhead, leaving a gap where a clip
 /// was (the timeline end is preserved); a gap under the playhead is
 /// removed (shrinking the timeline).
-pub fn delete_under(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn delete_under_on(project: &Project, track: usize, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
     let (ti, si) = {
-        let ti = video_track_index(project)?;
-        let si = project.timeline.tracks[ti]
+        let ti = track;
+        let si = track_at(project, ti)?
             .index_at(t)
             .ok_or(EditError::NoSegment)?;
         (ti, si)
     };
-    let seg = project.timeline.tracks[ti].segments[si].clone();
+    let seg = track_at(project, ti)?.segments[si].clone();
     match seg {
         Segment::Clip(c) => {
             let dur = c.duration();
@@ -1214,7 +1398,7 @@ pub fn delete_under(project: &Project, playhead: f64) -> Result<Batch, EditError
             let mut desc = "delete clip (gap left behind)".to_string();
             // Fuse the new gap with neighboring gaps so deletes never
             // fragment the track into adjacent gaps.
-            let segs = &project.timeline.tracks[ti].segments;
+            let segs = &track_at(project, ti)?.segments;
             let left_gap = si > 0 && matches!(segs[si - 1], Segment::Gap(_));
             let right_gap = si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
             let new_gap = Segment::Gap(Gap { duration: dur });
@@ -1282,7 +1466,7 @@ pub fn delete_under(project: &Project, playhead: f64) -> Result<Batch, EditError
             }];
             let mut desc = "delete gap".to_string();
             // The removal joins si-1 and si+1: merge them when seamless.
-            let segs = &project.timeline.tracks[ti].segments;
+            let segs = &track_at(project, ti)?.segments;
             if si > 0
                 && si + 1 < segs.len()
                 && let Some(merged) = merge_pair(&segs[si - 1], &segs[si + 1])
@@ -1307,10 +1491,14 @@ pub fn delete_under(project: &Project, playhead: f64) -> Result<Batch, EditError
 
 /// `D` — ripple delete: remove whatever segment is under the playhead.
 /// Followers slide left; the timeline shrinks by its duration.
-pub fn delete_ripple(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn delete_ripple_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let si = project.timeline.tracks[ti]
+    let ti = track;
+    let si = track_at(project, ti)?
         .index_at(t)
         .ok_or(EditError::NoSegment)?;
     delete_segment_ripple(project, ti, si)
@@ -1319,16 +1507,20 @@ pub fn delete_ripple(project: &Project, playhead: f64) -> Result<Batch, EditErro
 /// Ripple-delete clip `clip_id` by id. Extend mode commits at a consumed
 /// edge against the armed clip, not whatever the playhead's boundary
 /// resolves to.
-pub fn delete_clip_ripple_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
-    let ti = video_track_index(project)?;
-    let si = project.timeline.tracks[ti]
+pub fn delete_clip_ripple_by_id_on(
+    project: &Project,
+    track: usize,
+    clip_id: u32,
+) -> Result<Batch, EditError> {
+    let ti = track;
+    let si = track_at(project, ti)?
         .clip_index(clip_id)
         .ok_or(EditError::ClipNotFound(clip_id))?;
     delete_segment_ripple(project, ti, si)
 }
 
 fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batch, EditError> {
-    let seg = project.timeline.tracks[ti].segments[si].clone();
+    let seg = track_at(project, ti)?.segments[si].clone();
     let mut ops = vec![EditOp::Remove {
         track: ti,
         index: si,
@@ -1339,7 +1531,7 @@ fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batc
         Segment::Gap(_) => "delete gap (ripple)".to_string(),
     };
     // The removal joins si-1 and si+1: merge them when seamless.
-    let segs = &project.timeline.tracks[ti].segments;
+    let segs = &track_at(project, ti)?.segments;
     if si > 0
         && si + 1 < segs.len()
         && let Some(merged) = merge_pair(&segs[si - 1], &segs[si + 1])
@@ -1382,23 +1574,24 @@ fn pasted_piece(snapshot: &Segment, new_id: u32) -> Segment {
 /// (`p`). `None` when no gap ends at the playhead.
 fn extend_gap_ending_at(
     project: &Project,
+    track: usize,
     playhead: f64,
     extra: Seconds,
     ripple: bool,
 ) -> Result<Option<Batch>, EditError> {
-    let Some(si) = trim_consume_target(project, playhead, false) else {
+    let Some(si) = trim_consume_target_on(project, track, playhead, false) else {
         return Ok(None);
     };
-    let ti = video_track_index(project)?;
+    let ti = track;
     if !matches!(
-        project.timeline.tracks[ti].segments.get(si),
+        track_at(project, ti)?.segments.get(si),
         Some(Segment::Gap(_))
     ) {
         return Ok(None);
     }
     let t = snap(project, playhead)?;
     let end = secs_f64(&t) + secs_f64(&extra);
-    extend_gap_tail(project, si, end, ripple).map(Some)
+    extend_gap_tail_on(project, track, si, end, ripple).map(Some)
 }
 
 /// `p` — replace-paste: drop the clipboard at the playhead, overwriting
@@ -1407,14 +1600,19 @@ fn extend_gap_ending_at(
 /// past the track end the timeline simply grows. The pasted clip keeps
 /// the yanked source range (splitting a clip hands the surviving right
 /// half a fresh id). A yanked GAP pastes empty space of the same length.
-pub fn paste(project: &Project, snapshot: &Segment, playhead: f64) -> Result<Batch, EditError> {
+pub fn paste_on(
+    project: &Project,
+    track: usize,
+    snapshot: &Segment,
+    playhead: f64,
+) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     // A gap pasted at the end of a gap extends it (replace: the covered
     // span is overwritten, followers do not shift).
     if let Segment::Gap(pg) = snapshot
-        && let Some(batch) = extend_gap_ending_at(project, playhead, pg.duration, false)?
+        && let Some(batch) = extend_gap_ending_at(project, ti, playhead, pg.duration, false)?
     {
         return Ok(batch);
     }
@@ -1565,7 +1763,12 @@ pub fn paste(project: &Project, snapshot: &Segment, playhead: f64) -> Result<Bat
 /// the clip and inserts the gap between the halves (the tail slides
 /// right); over a gap it lengthens that gap; past the end the void plus
 /// the new gap. Everything grows by `frames`.
-pub fn insert_gap(project: &Project, playhead: f64, frames: i64) -> Result<Batch, EditError> {
+pub fn insert_gap_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+    frames: i64,
+) -> Result<Batch, EditError> {
     if frames < 1 {
         return Err(EditError::TooShort);
     }
@@ -1574,14 +1777,14 @@ pub fn insert_gap(project: &Project, playhead: f64, frames: i64) -> Result<Batch
     let gap = Segment::Gap(Gap {
         duration: Seconds::new(frames, 1) / fps,
     });
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
 
     // A gap ending exactly at the playhead absorbs the insert rather than
     // spawning a second, adjacent gap (the rule `paste` already uses). This
     // also covers a trailing gap at the track end. Ripple growth = followers
     // shift right, which is what inserting frames means.
-    if let Some(mut batch) = extend_gap_ending_at(project, playhead, gap.duration(), true)? {
+    if let Some(mut batch) = extend_gap_ending_at(project, ti, playhead, gap.duration(), true)? {
         batch.desc = format!("insert gap at {}", stamp(project, &t));
         return Ok(batch);
     }
@@ -1663,18 +1866,19 @@ pub fn insert_gap(project: &Project, playhead: f64, frames: i64) -> Result<Batch
 /// payload's duration. A clipboard gap inserts empty space; a clipboard
 /// clip inserts the clip. At a cut the insert lands before the clip
 /// starting there.
-pub fn paste_ripple(
+pub fn paste_ripple_on(
     project: &Project,
+    track: usize,
     snapshot: &Segment,
     playhead: f64,
 ) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     // A gap pasted at the end of a gap extends it and pushes followers
     // right, rather than making a second adjacent gap segment.
     if let Segment::Gap(pg) = snapshot
-        && let Some(batch) = extend_gap_ending_at(project, playhead, pg.duration, true)?
+        && let Some(batch) = extend_gap_ending_at(project, ti, playhead, pg.duration, true)?
     {
         return Ok(batch);
     }
@@ -1783,13 +1987,18 @@ pub fn paste_ripple(
 /// Delete the segment at `index`: a gap, or a clip when `ripple`, is
 /// removed whole with its neighbours merged; a plain clip delete leaves a
 /// gap behind (dd semantics).
-pub fn delete_segment(project: &Project, index: usize, ripple: bool) -> Result<Batch, EditError> {
-    let ti = video_track_index(project)?;
-    match project.timeline.tracks[ti].segments.get(index) {
+pub fn delete_segment_on(
+    project: &Project,
+    track: usize,
+    index: usize,
+    ripple: bool,
+) -> Result<Batch, EditError> {
+    let ti = track;
+    match track_at(project, ti)?.segments.get(index) {
         Some(Segment::Gap(_)) | Some(Segment::Clip(_)) if ripple => {
             delete_segment_ripple(project, ti, index)
         }
-        Some(Segment::Clip(c)) => delete_clip_by_id(project, c.id),
+        Some(Segment::Clip(c)) => delete_clip_by_id_on(project, ti, c.id),
         Some(Segment::Gap(_)) => delete_segment_ripple(project, ti, index),
         None => Err(EditError::SegmentNotFound(index)),
     }
@@ -1799,9 +2008,14 @@ pub fn delete_segment(project: &Project, index: usize, ripple: bool) -> Result<B
 /// the trim should delete it instead). `out` (`o`/`O`) targets the
 /// segment STARTING at the playhead; `!out` (`i`/`I`) the segment ENDING
 /// there — at a shared cut those are the two different neighbours.
-pub fn trim_consume_target(project: &Project, playhead: f64, out: bool) -> Option<usize> {
+pub fn trim_consume_target_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+    out: bool,
+) -> Option<usize> {
     let t = snap(project, playhead).ok()?;
-    let track = project.timeline.video_track()?;
+    let track = project.timeline.tracks.get(track)?;
     if out {
         let si = track.index_at(t)?;
         (track.start_of(si) == t).then_some(si)
@@ -1818,9 +2032,13 @@ pub fn trim_consume_target(project: &Project, playhead: f64, out: bool) -> Optio
 }
 
 /// CLI `remove <id>`: replace the clip with a gap (dd semantics).
-pub fn delete_clip_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditError> {
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+pub fn delete_clip_by_id_on(
+    project: &Project,
+    track: usize,
+    clip_id: u32,
+) -> Result<Batch, EditError> {
+    let ti = track;
+    let track = track_at(project, ti)?;
     let si = track
         .clip_index(clip_id)
         .ok_or(EditError::ClipNotFound(clip_id))?;
@@ -1836,7 +2054,7 @@ pub fn delete_clip_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditE
             );
             let mut desc = format!("delete clip #{clip_id} (gap left behind)");
             // Fuse the new gap with neighboring gaps (dd semantics).
-            let segs = &project.timeline.tracks[ti].segments;
+            let segs = &track_at(project, ti)?.segments;
             let left_gap = si > 0 && matches!(segs[si - 1], Segment::Gap(_));
             let right_gap = si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
             let new_gap = Segment::Gap(Gap { duration: dur });
@@ -1906,15 +2124,16 @@ pub fn delete_clip_by_id(project: &Project, clip_id: u32) -> Result<Batch, EditE
 /// earlier into the asset, the tail further past its out-point.
 /// Material-gated (`BeforeAsset` / `BeyondAsset`); `t` must lie strictly
 /// outward of the edge.
-pub fn extend_edge(
+pub fn extend_edge_on(
     project: &Project,
+    track: usize,
     clip_id: u32,
     head: bool,
     playhead: f64,
 ) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     let si = track
         .clip_index(clip_id)
         .ok_or(EditError::ClipNotFound(clip_id))?;
@@ -1975,10 +2194,14 @@ pub fn extend_edge(
 
 /// Lengthen the trailing gap to reach `t` (free — gaps have no source
 /// material). Used where the timeline itself grows into empty space.
-pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditError> {
+pub fn extend_gap_end_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     let last = track
         .segments
         .len()
@@ -2014,15 +2237,16 @@ pub fn extend_gap_end(project: &Project, playhead: f64) -> Result<Batch, EditErr
 /// covered span — gaps merge away and clips are trimmed or removed, the
 /// timeline length staying put. Gaps have no source material, so there is
 /// no upper bound.
-pub fn extend_gap_tail(
+pub fn extend_gap_tail_on(
     project: &Project,
+    track: usize,
     index: usize,
     playhead: f64,
     ripple: bool,
 ) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     let g = match track.segments.get(index) {
         Some(Segment::Gap(g)) => g.clone(),
         _ => return Err(EditError::NoGap),
@@ -2116,15 +2340,16 @@ pub fn extend_gap_tail(
 /// predecessors (there is nothing to ripple — the prefix is anchored at
 /// 0). The gap overwrites them: covered gaps merge, a straddled clip is
 /// trimmed at its tail.
-pub fn extend_gap_head(
+pub fn extend_gap_head_on(
     project: &Project,
+    track: usize,
     index: usize,
     playhead: f64,
     ripple: bool,
 ) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     let g = match track.segments.get(index) {
         Some(Segment::Gap(g)) => g.clone(),
         _ => return Err(EditError::NoGap),
@@ -2136,7 +2361,7 @@ pub fn extend_gap_head(
         // of what precedes it, so it cannot move on its own — the gap just
         // loses `delta` and the followers slide left (never growing the
         // preceding clip).
-        return ripple_gap_in(project, playhead);
+        return ripple_gap_in_on(project, ti, playhead);
     }
     if t >= gap_start {
         return Err(EditError::NothingToTrim(stamp(project, &t)));
@@ -2221,15 +2446,16 @@ pub fn extend_gap_head(
 /// clips are removed, a straddled follower is trimmed at its near edge
 /// (absorbed whole when under a frame remains). One batch, one undo.
 /// (`E` never reaches here: it pushes everything aside via `extend_edge`.)
-pub fn absorb_outward(
+pub fn absorb_outward_on(
     project: &Project,
+    track: usize,
     clip_id: u32,
     head: bool,
     playhead: f64,
 ) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
-    let ti = video_track_index(project)?;
-    let track = &project.timeline.tracks[ti];
+    let ti = track;
+    let track = track_at(project, ti)?;
     let si = track
         .clip_index(clip_id)
         .ok_or(EditError::ClipNotFound(clip_id))?;
@@ -4139,5 +4365,98 @@ mod tests {
         p = expected;
         assert!(h.undo(&mut p).is_ok());
         assert_eq!(h.depth(), 0);
+    }
+
+    /// Two tracks: video track 0 holds clip #1, audio track 1 holds clip #10.
+    fn two_track_fixture() -> Project {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.tracks[0].segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(1),
+            asset_out: Seconds::from_integer(3),
+        })];
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ai].segments = vec![Segment::Clip(Clip {
+            id: 10,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(4),
+        })];
+        p
+    }
+
+    #[test]
+    fn track_ops_target_the_chosen_track_only() {
+        let mut p = two_track_fixture();
+        let video_before = p.timeline.tracks[0].segments.clone();
+
+        let mut h = History::default();
+        let batch = trim_in_on(&p, 1, 1.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        assert_eq!(
+            p.timeline.tracks[0].segments, video_before,
+            "the video track is untouched"
+        );
+        // Audio track: [Gap 1][Clip #10 src 1..4]
+        let audio = &p.timeline.tracks[1].segments;
+        assert!(
+            matches!(audio[0], Segment::Gap(_)),
+            "the trimmed head became a gap"
+        );
+        let c = match &audio[1] {
+            Segment::Clip(c) => c.clone(),
+            Segment::Gap(_) => panic!("expected the trimmed clip"),
+        };
+        assert_eq!((c.id, c.asset_in, c.asset_out), (10, 1.into(), 4.into()));
+
+        // The history entry is track-scoped: undo restores only track 1.
+        h.undo(&mut p).unwrap();
+        assert!(matches!(
+            &p.timeline.tracks[1].segments[0],
+            Segment::Clip(c) if c.id == 10 && c.asset_in == Seconds::from_integer(0)
+        ));
+    }
+
+    #[test]
+    fn split_on_edits_the_chosen_track() {
+        let mut p = two_track_fixture();
+        let video_before = p.timeline.tracks[0].segments.clone();
+
+        let mut h = History::default();
+        let batch = split_on(&p, 1, 2.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        assert_eq!(p.timeline.tracks[0].segments, video_before);
+        let audio = &p.timeline.tracks[1].segments;
+        assert_eq!(audio.len(), 2, "the audio clip split in two");
+        match (&audio[0], &audio[1]) {
+            (Segment::Clip(l), Segment::Clip(r)) => {
+                assert_eq!((l.id, l.asset_in, l.asset_out), (10, 0.into(), 2.into()));
+                assert_eq!((r.asset_in, r.asset_out), (2.into(), 4.into()));
+                assert_ne!(r.id, 10, "the right half gets a fresh id");
+            }
+            _ => panic!("expected two clips"),
+        }
+    }
+
+    #[test]
+    fn ops_reject_a_missing_track() {
+        let p = two_track_fixture();
+        assert!(matches!(
+            trim_in_on(&p, 9, 1.0),
+            Err(EditError::TrackNotFound(9))
+        ));
+        assert!(matches!(
+            split_on(&p, 9, 1.0),
+            Err(EditError::TrackNotFound(9))
+        ));
+        assert!(matches!(
+            delete_under_on(&p, 9, 0.0),
+            Err(EditError::TrackNotFound(9))
+        ));
     }
 }
