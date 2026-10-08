@@ -1427,12 +1427,7 @@ fn span_segments(spans: &[Span], asset: u32, next_id: &mut u32) -> Vec<Segment> 
                 duration: *duration,
             })),
             Span::Media { start, end } => {
-                segments.push(Segment::Clip(Clip {
-                    id: *next_id,
-                    asset,
-                    asset_in: *start,
-                    asset_out: *end,
-                }));
+                segments.push(Segment::Clip(Clip::new(*next_id, asset, *start, *end)));
                 *next_id += 1;
             }
         }
