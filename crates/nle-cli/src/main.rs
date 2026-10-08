@@ -276,7 +276,7 @@ enum TrackCmd {
         /// Track index (1-based, from `nle track ls`)
         index: Option<usize>,
     },
-    /// Remove an empty track by index (1-based)
+    /// Remove a track by index (1-based), deleting its clips
     Rm {
         /// Track index (1-based)
         index: usize,
@@ -835,12 +835,20 @@ fn cmd_track(project_path: &Path, action: TrackCmd) -> Result<()> {
             {
                 bail!("can't remove the only video track");
             }
-            if !project.timeline.tracks[idx].segments.is_empty() {
-                bail!("track #{index} isn't empty — delete its clips first");
-            }
-            project.timeline.tracks.remove(idx);
+            // The track's clips go with it; history is re-baselined because
+            // indices shift (see `save_and_reset_history`).
+            let removed = project.timeline.tracks.remove(idx);
+            let clips = removed
+                .segments
+                .iter()
+                .filter(|s| matches!(s, Segment::Clip(_)))
+                .count();
             save_and_reset_history(&project, project_path)?;
-            println!("✓ removed track #{index}");
+            if clips > 0 {
+                println!("✓ removed track #{index} ({clips} clip(s) deleted)");
+            } else {
+                println!("✓ removed track #{index}");
+            }
             Ok(())
         }
     }

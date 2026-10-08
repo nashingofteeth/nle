@@ -953,17 +953,21 @@ fn track_command(app: &mut App, cmd: &str) -> String {
             if is_video && app.project.timeline.video_tracks().count() <= 1 {
                 return "can't remove the only video track".to_string();
             }
-            if !app.project.timeline.tracks[idx].segments.is_empty() {
-                return "track isn't empty — delete its clips first".to_string();
-            }
-            app.project.timeline.tracks.remove(idx);
-            // Track indices shift under the undo stack: re-baseline.
+            // The track's clips go with it. Track indices shift under the
+            // undo stack, so this re-baselines history (not undoable).
+            let removed = app.project.timeline.tracks.remove(idx);
+            let clips = removed
+                .segments
+                .iter()
+                .filter(|s| matches!(s, TimelineSegment::Clip(_)))
+                .count();
             app.history = History::default();
             let _ = std::fs::remove_file(History::sidecar_path(&app.path));
             app.active_track = app
                 .active_track
                 .min(app.project.timeline.tracks.len().saturating_sub(1));
             match app.project.save(&app.path) {
+                Ok(()) if clips > 0 => format!("removed track ({clips} clip(s) deleted)"),
                 Ok(()) => "removed track".to_string(),
                 Err(e) => format!("removed track — save failed: {e}"),
             }
@@ -3728,6 +3732,34 @@ mod tests {
         assert!(track_command(&mut app, "track rm 1").contains("only video"));
         // …but removes the empty audio track.
         assert!(track_command(&mut app, "track rm 2").contains("removed"));
+        assert_eq!(app.project.timeline.tracks.len(), 1);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    }
+
+    // `:track rm N` takes the track's clips with it (no "empty it first").
+    #[test]
+    fn track_rm_deletes_a_nonempty_track_with_its_clips() {
+        let path = std::env::temp_dir().join(format!(
+            "nle-track-rm-nonempty-test-{}.json",
+            std::process::id()
+        ));
+        let mut p = asset_project();
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        p.timeline
+            .track_mut(ai)
+            .unwrap()
+            .segments
+            .push(TimelineSegment::Clip(nle_core::Clip::new(
+                9,
+                1,
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+            )));
+        p.save(&path).unwrap();
+        let mut app = App::new(p, path.clone());
+        let msg = track_command(&mut app, "track rm 2");
+        assert!(msg.contains("removed") && msg.contains("1 clip"), "{msg}");
         assert_eq!(app.project.timeline.tracks.len(), 1);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
