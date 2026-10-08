@@ -101,6 +101,70 @@ pub fn parse_rate(s: &str) -> Option<Seconds> {
     Some(Seconds::new(n, d))
 }
 
+/// A CMX3600-style timecode `HH:MM:SS:FF` (or `;` before the frame field
+/// for drop-frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timecode {
+    pub h: u32,
+    pub m: u32,
+    pub s: u32,
+    pub f: u32,
+}
+
+/// Parse `HH:MM:SS:FF` — the frame field may be introduced by `;` (a
+/// drop-frame marker in many EDLs).
+pub fn parse_timecode(input: &str) -> Result<Timecode, TimeError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(TimeError::Empty);
+    }
+    let parts: Vec<&str> = input.split([':', ';']).collect();
+    if parts.len() != 4 {
+        return Err(TimeError::Invalid(input.to_string()));
+    }
+    let mut n = [0u32; 4];
+    for (slot, part) in n.iter_mut().zip(&parts) {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(TimeError::Invalid(input.to_string()));
+        }
+        *slot = part
+            .parse()
+            .map_err(|_| TimeError::Invalid(input.to_string()))?;
+    }
+    Ok(Timecode {
+        h: n[0],
+        m: n[1],
+        s: n[2],
+        f: n[3],
+    })
+}
+
+/// The nominal integer frame rate (29.97 → 30, 59.94 → 60), used to label
+/// timecode fields.
+pub fn nominal_fps(fps: Seconds) -> i64 {
+    (fps.numer() + fps.denom() / 2) / fps.denom()
+}
+
+/// Convert a timecode to an absolute frame index at `fps`. Drop-frame
+/// timecodes skip two (or four at 59.94) frame numbers per minute except
+/// every tenth minute.
+pub fn timecode_to_frames(tc: Timecode, fps: Seconds, drop_frame: bool) -> i64 {
+    let nominal = nominal_fps(fps);
+    let total_minutes = 60 * tc.h as i64 + tc.m as i64;
+    let base = (tc.h as i64 * 3600 + tc.m as i64 * 60 + tc.s as i64) * nominal + tc.f as i64;
+    if drop_frame {
+        let drop = if nominal == 60 { 4 } else { 2 };
+        base - drop * (total_minutes - total_minutes / 10)
+    } else {
+        base
+    }
+}
+
+/// Exact seconds for a frame index at `fps`.
+pub fn frames_to_seconds(frames: i64, fps: Seconds) -> Seconds {
+    Seconds::new(frames, 1) / fps
+}
+
 /// Serde glue: Seconds ↔ "numerator/denominator" strings ("25/2").
 /// The project file stays human-readable AND exact — no floats anywhere.
 pub mod rational_ser {
@@ -183,5 +247,51 @@ mod tests {
         assert_eq!(parse_rate("30/1"), Some(Seconds::from_integer(30)));
         assert_eq!(parse_rate("0/0"), None);
         assert_eq!(parse_rate("nonsense"), None);
+    }
+
+    #[test]
+    fn parses_timecodes() {
+        assert_eq!(
+            parse_timecode("01:00:00:00").unwrap(),
+            Timecode {
+                h: 1,
+                m: 0,
+                s: 0,
+                f: 0
+            }
+        );
+        // `;` introduces the frame field in many EDLs.
+        assert_eq!(
+            parse_timecode("00:00:05;12").unwrap(),
+            Timecode {
+                h: 0,
+                m: 0,
+                s: 5,
+                f: 12
+            }
+        );
+        for bad in ["", "1:2:3", "00:00:00", "aa:bb:cc:dd", "00:00:00:0x"] {
+            assert!(parse_timecode(bad).is_err(), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn timecode_frames_non_drop() {
+        let fps = Seconds::from_integer(30);
+        assert_eq!(nominal_fps(fps), 30);
+        let tc = parse_timecode("00:00:01:15").unwrap();
+        assert_eq!(timecode_to_frames(tc, fps, false), 45);
+    }
+
+    #[test]
+    fn timecode_frames_drop() {
+        // 29.97 drop-frame: 2 frames dropped each minute except every 10th.
+        let fps = Seconds::new(30000, 1001);
+        assert_eq!(nominal_fps(fps), 30);
+        let tc = parse_timecode("00:01:00;02").unwrap();
+        assert_eq!(timecode_to_frames(tc, fps, true), 1800);
+        let tc = parse_timecode("00:10:00;00").unwrap();
+        assert_eq!(timecode_to_frames(tc, fps, true), 17982);
+        assert_eq!(frames_to_seconds(30, fps), Seconds::new(1001, 1000));
     }
 }

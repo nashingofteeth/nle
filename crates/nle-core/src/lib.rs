@@ -18,5 +18,8 @@ pub use edit::{
 };
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use project::{Asset, Project, ProjectError, VideoSettings};
-pub use time::{Seconds, format_seconds, parse_rate, parse_time};
+pub use time::{
+    Seconds, Timecode, format_seconds, frames_to_seconds, nominal_fps, parse_rate, parse_time,
+    parse_timecode, timecode_to_frames,
+};
 pub use timeline::{Clip, Timeline, TimelineError, Track, TrackKind};
