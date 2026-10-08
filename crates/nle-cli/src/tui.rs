@@ -1827,7 +1827,7 @@ fn edit_delete(app: &mut App, player: &dyn Mpv) {
 }
 
 fn edit_yank(app: &mut App) {
-    let Some(track) = app.project.timeline.video_track() else {
+    let Some(track) = app.track() else {
         app.set_message("nothing to yank — empty timeline");
         return;
     };
@@ -3167,7 +3167,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
     /// before the in-point (head) or past the out-point (tail). `None`
     /// when the asset duration is unknown.
     fn material_remaining(app: &App, id: u32, head: bool) -> Option<f64> {
-        let track = app.project.timeline.video_track()?;
+        let track = app.track()?;
         let clip = track
             .segments
             .iter()
@@ -3187,9 +3187,7 @@ fn render_info(f: &mut Frame, area: Rect, app: &App) {
 
     let stats = format!(
         "{} clip(s) · {} · {} fps · undo depth {}",
-        app.project
-            .timeline
-            .video_track()
+        app.track()
             .map(|t| {
                 t.segments
                     .iter()
@@ -4272,6 +4270,29 @@ mod tests {
         app.playhead = 1.0; // inside clip #1
         edit_yank(&mut app);
         assert!(matches!(&app.clipboard, Some(TimelineSegment::Clip(c)) if c.id == 1));
+    }
+
+    // yy/dd/D follow the active track, not the first video track.
+    #[test]
+    fn yank_follows_the_active_track() {
+        let mut p = asset_project(); // track 0: C1 [0..3), gap, C2 [5..7)
+        let a = p.media[0].id;
+        let ti = p.timeline.add_track(TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![TimelineSegment::Clip(nle_core::Clip {
+            id: 42,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(2),
+        })];
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.active_track = ti;
+        app.playhead = 1.0; // over clip #42 on track 1 and clip #1 on track 0
+        edit_yank(&mut app);
+        assert!(
+            matches!(&app.clipboard, Some(TimelineSegment::Clip(c)) if c.id == 42),
+            "yanked the active track's clip, not v1's: {:?}",
+            app.clipboard
+        );
     }
 
     // At a segment edge, i/o delete it: non-ripple leaves a gap, capital
