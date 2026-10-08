@@ -21,6 +21,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use nle_core::edit;
 use nle_core::edl::{self, EdlEvent};
+use nle_core::otio::{self, OtioItem};
 use nle_core::time::{parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Clip, Segment, TrackKind};
 use nle_core::{Asset, Project, Seconds, VideoSettings, format_seconds, parse_rate, parse_time};
@@ -110,6 +111,23 @@ enum Cmd {
         /// Override a reel: REEL=PATH (repeatable)
         #[arg(long = "map", value_name = "REEL=PATH")]
         map: Vec<String>,
+        /// Overwrite an existing project file
+        #[arg(long)]
+        force: bool,
+    },
+    /// Import an OpenTimelineIO (.otio) timeline — e.g. a Kdenlive export
+    ImportOtio {
+        /// The .otio file
+        file: PathBuf,
+        /// Extra directory of media to pool (for moved files)
+        #[arg(long, value_name = "DIR")]
+        media: Option<PathBuf>,
+        /// Force the frame rate (e.g. 30000/1001, 29.97, 24)
+        #[arg(long, value_name = "RATE")]
+        fps: Option<String>,
+        /// Remap a clip path: OLD=NEW (repeatable)
+        #[arg(long = "remap", value_name = "OLD=NEW")]
+        remap: Vec<String>,
         /// Overwrite an existing project file
         #[arg(long)]
         force: bool,
@@ -283,6 +301,20 @@ fn main() -> Result<()> {
             fps.as_deref(),
             &src_offset,
             &map,
+            force,
+        ),
+        Cmd::ImportOtio {
+            file,
+            media,
+            fps,
+            remap,
+            force,
+        } => cmd_import_otio(
+            &cli.project,
+            &file,
+            media.as_deref(),
+            fps.as_deref(),
+            &remap,
             force,
         ),
         Cmd::Export {
@@ -891,6 +923,169 @@ fn cmd_import_edl(
         doc.events.len(),
         project.timeline.tracks.len(),
         project.media.len()
+    );
+    Ok(())
+}
+
+/// Probe every media file in `dir` into the pool; returns how many files were
+/// seen (whether or not they were already pooled).
+fn pool_media_dir(project: &mut Project, dir: &Path) -> Result<usize> {
+    let mut seen = 0usize;
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("reading media dir {}", dir.display()))?
+    {
+        let path = entry?.path();
+        let is_media = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| MEDIA_EXTS.contains(&e.to_lowercase().as_str()))
+            .unwrap_or(false);
+        if path.is_file() && is_media {
+            let canonical = path
+                .canonicalize()
+                .with_context(|| format!("{} not found", path.display()))?;
+            if project.asset_by_path(&canonical).is_none() {
+                let report = probe(&canonical)?;
+                project.add_asset(canonical, report);
+            }
+            seen += 1;
+        }
+    }
+    Ok(seen)
+}
+
+/// Locate a clip's media: an explicit `--remap OLD=NEW`, then the path
+/// itself (relative paths resolved against the `.otio` file), then a
+/// same-named file already pooled from `--media`.
+fn resolve_otio_path(
+    project: &Project,
+    raw: &Path,
+    remap: &HashMap<String, PathBuf>,
+    base: &Path,
+) -> Result<PathBuf> {
+    if let Some(new) = remap.get(&raw.to_string_lossy().into_owned()) {
+        return Ok(new.clone());
+    }
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        base.join(raw)
+    };
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    if let Some(name) = raw.file_name() {
+        let needle = name.to_string_lossy();
+        for a in &project.media {
+            if a.path
+                .file_name()
+                .map(|n| n.to_string_lossy() == needle)
+                .unwrap_or(false)
+            {
+                return Ok(a.path.clone());
+            }
+        }
+    }
+    bail!(
+        "{} not found (use --remap or --media to relocate it)",
+        candidate.display()
+    )
+}
+
+fn cmd_import_otio(
+    project_path: &Path,
+    otio_path: &Path,
+    media_dir: Option<&Path>,
+    fps_arg: Option<&str>,
+    remaps: &[String],
+    force: bool,
+) -> Result<()> {
+    if project_path.exists() && !force {
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            project_path.display()
+        );
+    }
+    let text = std::fs::read_to_string(otio_path)
+        .with_context(|| format!("reading {}", otio_path.display()))?;
+    let doc = otio::parse(&text).with_context(|| format!("parsing {}", otio_path.display()))?;
+
+    let mut project = Project::new();
+    if let Some(dir) = media_dir {
+        pool_media_dir(&mut project, dir)?;
+    }
+
+    let remap: HashMap<String, PathBuf> = remaps
+        .iter()
+        .map(|m| {
+            let (old, new) = m
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("--remap expects OLD=NEW, got {m:?}"))?;
+            Ok((old.to_string(), PathBuf::from(new)))
+        })
+        .collect::<Result<_>>()?;
+    let base = otio_path.parent().unwrap_or_else(|| Path::new("."));
+
+    // Resolve + probe every distinct clip path.
+    let mut by_path: HashMap<PathBuf, u32> = HashMap::new();
+    for track in &doc.tracks {
+        for item in &track.items {
+            let OtioItem::Clip(c) = item else { continue };
+            if by_path.contains_key(&c.path) {
+                continue;
+            }
+            let located = resolve_otio_path(&project, &c.path, &remap, base)
+                .with_context(|| format!("clip {:?}", c.name))?;
+            let canonical = located
+                .canonicalize()
+                .with_context(|| format!("clip {:?}: {} not found", c.name, located.display()))?;
+            let report = probe(&canonical)?;
+            let (id, _) = project.add_asset(canonical, report);
+            by_path.insert(c.path.clone(), id);
+        }
+    }
+
+    let fps = match fps_arg {
+        Some(s) => parse_fps_arg(s)?,
+        None => doc.fps,
+    };
+    project.fps = Some(fps);
+    project.video = doc
+        .tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video)
+        .flat_map(|t| &t.items)
+        .find_map(|item| match item {
+            OtioItem::Clip(c) => by_path
+                .get(&c.path)
+                .and_then(|id| project.asset(*id))
+                .and_then(|a| a.video_size())
+                .map(|(width, height)| VideoSettings { width, height }),
+            OtioItem::Gap(_) => None,
+        });
+
+    let timeline = otio::build(&doc, &|p| by_path.get(p).copied())
+        .with_context(|| format!("building timeline from {}", otio_path.display()))?;
+    project.timeline = timeline;
+    project.validate()?;
+    save_and_reset_history(&project, project_path)?;
+
+    for w in &doc.warnings {
+        eprintln!("warning: {w}");
+    }
+    let clips = project
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|t| t.segments.iter())
+        .filter(|s| matches!(s, Segment::Clip(_)))
+        .count();
+    println!(
+        "✓ {} — {} track(s), {} asset(s), {} clip(s)",
+        project_path.display(),
+        project.timeline.tracks.len(),
+        project.media.len(),
+        clips
     );
     Ok(())
 }
