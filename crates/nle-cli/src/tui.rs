@@ -1102,17 +1102,22 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('f') => {
             if app.guard_loaded() {
                 for _ in 0..mult {
-                    player.frame_step();
+                    app.step_playhead(1);
                 }
-                app.step_playhead(1);
+                // Model-authoritative: move the monitor to the frame we
+                // display, on the PROJECT grid. mpv's own `frame_step` walks
+                // the source's grid instead, so a 24/59.94 clip would drift
+                // the marker and the monitor apart (and jump the playhead on
+                // the next play).
+                app.seek_to(player, app.playhead);
             }
         }
         KeyCode::Char('F') => {
             if app.guard_loaded() {
                 for _ in 0..mult {
-                    player.frame_back_step();
+                    app.step_playhead(-1);
                 }
-                app.step_playhead(-1);
+                app.seek_to(player, app.playhead);
             }
         }
         KeyCode::Char('j') => {
@@ -2452,13 +2457,8 @@ fn step_mode(app: &mut App, player: &dyn Mpv, st: &ExtendState, dir: i64, mult: 
     let next = idx as f64 / secs(fps);
     if next != app.playhead {
         app.playhead = next;
-        for _ in 0..mult {
-            if dir > 0 {
-                player.frame_step();
-            } else {
-                player.frame_back_step();
-            }
-        }
+        // Seek mpv to the model frame on the project grid — see the f/F note.
+        app.seek_to(player, next);
     }
 }
 
@@ -5578,7 +5578,6 @@ mod tests {
         TogglePause,
         SeekAbs(f64),
         SeekRel(f64),
-        Step(i64),
         SetTitle(String),
     }
 
@@ -5619,12 +5618,6 @@ mod tests {
         }
         fn seek_relative(&self, delta: f64) {
             self.calls.borrow_mut().push(Call::SeekRel(delta));
-        }
-        fn frame_step(&self) {
-            self.calls.borrow_mut().push(Call::Step(1));
-        }
-        fn frame_back_step(&self) {
-            self.calls.borrow_mut().push(Call::Step(-1));
         }
         fn set_media_title(&self, title: &str) {
             self.calls
@@ -5714,8 +5707,14 @@ mod tests {
         assert_eq!(fake.calls().last(), Some(&Call::SeekRel(3.0)));
 
         handle_key(&mut app, &fake, key('f'));
-        assert!((app.playhead - (4.0 + 1.0 / 30.0)).abs() < 1e-9);
-        assert_eq!(fake.calls().last(), Some(&Call::Step(1)));
+        let want = 4.0 + 1.0 / 30.0;
+        assert!((app.playhead - want).abs() < 1e-9);
+        // f/F move the monitor to the model frame on the project grid (an
+        // absolute seek), never mpv's source-rate `frame_step`.
+        match fake.calls().last() {
+            Some(Call::SeekAbs(t)) => assert!((t - (want + 0.004)).abs() < 1e-9),
+            other => panic!("f must seek the monitor to the model frame, got {other:?}"),
+        }
     }
 
     // The pool's `gg`: a lone `g` only arms the sequence; the second seeks.

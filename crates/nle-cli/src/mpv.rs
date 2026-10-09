@@ -177,14 +177,6 @@ impl MpvPlayer {
         let _ = self.send(serde_json::json!(["seek", target, "absolute"]));
     }
 
-    pub fn frame_step(&self) {
-        let _ = self.send(serde_json::json!(["frame_step"]));
-    }
-
-    pub fn frame_back_step(&self) {
-        let _ = self.send(serde_json::json!(["frame_back_step"]));
-    }
-
     /// Snapshot of the reader thread's knowledge.
     pub fn state(&self) -> PlaybackState {
         self.state.lock().map(|s| s.clone()).unwrap_or_default()
@@ -216,8 +208,6 @@ pub trait Mpv {
     fn toggle_pause(&self);
     fn seek_absolute(&self, target: f64);
     fn seek_relative(&self, delta: f64);
-    fn frame_step(&self);
-    fn frame_back_step(&self);
     fn set_media_title(&self, title: &str);
 }
 
@@ -239,12 +229,6 @@ impl Mpv for MpvPlayer {
     }
     fn seek_relative(&self, delta: f64) {
         MpvPlayer::seek_relative(self, delta)
-    }
-    fn frame_step(&self) {
-        MpvPlayer::frame_step(self)
-    }
-    fn frame_back_step(&self) {
-        MpvPlayer::frame_back_step(self)
     }
     fn set_media_title(&self, title: &str) {
         MpvPlayer::set_media_title(self, title)
