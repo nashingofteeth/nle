@@ -261,6 +261,13 @@ plainly.
   `reconstruct` re-snaps to the frame grid.
 - **Extra streams are ignored, not silent**: the test `.mov` had two video
   streams; `detect-edits` warns and reconstructs the first.
+- **Snap to the timeline's grid, not the source's**: `reconstruct` must run at
+  the *project's* fps. A 59.94 fps render appended to a 24 fps project, snapped
+  to the source grid, lands ~0.4 of a frame off every cut — the 24 fps timeline
+  can't cut there, so the export resamples each clip and drifts (measured
+  ~1.7 frames / 70 ms over 18 cuts) and `f`/`F` steps back off a cut instead of
+  returning to it. `--append` loads the target up front so `snap_fps_for` sees
+  its fps; a fresh project is created at the source's, so they coincide.
 
 ## Layout & dependency policy (moved from README)
 
