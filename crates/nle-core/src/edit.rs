@@ -23,7 +23,7 @@ use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
 pub const MAX_HISTORY: usize = 100;
 /// Sidecar file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old sidecars start fresh.
-pub const HISTORY_VERSION: u32 = 6;
+pub const HISTORY_VERSION: u32 = 7;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -219,8 +219,7 @@ impl History {
             return Ok(());
         }
         let track = batch_track(&batch, project)?;
-        let fps = history_fps(project);
-        let before = snapshot_track(&project.timeline.tracks[track], fps);
+        let before = snapshot_track(&project.timeline.tracks[track]);
         let saved = project.timeline.tracks[track].segments.clone();
         if let Err(e) = apply_batch(project, &batch.ops)
             .and_then(|_| project.validate().map_err(EditError::from))
@@ -228,7 +227,7 @@ impl History {
             project.timeline.tracks[track].segments = saved;
             return Err(e);
         }
-        let after = snapshot_track(&project.timeline.tracks[track], fps);
+        let after = snapshot_track(&project.timeline.tracks[track]);
         self.push_change(Change::Track(TrackChange {
             track,
             start_frame: 0,
@@ -389,24 +388,29 @@ pub struct HistoryState {
     pub done: Vec<Change>,
 }
 
-/// One timeline segment as frame counts. This is the persisted history
-/// unit: positions are frames (robust to fps reinterpretation), clips
-/// are located by segment id (robust to index shifts), and the shape
-/// mirrors the timeline data model rather than any op implementation.
+/// One timeline segment, snapshotted for the undo stack. Clips are located
+/// by segment id (robust to index shifts) and carry their **exact** source
+/// times and speed, so undo/redo restores the clip bit-for-bit. (The old
+/// frame-count form quantized source seconds to the project fps, which
+/// perturbed speed-changed clips on every undo until sub-frame slivers
+/// appeared and a zero-frame span failed validation.)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Atom {
     Clip {
         id: u32,
         asset: u32,
-        in_frame: i64,
-        out_frame: i64,
+        #[serde(with = "crate::time::rational_ser")]
+        asset_in: Seconds,
+        #[serde(with = "crate::time::rational_ser")]
+        asset_out: Seconds,
         /// Playback speed as a reduced fraction (`speed_num/speed_den`);
-        /// `1/1` is normal. Kept rational so undo/redo is exact.
+        /// `1/1` is normal. Rational so undo/redo is exact.
         speed_num: i64,
         speed_den: i64,
     },
     Gap {
-        frames: i64,
+        #[serde(with = "crate::time::rational_ser")]
+        duration: Seconds,
     },
 }
 
@@ -470,65 +474,46 @@ pub struct UndoOutcome {
     pub playhead: i64,
 }
 
-fn history_fps(project: &Project) -> Seconds {
-    // Mirrors `snap`'s fallback: without a known fps the grid is whole
-    // seconds, so frame counts are second counts. Production always sets
-    // fps before the first edit; this only fires for empty projects.
-    project.fps.unwrap_or_else(|| Seconds::from_integer(1))
-}
-
-fn seconds_to_frames(s: Seconds, fps: Seconds) -> i64 {
-    (s * fps).round().to_integer()
-}
-
-fn frames_to_seconds(frames: i64, fps: Seconds) -> Seconds {
-    Seconds::new(frames, 1) / fps
-}
-
-fn atom_from_segment(seg: &Segment, fps: Seconds) -> Atom {
+fn atom_from_segment(seg: &Segment) -> Atom {
     match seg {
         Segment::Clip(c) => Atom::Clip {
             id: c.id,
             asset: c.asset,
-            in_frame: seconds_to_frames(c.asset_in, fps),
-            out_frame: seconds_to_frames(c.asset_out, fps),
+            asset_in: c.asset_in,
+            asset_out: c.asset_out,
             speed_num: *c.speed.numer(),
             speed_den: *c.speed.denom(),
         },
         Segment::Gap(g) => Atom::Gap {
-            frames: seconds_to_frames(g.duration, fps),
+            duration: g.duration,
         },
     }
 }
 
-fn segment_from_atom(atom: &Atom, fps: Seconds) -> Segment {
+fn segment_from_atom(atom: &Atom) -> Segment {
     match atom {
         Atom::Clip {
             id,
             asset,
-            in_frame,
-            out_frame,
+            asset_in,
+            asset_out,
             speed_num,
             speed_den,
         } => Segment::Clip(Clip {
             id: *id,
             asset: *asset,
-            asset_in: frames_to_seconds(*in_frame, fps),
-            asset_out: frames_to_seconds(*out_frame, fps),
+            asset_in: *asset_in,
+            asset_out: *asset_out,
             speed: Seconds::new(*speed_num, *speed_den),
         }),
-        Atom::Gap { frames } => Segment::Gap(Gap {
-            duration: frames_to_seconds(*frames, fps),
+        Atom::Gap { duration } => Segment::Gap(Gap {
+            duration: *duration,
         }),
     }
 }
 
-fn snapshot_track(track: &Track, fps: Seconds) -> Vec<Atom> {
-    track
-        .segments
-        .iter()
-        .map(|s| atom_from_segment(s, fps))
-        .collect()
+fn snapshot_track(track: &Track) -> Vec<Atom> {
+    track.segments.iter().map(atom_from_segment).collect()
 }
 
 /// Which track a batch touches (all current batches are single-track).
@@ -560,7 +545,6 @@ fn substitute_topology(
     change: &TrackChange,
     forward: bool,
 ) -> Result<(), EditError> {
-    let fps = history_fps(project);
     let track = project
         .timeline
         .tracks
@@ -571,13 +555,13 @@ fn substitute_topology(
     } else {
         (&change.after, &change.before)
     };
-    let live = snapshot_track(track, fps);
+    let live = snapshot_track(track);
     if live != *expected {
         return Err(EditError::History(
             "timeline changed outside the undo stack".to_string(),
         ));
     }
-    track.segments = write.iter().map(|a| segment_from_atom(a, fps)).collect();
+    track.segments = write.iter().map(segment_from_atom).collect();
     Ok(())
 }
 
@@ -674,6 +658,15 @@ fn at_least_a_frame(project: &Project, dur: &Seconds) -> Result<(), EditError> {
     } else {
         Err(EditError::TooShort)
     }
+}
+
+/// Whether a split at timeline offset `off` inside a clip of `dur` leaves a
+/// usable head and tail. A piece under one frame counts as "at that edge",
+/// so a split can never strand a sub-frame sliver (which would then round to
+/// a zero-frame history atom).
+fn split_sides(project: &Project, dur: Seconds, off: Seconds) -> (bool, bool) {
+    let usable = |d: Seconds| d > Seconds::from_integer(0) && at_least_a_frame(project, &d).is_ok();
+    (usable(off), usable(dur - off))
 }
 
 /// The clip segment containing the (snapped) playhead.
@@ -1712,6 +1705,10 @@ pub fn paste_on(
     let si = track.index_at(t).ok_or(EditError::NoSegment)?;
     let seg = track.segments[si].clone();
     let left_len = t - track.start_of(si);
+    // A left remainder under one frame is treated as "at the edge" so it
+    // can't strand a sub-frame sliver.
+    let left_ok =
+        left_len > Seconds::from_integer(0) && at_least_a_frame(project, &left_len).is_ok();
     let target = t + dur;
 
     // How far the overwrite reaches (`remove_upto`): the straddled
@@ -1741,14 +1738,14 @@ pub fn paste_on(
         Some((ei, at)) => {
             let off = at - track.start_of(ei);
             let rem = track.segments[ei].duration() - off;
-            if rem > Seconds::from_integer(0) {
+            if rem > Seconds::from_integer(0) && at_least_a_frame(project, &rem).is_ok() {
                 match &track.segments[ei] {
                     Segment::Gap(_) => Some(Segment::Gap(Gap { duration: rem })),
                     Segment::Clip(c) => {
                         // A split keeps the head's id on the left, so the
                         // tail needs a fresh id only when the same clip
                         // supplied both pieces.
-                        let id = if ei == si && left_len > Seconds::from_integer(0) {
+                        let id = if ei == si && left_ok {
                             project.next_clip_id() + 1
                         } else {
                             c.id
@@ -1775,7 +1772,7 @@ pub fn paste_on(
     // Compose the replacement for [t, t+dur): left remainder, paste,
     // right remainder.
     let mut pieces: Vec<Segment> = Vec::new();
-    if left_len > Seconds::from_integer(0) {
+    if left_ok {
         match &seg {
             Segment::Gap(_) => pieces.push(Segment::Gap(Gap { duration: left_len })),
             Segment::Clip(c) => pieces.push(Segment::Clip(Clip {
@@ -1899,10 +1896,11 @@ pub fn insert_gap_on(
         }),
         // Over a clip: split it at the playhead, gap between the halves.
         Segment::Clip(c) => {
-            let at_edge = off <= Seconds::from_integer(0);
+            // A split within a frame of either edge is that edge: no slivers.
+            let (head_ok, tail_ok) = split_sides(project, c.duration(), off);
             let pid = project.next_clip_id();
             let mut pieces: Vec<Segment> = Vec::new();
-            if !at_edge {
+            if head_ok {
                 pieces.push(Segment::Clip(Clip {
                     id: c.id,
                     asset: c.asset,
@@ -1912,15 +1910,17 @@ pub fn insert_gap_on(
                 }));
             }
             pieces.push(gap);
-            // The tail keeps the id when the head is absent (insert-before),
-            // else gets a fresh one (a split).
-            pieces.push(Segment::Clip(Clip {
-                id: if at_edge { c.id } else { pid },
-                asset: c.asset,
-                asset_in: c.asset_in + source_span(c, off),
-                asset_out: c.asset_out,
-                speed: c.speed,
-            }));
+            if tail_ok {
+                // The tail keeps the id when the head is absent (insert-before),
+                // else gets a fresh one (a split).
+                pieces.push(Segment::Clip(Clip {
+                    id: if head_ok { pid } else { c.id },
+                    asset: c.asset,
+                    asset_in: c.asset_in + source_span(c, off),
+                    asset_out: c.asset_out,
+                    speed: c.speed,
+                }));
+            }
             Ok(Batch {
                 ops: replace_with_many(ti, si, &seg, pieces),
                 desc: format!("insert gap at {}", stamp(project, &t)),
@@ -2003,10 +2003,10 @@ pub fn paste_ripple_on(
     let pieces: Vec<Segment> = match &seg {
         Segment::Clip(c) => {
             let head_len = t - seg_start;
-            let at_head_edge = head_len <= Seconds::from_integer(0);
+            let (head_ok, tail_ok) = split_sides(project, c.duration(), head_len);
             let pid = project.next_clip_id();
             let mut pieces = Vec::new();
-            if !at_head_edge {
+            if head_ok {
                 pieces.push(Segment::Clip(Clip {
                     id: c.id,
                     asset: c.asset,
@@ -2016,19 +2016,12 @@ pub fn paste_ripple_on(
                 }));
             }
             pieces.push(pasted_piece(snapshot, pid));
-            if at_head_edge {
-                // insert-before: the original clip keeps its identity
+            if tail_ok {
+                // The right half is a new clip on a split, or keeps the
+                // original's identity on an insert-before.
+                let id = if head_ok { pid + 1 } else { c.id };
                 pieces.push(Segment::Clip(Clip {
-                    id: c.id,
-                    asset: c.asset,
-                    asset_in: c.asset_in + source_span(c, head_len),
-                    asset_out: c.asset_out,
-                    speed: c.speed,
-                }));
-            } else {
-                // split: the right half is a new clip
-                pieces.push(Segment::Clip(Clip {
-                    id: pid + 1,
+                    id,
                     asset: c.asset,
                     asset_in: c.asset_in + source_span(c, head_len),
                     asset_out: c.asset_out,
@@ -4327,38 +4320,41 @@ mod tests {
     }
 
     #[test]
-    fn recorded_frames_scale_with_fps() {
-        // The same 1s trim records 30 gap frames at 30fps, 60 at 60fps.
-        let mut p30 = fixture();
-        let mut h30 = History::default();
-        let batch = trim_in(&p30, 1.0).unwrap();
-        h30.apply(&mut p30, batch, 0).unwrap();
-        let first_gap = |h: &History| {
-            match &h.state().done[0] {
-                Change::Track(c) => &c.after,
-                Change::Assets(_) => panic!("expected a track change"),
-            }
-            .iter()
-            .find_map(|a| match a {
-                Atom::Gap { frames } => Some(*frames),
-                Atom::Clip { .. } => None,
-            })
-            .unwrap()
+    fn history_atom_is_lossless_for_speed_clips() {
+        // A rate conform's source range is off the project grid. The old
+        // frame-count Atom quantized it on every undo, perturbing the clip
+        // until a zero-frame sliver failed validation. The Atom now carries
+        // exact source times, so it round-trips bit-for-bit.
+        let mut p = fixture(); // fps 30, clip #1 first
+        let c = Clip {
+            id: 1,
+            asset: 1,
+            asset_in: Seconds::new(101 * 1001, 30000),
+            asset_out: Seconds::new(921 * 1001, 30000),
+            speed: Seconds::new(1001, 1250),
         };
-        assert_eq!(first_gap(&h30), 30);
+        p.timeline.video_track_mut().unwrap().segments[0] = Segment::Clip(c.clone());
+        let mut h = History::default();
+        let batch = trim_out(&p, 1.0).unwrap(); // edit the same track
+        h.apply(&mut p, batch, 0).unwrap();
+        h.undo(&mut p).unwrap();
+        let Segment::Clip(restored) = &p.timeline.video_track().unwrap().segments[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(*restored, c, "the conform clip round-trips exactly");
+    }
 
-        let mut p60 = fixture();
-        p60.fps = Some(Seconds::new(60, 1));
-        let mut h60 = History::default();
-        let batch = trim_in(&p60, 1.0).unwrap();
-        h60.apply(&mut p60, batch, 0).unwrap();
-        assert_eq!(first_gap(&h60), 60);
-
-        // Reinterpreting the project at another fps invalidates loudly:
-        // frame counts no longer match, so undo refuses instead of
-        // mis-restoring.
-        p30.fps = Some(Seconds::new(60, 1));
-        assert!(matches!(h30.undo(&mut p30), Err(EditError::History(_))));
+    #[test]
+    fn split_sides_refuses_sub_frame_pieces() {
+        let p = fixture(); // fps 30
+        let frame = Seconds::new(1, 30);
+        let dur = Seconds::from_integer(2); // 60 frames
+        // A quarter frame at either edge counts as "at that edge", so no
+        // sliver. (Half a frame rounds up to a frame and is kept.)
+        assert_eq!(split_sides(&p, dur, frame / 4), (false, true));
+        assert_eq!(split_sides(&p, dur, dur - frame / 4), (true, false));
+        // A whole-frame split leaves both pieces.
+        assert_eq!(split_sides(&p, dur, frame * 10), (true, true));
     }
 
     #[test]
