@@ -893,19 +893,25 @@ fn parse_speed_arg(s: &str) -> Result<Seconds> {
         .with_context(|| format!("speed {s:?} is not representable"))
 }
 
-/// Match a reel/clip name to a pooled asset: exact filename, then stem,
-/// then a case-insensitive substring at a stem **edge** — and only if
-/// exactly one asset can match it. Two constraints keep generic reels
-/// from silently binding an unrelated file: `AX` (the placeholder for
-/// unnamed aux media) is a substring of stems like `taxi` but aligns with
-/// none of their edges, and a tie (e.g. `red_a` + `red_b` for needle
-/// `red`) stays unresolved so the caller can report the real problem.
+/// Match a reel/clip name to a pooled asset in three tiers — exact
+/// filename, exact stem, then a case-insensitive substring at a stem
+/// **edge** — and only when a tier binds **exactly one** asset. Two
+/// constraints keep generic reels from silently binding an unrelated
+/// file: `AX` (the placeholder for unnamed aux media) is a substring of
+/// stems like `taxi` but aligns with none of their edges, and a tie (e.g.
+/// `red_a` + `red_b` for needle `red`) stays unresolved so the caller can
+/// report the real problem. The uniqueness rule applies to the exact
+/// tiers too: with `/a/red.mp4` and `/b/red.mp4` pooled, a bare
+/// `red.mp4` is ambiguous — first-match-in-pool-order is a decision, not
+/// evidence.
 fn match_asset(project: &Project, needle: &str) -> Option<u32> {
     let needle = needle.to_lowercase();
     let needle_stem = Path::new(&needle)
         .file_stem()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_else(|| needle.clone());
+    let mut by_file: Vec<u32> = Vec::new();
+    let mut by_stem: Vec<u32> = Vec::new();
     let mut fuzzy: Vec<u32> = Vec::new();
     for a in &project.media {
         let file = a
@@ -918,8 +924,15 @@ fn match_asset(project: &Project, needle: &str) -> Option<u32> {
             .file_stem()
             .map(|s| s.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        if file == needle || stem == needle || file == needle_stem || stem == needle_stem {
-            return Some(a.id);
+        // Filename is stronger evidence than stem: `red.mp4` must prefer
+        // the `.mp4` even when a `red.mkv` is pooled alongside.
+        if file == needle {
+            by_file.push(a.id);
+            continue;
+        }
+        if stem == needle || file == needle_stem || stem == needle_stem {
+            by_stem.push(a.id);
+            continue;
         }
         // An empty stem (or needle stem) matches everything — that is not
         // information, don't match on it.
@@ -927,11 +940,15 @@ fn match_asset(project: &Project, needle: &str) -> Option<u32> {
             fuzzy.push(a.id);
         }
     }
-    if fuzzy.len() == 1 {
-        fuzzy.pop() // unique: no need to disambiguate
-    } else {
-        None
-    }
+    unique(by_file)
+        .or_else(|| unique(by_stem))
+        .or_else(|| unique(fuzzy))
+}
+
+/// The one id in `ids`, or `None` when zero or several — an ambiguous
+/// match is not a match.
+fn unique(mut ids: Vec<u32>) -> Option<u32> {
+    if ids.len() == 1 { ids.pop() } else { None }
 }
 
 /// Substring match at an edge: `red` matches `red_start` (as a prefix) and
@@ -1821,6 +1838,27 @@ mod tests {
         let p = pool(&["/media/red_a.mp4", "/media/red_b.mp4"]);
         assert_eq!(match_asset(&p, "red_a"), Some(1));
         assert_eq!(match_asset(&p, "red"), None, "two contain 'red'");
+    }
+
+    // A filename match is stronger evidence than a stem match.
+    #[test]
+    fn a_filename_beats_a_stem_match() {
+        let p = pool(&["/media/red.mkv", "/media/red.mp4"]);
+        assert_eq!(
+            match_asset(&p, "red.mp4"),
+            Some(2),
+            "the .mp4, not the .mkv"
+        );
+    }
+
+    // ... but an ambiguous exact match is refused by the same rule the
+    // fuzzy tier follows.
+    #[test]
+    fn an_ambiguous_exact_name_stays_unresolved() {
+        let p = pool(&["/a/red.mp4", "/b/red.mp4"]);
+        assert_eq!(match_asset(&p, "red.mp4"), None, "two files named red.mp4");
+        let p = pool(&["/a/red.mp4", "/b/red.mkv"]);
+        assert_eq!(match_asset(&p, "red"), None, "two stems are 'red'");
     }
 
     #[test]
