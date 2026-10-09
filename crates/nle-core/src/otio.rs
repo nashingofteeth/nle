@@ -216,7 +216,24 @@ fn track_items(
                     })?;
                 items.push(OtioItem::Gap(d));
             }
-            "Clip" => items.push(OtioItem::Clip(parse_clip(ch)?)),
+            "Clip" => {
+                let clip = parse_clip(ch)?;
+                // A clip can carry time effects (a `LinearTimeWarp` speed
+                // change, a freeze). They are not imported — everything
+                // else unsupported warns here, so effects must too rather
+                // than silently playing at the wrong rate.
+                if ch
+                    .get("effects")
+                    .and_then(Value::as_array)
+                    .is_some_and(|e| !e.is_empty())
+                {
+                    warnings.push(format!(
+                        "track {ti}: clip {:?} effects ignored (speed warps/time effects are not imported)",
+                        clip.name
+                    ));
+                }
+                items.push(OtioItem::Clip(clip));
+            }
             "Transition" => warnings.push(format!("track {ti}: transition skipped (cuts only)")),
             "Stack" | "Track" => warnings.push(format!(
                 "track {ti}: nested {schema} skipped",
@@ -531,6 +548,48 @@ mod tests {
         assert_eq!(doc.warnings.len(), 2, "{:?}", doc.warnings);
         assert!(doc.warnings[0].contains("transition"));
         assert!(doc.warnings[1].contains("nested"));
+    }
+
+    #[test]
+    fn clip_effects_warn_not_silent() {
+        // A Kdenlive speed change exports as a LinearTimeWarp effect; it is
+        // not imported, so the import must say so rather than mis-rate the
+        // clip quietly.
+        let doc = parse(
+            r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
+              { "OTIO_SCHEMA": "Track.1", "kind": "Video", "children": [
+                { "OTIO_SCHEMA": "Clip.1", "name": "sped.mp4",
+                  "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 0.0 },
+                    "duration":   { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 24.0 } },
+                  "effects": [ { "OTIO_SCHEMA": "LinearTimeWarp.1", "time_scalar": 2.0 } ],
+                  "media_reference": { "OTIO_SCHEMA": "ExternalReference.1",
+                    "target_url": "/m/sped.mp4" } }
+              ] }
+            ] } }"#,
+        )
+        .unwrap();
+        assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
+        assert!(doc.warnings[0].contains("effects"), "{:?}", doc.warnings);
+        // The clip still imports (at the derived rate), like other warnings.
+        assert_eq!(doc.tracks[0].items.len(), 1);
+
+        // An empty effects list is not a warning.
+        let doc = parse(
+            r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
+              { "OTIO_SCHEMA": "Track.1", "kind": "Video", "children": [
+                { "OTIO_SCHEMA": "Clip.1", "name": "plain.mp4",
+                  "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 0.0 },
+                    "duration":   { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 24.0 } },
+                  "effects": [],
+                  "media_reference": { "OTIO_SCHEMA": "ExternalReference.1",
+                    "target_url": "/m/plain.mp4" } }
+              ] }
+            ] } }"#,
+        )
+        .unwrap();
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
     }
 
     #[test]
