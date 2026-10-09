@@ -1255,6 +1255,32 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         None => report.fps().context("no frame rate known — pass --fps")?,
     };
 
+    // `--append` targets an existing timeline: its frame grid is what cuts
+    // must snap to. A 24 fps project can only cut on 24 fps frames, so a
+    // 59.94 fps source snapped to the source grid would export with a
+    // fraction of a frame of error per cut (and the playhead would step
+    // off-grid). Load it up front so `reconstruct` uses the right grid.
+    let mut append_project = if append {
+        Some(Project::load(project_path).with_context(|| {
+            format!(
+                "--append needs an existing project at {}",
+                project_path.display()
+            )
+        })?)
+    } else {
+        None
+    };
+    let snap_fps = snap_fps_for(append_project.as_ref(), fps);
+    if append && snap_fps != fps {
+        eprintln!(
+            "note: snapping cuts to the project grid {}/{} fps (source is {}/{})",
+            snap_fps.numer(),
+            snap_fps.denom(),
+            fps.numer(),
+            fps.denom()
+        );
+    }
+
     // The reconstruction references one asset, and export reads the first
     // stream of each kind — say so rather than silently dropping the rest.
     let count_of = |kind: &str| {
@@ -1284,7 +1310,7 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
     let detection = detect(&canonical, &opts)
         .with_context(|| format!("detecting cuts in {}", file.display()))?;
     let blacks: &[(Seconds, Seconds)] = if no_gaps { &[] } else { &detection.blacks };
-    let spans = reconstruct(&detection.cuts, blacks, duration, fps, min_shot);
+    let spans = reconstruct(&detection.cuts, blacks, duration, snap_fps, min_shot);
 
     let clips = spans
         .iter()
@@ -1312,12 +1338,9 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
     // the timeline end. Pad each target track up to that common point so the
     // appended video and audio stay aligned.
     if append {
-        let mut project = Project::load(project_path).with_context(|| {
-            format!(
-                "--append needs an existing project at {}",
-                project_path.display()
-            )
-        })?;
+        let mut project = append_project
+            .take()
+            .context("--append project was not loaded")?;
         if project.fps.is_none() {
             project.fps = Some(fps);
         }
@@ -1464,6 +1487,12 @@ fn append_spans(project: &mut Project, ti: usize, start: Seconds, mut segments: 
         prev.duration += first.duration;
     }
     track.segments.extend(segments);
+}
+
+/// The frame grid to snap reconstructed cuts to: an append target's own fps
+/// (the timeline can only cut on its frames), else the source's.
+fn snap_fps_for(append_project: Option<&Project>, file_fps: Seconds) -> Seconds {
+    append_project.and_then(|p| p.fps).unwrap_or(file_fps)
 }
 
 /// The next free clip id: one past the highest in use. Mirrors
@@ -1735,5 +1764,17 @@ mod tests {
         append_spans(&mut p, ai, Seconds::from_integer(5), vec![clip.clone()]);
         let segs = &p.timeline.track(ai).unwrap().segments;
         assert_eq!(segs, &vec![gap(5), clip], "{segs:?}");
+    }
+
+    #[test]
+    fn append_snaps_to_the_project_grid_not_the_source() {
+        let file = Seconds::new(60000, 1001); // 59.94 source
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(24)); // 24 fps timeline
+        assert_eq!(snap_fps_for(Some(&p), file), Seconds::from_integer(24));
+        // A fresh project (no target) uses the source's fps.
+        assert_eq!(snap_fps_for(None, file), file);
+        // An append target with no fps falls back to the source's.
+        assert_eq!(snap_fps_for(Some(&Project::new()), file), file);
     }
 }

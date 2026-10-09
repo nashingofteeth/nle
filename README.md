@@ -85,7 +85,9 @@ $N detect-edits edit.mov --append      # append the shots to an existing project
 #   --append starts at the timeline end; --track N picks the video target
 #   one clip per detected shot; black spans come back as gaps. Tune with
 #   --threshold (0..1) / --min-shot; --video-only drops audio; --force
-#   overwrites the project. Recovers the edit structure, not the sources.
+#   overwrites the project. Cuts snap to the project's frame grid (a 59.94
+#   source in a 24 fps project lands on 24 fps frames). Recovers the edit
+#   structure, not the sources.
 $N export -o final.mp4                 # libx264, frame-exact
 $N export -o fast.mp4 --encoder vaapi  # GPU (also: qsv)
 
