@@ -23,7 +23,9 @@ use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
 pub const MAX_HISTORY: usize = 100;
 /// Sidecar file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old sidecars start fresh.
-pub const HISTORY_VERSION: u32 = 7;
+/// v7 stored clip speed as raw `speed_num`/`speed_den` integers; v8 stores
+/// it as a `rational_ser` fraction like every other time in the Atom.
+pub const HISTORY_VERSION: u32 = 8;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -403,10 +405,12 @@ pub enum Atom {
         asset_in: Seconds,
         #[serde(with = "crate::time::rational_ser")]
         asset_out: Seconds,
-        /// Playback speed as a reduced fraction (`speed_num/speed_den`);
-        /// `1/1` is normal. Rational so undo/redo is exact.
-        speed_num: i64,
-        speed_den: i64,
+        /// Playback speed as a reduced fraction; `1/1` is normal. Rational
+        /// (via `rational_ser`, like every other time here) so undo/redo is
+        /// exact — and so a corrupt sidecar is rejected at parse time
+        /// instead of panicking inside `Ratio::new` on a zero denominator.
+        #[serde(with = "crate::time::rational_ser")]
+        speed: Seconds,
     },
     Gap {
         #[serde(with = "crate::time::rational_ser")]
@@ -481,8 +485,7 @@ fn atom_from_segment(seg: &Segment) -> Atom {
             asset: c.asset,
             asset_in: c.asset_in,
             asset_out: c.asset_out,
-            speed_num: *c.speed.numer(),
-            speed_den: *c.speed.denom(),
+            speed: c.speed,
         },
         Segment::Gap(g) => Atom::Gap {
             duration: g.duration,
@@ -497,14 +500,13 @@ fn segment_from_atom(atom: &Atom) -> Segment {
             asset,
             asset_in,
             asset_out,
-            speed_num,
-            speed_den,
+            speed,
         } => Segment::Clip(Clip {
             id: *id,
             asset: *asset,
             asset_in: *asset_in,
             asset_out: *asset_out,
-            speed: Seconds::new(*speed_num, *speed_den),
+            speed: *speed,
         }),
         Atom::Gap { duration } => Segment::Gap(Gap {
             duration: *duration,
@@ -4409,6 +4411,24 @@ mod tests {
             .depth()
                 == 0
         );
+
+        // A corrupt rational (zero denominator) is rejected at parse time —
+        // as raw speed_num/speed_den it reached `Ratio::new` and panicked on
+        // the first undo instead.
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = split(&p, 4.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let good = dir.path().join("good.json");
+        h.save(&good).unwrap();
+        let text = std::fs::read_to_string(&good).unwrap();
+        let bad = dir.path().join("denom.json");
+        std::fs::write(
+            &bad,
+            text.replace("\"speed\": \"1/1\"", "\"speed\": \"5/0\""),
+        )
+        .unwrap();
+        assert!(History::load(&bad).is_err());
     }
 
     #[test]
