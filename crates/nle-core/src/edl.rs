@@ -153,6 +153,8 @@ pub enum BuildError {
     Overlap { event: u32 },
     #[error("event {event}: source out is not after source in")]
     BadSpan { event: u32 },
+    #[error("event {event}: record out is not after record in")]
+    RecSpan { event: u32 },
     #[error("event {event}: no pool asset matches {name:?}")]
     Unresolved { event: u32, name: String },
 }
@@ -168,9 +170,13 @@ fn frames_of(tc: Timecode, doc: &EdlDoc, fps: Seconds) -> i64 {
 /// Build a timeline from `doc`: video events become video track 0, then one
 /// audio track per distinct audio channel. Record-position gaps become `Gap`
 /// segments; source timecodes map to file time by subtracting
-/// `src_offset_frames`. Audio events whose reel + source range match a video
-/// event are *linked* (the video clip already carries that audio) and are
-/// skipped, so linked a/v doesn't double.
+/// `src_offset_frames`. A clip plays at `source_span / record_span` — for a
+/// plain 1× edit that is exactly `1`, and when an EDL came out of an edit
+/// with a speed change the ratio recovers it (so the built timeline still
+/// matches the record times instead of drifting after the event). Audio
+/// events whose reel + source range match a video event are *linked* (the
+/// video clip already carries that audio) and are skipped, so linked a/v
+/// doesn't double.
 pub fn build(
     doc: &EdlDoc,
     fps: Seconds,
@@ -219,6 +225,13 @@ pub fn build(
                 if src_out <= src_in {
                     return Err(BuildError::BadSpan { event: ev.num });
                 }
+                // nle's timeline span for a clip is source / speed, and the
+                // record span is the timeline span the original edit used —
+                // so their ratio IS the speed. Equal spans reduce to 1.
+                if rec_out <= rec_in {
+                    return Err(BuildError::RecSpan { event: ev.num });
+                }
+                let speed = Seconds::new(src_out - src_in, rec_out - rec_in);
                 let asset = resolve(ev).ok_or_else(|| BuildError::Unresolved {
                     event: ev.num,
                     name: hint(ev).unwrap_or_else(|| ev.reel.clone()),
@@ -228,7 +241,7 @@ pub fn build(
                     asset,
                     asset_in: frames_to_seconds(src_in, fps),
                     asset_out: frames_to_seconds(src_out, fps),
-                    speed: Seconds::from_integer(1),
+                    speed,
                 }));
                 next_id += 1;
                 cursor = rec_out;
@@ -380,6 +393,54 @@ FCM: NON-DROP FRAME
         assert!(matches!(segs[0], Segment::Clip(_)), "{segs:?}");
         assert!(matches!(&segs[1], Segment::Gap(g) if g.duration == Seconds::from_integer(1)));
         assert!(matches!(segs[2], Segment::Clip(_)), "{segs:?}");
+    }
+
+    #[test]
+    fn speed_conform_matches_record_layout() {
+        // 4s of source over an 8s record span = 0.5x: the built clip occupies
+        // the full record span, so the timeline layout matches the record
+        // times (the old fixed-1x build drifted every event after it by 4s).
+        let edl = "\
+001 AX V C 00:00:00:00 00:00:04:00 01:00:00:00 01:00:08:00
+002 AX V C 00:00:04:00 00:00:06:00 01:00:08:00 01:00:10:00
+";
+        let doc = parse(edl).unwrap();
+        let fps = Seconds::from_integer(30);
+        let tl = build(&doc, fps, 0, &some_asset).unwrap();
+        let segs = &tl.tracks[0].segments;
+        match &segs[0] {
+            Segment::Clip(c) => {
+                assert_eq!(c.speed, Seconds::new(1, 2));
+                assert_eq!(c.duration(), Seconds::from_integer(8));
+            }
+            _ => panic!("expected a clip"),
+        }
+        // No gap: event 2 starts exactly where the slowed event 1 ends.
+        match (&segs[0], &segs[1]) {
+            (Segment::Clip(a), Segment::Clip(b)) => assert_eq!(b.asset_in, a.asset_out),
+            _ => panic!("expected two clips"),
+        }
+        assert_eq!(tl.end(), Seconds::from_integer(10));
+    }
+
+    #[test]
+    fn a_one_frame_conform_reduces_to_one_x() {
+        // 60 frames of source over 60 frames of record → 1/1, not 60/60.
+        let edl = "001 AX V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n";
+        let doc = parse(edl).unwrap();
+        let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
+        match &tl.tracks[0].segments[0] {
+            Segment::Clip(c) => assert_eq!(c.speed, Seconds::from_integer(1)),
+            _ => panic!("expected a clip"),
+        }
+    }
+
+    #[test]
+    fn rejects_a_non_positive_record_span() {
+        let edl = "001 AX V C 00:00:00:00 00:00:02:00 01:00:02:00 01:00:00:00\n";
+        let doc = parse(edl).unwrap();
+        let err = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap_err();
+        assert!(matches!(err, BuildError::RecSpan { event: 1 }), "{err:?}");
     }
 
     #[test]
