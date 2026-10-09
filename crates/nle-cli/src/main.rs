@@ -894,14 +894,19 @@ fn parse_speed_arg(s: &str) -> Result<Seconds> {
 }
 
 /// Match a reel/clip name to a pooled asset: exact filename, then stem,
-/// then a case-insensitive substring (unique best).
+/// then a case-insensitive substring at a stem **edge** — and only if
+/// exactly one asset can match it. Two constraints keep generic reels
+/// from silently binding an unrelated file: `AX` (the placeholder for
+/// unnamed aux media) is a substring of stems like `taxi` but aligns with
+/// none of their edges, and a tie (e.g. `red_a` + `red_b` for needle
+/// `red`) stays unresolved so the caller can report the real problem.
 fn match_asset(project: &Project, needle: &str) -> Option<u32> {
     let needle = needle.to_lowercase();
     let needle_stem = Path::new(&needle)
         .file_stem()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_else(|| needle.clone());
-    let mut fuzzy = None;
+    let mut fuzzy: Vec<u32> = Vec::new();
     for a in &project.media {
         let file = a
             .path
@@ -916,11 +921,26 @@ fn match_asset(project: &Project, needle: &str) -> Option<u32> {
         if file == needle || stem == needle || file == needle_stem || stem == needle_stem {
             return Some(a.id);
         }
-        if fuzzy.is_none() && (stem.contains(&needle_stem) || needle_stem.contains(&stem)) {
-            fuzzy = Some(a.id);
+        // An empty stem (or needle stem) matches everything — that is not
+        // information, don't match on it.
+        if !stem.is_empty() && !needle_stem.is_empty() && (fuzzy_edge(&stem, &needle_stem)) {
+            fuzzy.push(a.id);
         }
     }
-    fuzzy
+    if fuzzy.len() == 1 {
+        fuzzy.pop() // unique: no need to disambiguate
+    } else {
+        None
+    }
+}
+
+/// Substring match at an edge: `red` matches `red_start` (as a prefix) and
+/// `out_red` (as a suffix), but not inside `taxi` for needle `ax`.
+fn fuzzy_edge(needle: &str, hay: &str) -> bool {
+    hay.starts_with(needle)
+        || hay.ends_with(needle)
+        || needle.starts_with(hay)
+        || needle.ends_with(hay)
 }
 
 /// Resolve an EDL event to an asset id: an explicit `--map` reel, then the
@@ -1776,5 +1796,47 @@ mod tests {
         assert_eq!(snap_fps_for(None, file), file);
         // An append target with no fps falls back to the source's.
         assert_eq!(snap_fps_for(Some(&Project::new()), file), file);
+    }
+
+    fn pool(names: &[&str]) -> Project {
+        let mut p = Project::new();
+        for n in names {
+            let (_, _) = p.add_asset(PathBuf::from(n), RawProbe::default());
+        }
+        p
+    }
+
+    // Only exact tiers bind when several candidates contain the needle —
+    // a first-match would pick by pool order, not by evidence.
+    #[test]
+    fn fuzzy_matches_must_be_unique() {
+        let p = pool(&["/media/red_a.mp4", "/media/red_b.mp4"]);
+        assert_eq!(match_asset(&p, "red_a"), Some(1));
+        assert_eq!(match_asset(&p, "red"), None, "two contain 'red'");
+    }
+
+    #[test]
+    fn a_generic_reel_stays_unresolved() {
+        // AX is a substring of unrelated stems; without hints it must not
+        // silently bind any of them (This was the "taxi" trap: reel AX +
+        // taxi.mp4 pooled resolves... nothing, and import-edl says so.)
+        let p = pool(&["/media/taxi.mp4"]);
+        assert_eq!(match_asset(&p, "AX"), None);
+        assert_eq!(match_asset(&p, "ax"), None);
+    }
+
+    #[test]
+    fn unique_fuzzy_and_exact_hint_still_bind() {
+        let p = pool(&["/media/red_only.mp4"]);
+        assert_eq!(match_asset(&p, "red"), Some(1), "unique substring");
+        // A whole-path SOURCE FILE hint matches its basename stem.
+        let p = pool(&["/media/blue.mp4"]);
+        assert_eq!(match_asset(&p, "/media/blue.mp4"), Some(1));
+    }
+
+    #[test]
+    fn an_empty_needle_never_fuzzy_matches() {
+        let p = pool(&["/media/a.mp4", "/media/b.mp4"]);
+        assert_eq!(match_asset(&p, ""), None);
     }
 }
