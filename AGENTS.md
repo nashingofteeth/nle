@@ -168,6 +168,11 @@ plainly.
   timeline is a sequence, so a new duration moves every follower. Export
   retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained outside
   [0.5, 2]); the 1× graph stays byte-identical.
+- **Any timeline↔source mapping must scale by `Clip.speed`.** Edits use
+  `source_span` (`edit.rs`); anything outside it uses `Clip::source_at` /
+  `Clip::timeline_offset_of`. The playhead anchor missed the factor and
+  silently followed the wrong frame — the pair on `Clip` is the only
+  approved way to cross that boundary.
 - **One video track + an audio track still takes the multi-track export
   path** (the fast path needs *zero* audio tracks), so a single video layer
   must reach `[vout]` with no dangling `null[vcomp]`.
