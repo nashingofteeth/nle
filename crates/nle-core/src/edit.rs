@@ -823,6 +823,11 @@ pub fn set_speed_on(
         Segment::Clip(c) => c.clone(),
         Segment::Gap(_) => return Err(EditError::ClipNotFound(clip_id)),
     };
+    // A fast retime can shrink the timeline span below a frame (a 1-frame
+    // clip at 2×): every other duration-changing op refuses sub-frame
+    // spans, so this one must too.
+    let new_dur = (c.asset_out - c.asset_in) / speed;
+    at_least_a_frame(project, &new_dur)?;
     let before = Segment::Clip(c.clone());
     let after = Segment::Clip(Clip { speed, ..c });
     Ok(Batch {
@@ -4642,5 +4647,37 @@ mod tests {
             set_speed(&p, 1, Seconds::from_integer(0)),
             Err(EditError::BadSpeed(_))
         ));
+        assert!(matches!(
+            set_speed(&p, 1, Seconds::new(-1, 2)),
+            Err(EditError::BadSpeed(_))
+        ));
+    }
+
+    #[test]
+    fn set_speed_refuses_a_sub_frame_span() {
+        // A 2-frame source clip at 1/30fps retimed to 6× occupies 1/3 frame
+        // of timeline: below one frame, so it must be refused — same rule
+        // trims and splits enforce. 2× (1 frame exactly) is allowed.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::new(2, 30),
+            speed: Seconds::from_integer(1),
+        })];
+        assert!(matches!(
+            set_speed(&p, 1, Seconds::from_integer(6)),
+            Err(EditError::TooShort)
+        ));
+        let batch = set_speed(&p, 1, Seconds::from_integer(2)).unwrap(); // exactly 1 frame
+        History::default().apply(&mut p, batch, 0).unwrap();
+        assert_eq!(
+            clip_by_id(&p, 1).duration(),
+            Seconds::new(1, 30),
+            "2 frames at 2x = 1 frame"
+        );
     }
 }
