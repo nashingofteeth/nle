@@ -182,6 +182,14 @@ plainly.
 - **Source timecodes are file-relative by default**; `--src-offset` maps
   hour-based media. Audio events whose reel + source match a video event are
   **linked** and skipped, so embedded audio isn't doubled.
+- **A speed change hides in the src/rec span mismatch.** EDLs carry no rate
+  field; `speed = src_span / rec_span`. Deriving it per event keeps the built
+  timeline aligned with record time; assuming 1× shifts every later event by
+  the accumulated mismatch (this shipped wrong once).
+- **Fuzzy reel matching must be edge-aligned and unique.** A substring that
+  matches anywhere latches `AX` onto anything containing it (`taxi.mp4`),
+  and first-match-in-pool-order is a decision, not evidence: match a stem
+  edge, require exactly one candidate, else report `Unresolved`.
 
 ## OTIO import pitfalls
 
