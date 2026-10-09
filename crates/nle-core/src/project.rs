@@ -17,7 +17,8 @@ use crate::timeline::{Segment, Timeline, TimelineError};
 
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
-/// never silently misread. v3 adds the per-track `muted` flag (tracks).
+/// never silently misread. v3 added the per-track `muted` flag;
+/// v4 added the per-clip `speed` rate.
 pub const PROJECT_VERSION: u32 = 4;
 
 #[derive(Debug, Error)]
