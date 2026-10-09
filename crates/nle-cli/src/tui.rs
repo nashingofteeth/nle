@@ -1709,7 +1709,9 @@ fn edit_anchor(project: &Project, playhead: f64, ti: usize) -> Option<Anchor> {
     match &track.segments[idx] {
         TimelineSegment::Clip(c) => Some(Anchor::Media(MediaAnchor {
             id: c.id,
-            source: c.asset_in + (t - track.start_of(idx)),
+            // Timeline → source scales by the clip's speed (a 2× clip's
+            // timeline second is two source seconds).
+            source: c.source_at(t - track.start_of(idx)),
             start: secs(&track.start_of(idx)),
             at: secs(&t),
         })),
@@ -1740,7 +1742,9 @@ fn resolve_anchor(project: &Project, id: u32, source: Seconds, ti: usize) -> Opt
             } else if source >= c.asset_out {
                 acc + c.duration()
             } else {
-                acc + (source - c.asset_in)
+                // Source → timeline divides by speed: the inverse of the
+                // mapping `edit_anchor` used to record the media frame.
+                acc + c.timeline_offset_of(source)
             };
             return Some(secs(&pos));
         }
@@ -4685,6 +4689,80 @@ mod tests {
             edit_anchor(&app.project, 4.0, 0),
             Some(Anchor::Gap(_))
         ));
+    }
+
+    // The anchor maps through a speed clip's rate: the media frame is a
+    // SOURCE position, and source = timeline × speed.
+    #[test]
+    fn playhead_reanchors_on_speed_clips() {
+        // A 2× clip reading source [0,4) occupies timeline [0,2). The
+        // playhead at 1.0 shows source frame 2.
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments =
+            vec![TimelineSegment::Clip(nle_core::Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(4),
+                speed: Seconds::from_integer(2),
+            })];
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 1.0;
+        let anchor = edit_anchor(&app.project, app.playhead, 0);
+        assert_eq!(
+            anchor,
+            Some(Anchor::Media(MediaAnchor {
+                id: 1,
+                source: Seconds::from_integer(2), // 1.0 × 2, not 1.0
+                start: 0.0,
+                at: 1.0
+            }))
+        );
+        // Head trim to 0.5 (gap-left): the clip's head moves right onto the
+        // playhead and a gap takes the trimmed material. Source 2 now sits
+        // at timeline 0.5 (gap) + 0.5 (into the clip) = 1.0 — the same
+        // media frame at the same playhead. A 1× mapping records source 1
+        // and resolves to 0.5, off the frame.
+        let batch = edit::trim_in(&app.project, 0.5).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 1.0, "media frame kept at the scaled offset");
+
+        // A ripple shift under a 0.5× clip: source 1 is 2s into the clip
+        // and stays 2s into it after the clip slides left.
+        let mut p = asset_project();
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            TimelineSegment::Clip(nle_core::Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(1),
+                speed: Seconds::from_integer(1),
+            }),
+            TimelineSegment::Clip(nle_core::Clip {
+                id: 2,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::new(1, 2),
+            }),
+        ];
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 3.0; // inside clip #2 [1..5): source 0 + (3-1)×0.5 = 1
+        let anchor = edit_anchor(&app.project, app.playhead, 0);
+        assert_eq!(
+            anchor,
+            Some(Anchor::Media(MediaAnchor {
+                id: 2,
+                source: Seconds::from_integer(1),
+                start: 1.0,
+                at: 3.0
+            }))
+        );
+        let batch = edit::delete_ripple(&app.project, 0.5).unwrap(); // drop #1
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 2.0, "still 2s into clip #2 after the shift");
     }
 
     // Undo restores the playhead to the frame the edit was made from.

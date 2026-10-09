@@ -68,6 +68,19 @@ impl Clip {
     pub fn duration(&self) -> Seconds {
         self.source_duration() / self.speed
     }
+
+    /// Source time at a timeline offset inside the clip (timeline →
+    /// source). Edits move in timeline time but `asset_in/out` live in
+    /// source time, so crossing that boundary scales by `speed`.
+    pub fn source_at(&self, timeline_offset: Seconds) -> Seconds {
+        self.asset_in + timeline_offset * self.speed
+    }
+
+    /// Timeline offset of a source time inside the clip (source →
+    /// timeline) — the inverse of [`Clip::source_at`].
+    pub fn timeline_offset_of(&self, source: Seconds) -> Seconds {
+        (source - self.asset_in) / self.speed
+    }
 }
 
 /// A stretch of nothing: black + silence. Leading, interior, and
@@ -286,6 +299,26 @@ mod tests {
         Segment::Gap(Gap {
             duration: Seconds::from_integer(dur),
         })
+    }
+
+    #[test]
+    fn source_mapping_scales_by_speed() {
+        // 2× clip reading source [1, 5): 1s of timeline = 2s of source.
+        let c = Clip {
+            id: 1,
+            asset: 1,
+            asset_in: Seconds::from_integer(1),
+            asset_out: Seconds::from_integer(5),
+            speed: Seconds::from_integer(2),
+        };
+        assert_eq!(
+            c.source_at(Seconds::from_integer(1)),
+            Seconds::from_integer(3)
+        );
+        assert_eq!(
+            c.timeline_offset_of(Seconds::from_integer(3)),
+            Seconds::from_integer(1)
+        );
     }
 
     #[test]
