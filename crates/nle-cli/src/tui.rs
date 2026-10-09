@@ -2698,7 +2698,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
 /// The pool takes over the info pane: asset list on the left, probe
 /// metadata for the selection on the right.
 fn render_pool(f: &mut Frame, area: Rect, app: &App) {
-    use ratatui::widgets::{List, Paragraph, Wrap};
+    use ratatui::widgets::{List, ListState, Paragraph, Wrap};
     let [list_area, meta_area] =
         Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).areas(area);
 
@@ -2726,7 +2726,12 @@ fn render_pool(f: &mut Frame, area: Rect, app: &App) {
             ]))
         })
         .collect();
-    f.render_widget(List::new(items), list_inner);
+    // The list scrolls to keep the selected row visible: `ListState` owns the
+    // viewport offset, while the selection itself lives in the mode
+    // (`pool_sel`), so the widget state is rebuilt each frame, not persisted.
+    let mut list_state = ListState::default();
+    list_state.select(pool_sel(app));
+    f.render_stateful_widget(List::new(items), list_inner, &mut list_state);
 
     // Right: probe metadata for the selected asset.
     let meta_block = Block::bordered().title(" metadata ");
@@ -3759,6 +3764,37 @@ mod tests {
         assert!(row(2).contains("v1"), "{:?}", row(2));
         assert!(row(3).contains("v2"), "{:?}", row(3));
         assert!(row(4).contains("a1"), "{:?}", row(4));
+    }
+
+    // The pool's asset list scrolls its viewport so the selected row stays
+    // visible once there are more assets than fit (a stateless `List` always
+    // draws from row 0 and lets the highlight walk off the bottom).
+    #[test]
+    fn pool_list_scrolls_to_keep_the_selection_visible() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut p = asset_project();
+        let probe = p.asset(1).unwrap().probe.clone();
+        for i in 2..=20 {
+            p.add_asset(format!("/media/a{i}.mp4").into(), probe.clone());
+        }
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        open_pool_mode(&mut app, 19); // the last asset, far past a short pane
+        let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        term.draw(|f| render_pool(f, f.area(), &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..8u16)
+            .map(|y| (0..60u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("a20.mp4"),
+            "selected row must be visible:\n{text}"
+        );
+        assert!(
+            !text.contains("a2.mp4"),
+            "list scrolled, early rows gone:\n{text}"
+        );
     }
 
     #[test]
