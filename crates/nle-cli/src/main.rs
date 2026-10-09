@@ -1262,6 +1262,14 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         parse_time(min_shot).with_context(|| format!("invalid --min-shot {min_shot:?}"))?;
     let black_min =
         parse_time(black_min).with_context(|| format!("invalid --black-min {black_min:?}"))?;
+    // `select='gt(scene,T)'`: T is a frame-difference score in 0..1. A typo
+    // like `-1` or `40` otherwise yields a degenerate-but-"successful" run
+    // (every frame a cut, or none).
+    if !(threshold > 0.0 && threshold < 1.0) {
+        bail!(
+            "--threshold must be strictly between 0 and 1 (got {threshold}; the scene score is 0..1)"
+        );
+    }
 
     let canonical = file
         .canonicalize()
