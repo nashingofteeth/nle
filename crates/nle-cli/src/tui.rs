@@ -196,6 +196,36 @@ pub fn prev_clip_start(project: &Project, t: f64, eps: f64, ti: usize) -> Option
     last_start
 }
 
+/// Start of the next gap after the playhead — like `j`, but it skips over
+/// clip boundaries and lands only where a gap begins.
+pub fn next_gap_start(project: &Project, t: f64, eps: f64, ti: usize) -> Option<f64> {
+    let track = project.timeline.track(ti)?;
+    let mut acc = Seconds::from_integer(0);
+    for s in &track.segments {
+        let start = secs(&acc);
+        if matches!(s, TimelineSegment::Gap(_)) && start > t + eps {
+            return Some(start);
+        }
+        acc += s.duration();
+    }
+    None
+}
+
+/// Start of the previous gap before the playhead (skips clip boundaries).
+pub fn prev_gap_start(project: &Project, t: f64, eps: f64, ti: usize) -> Option<f64> {
+    let track = project.timeline.track(ti)?;
+    let mut acc = Seconds::from_integer(0);
+    let mut last = None;
+    for s in &track.segments {
+        let start = secs(&acc);
+        if matches!(s, TimelineSegment::Gap(_)) && start < t - eps {
+            last = Some(start);
+        }
+        acc += s.duration();
+    }
+    last
+}
+
 // ------------------------------------------------------------ app state
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1109,6 +1139,14 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 None => app.set_message("no clip before the playhead"),
             }
         }
+        KeyCode::Char('n') => match next_gap_start(&app.project, app.playhead, eps, app.active()) {
+            Some(t) => app.seek_to(player, t),
+            None => app.set_message("no gap after the playhead"),
+        },
+        KeyCode::Char('N') => match prev_gap_start(&app.project, app.playhead, eps, app.active()) {
+            Some(t) => app.seek_to(player, t),
+            None => app.set_message("no gap before the playhead"),
+        },
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('d') => app.pending = Pending::D,
         KeyCode::Char('y') => app.pending = Pending::Y,
@@ -2497,6 +2535,14 @@ fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 None => seek_to_mode(app, player, &st, 0.0),
             }
         }
+        KeyCode::Char('n') => match next_gap_start(&app.project, app.playhead, eps, app.active()) {
+            Some(t) => seek_to_mode(app, player, &st, t),
+            None => seek_to_mode(app, player, &st, app.total()),
+        },
+        KeyCode::Char('N') => match prev_gap_start(&app.project, app.playhead, eps, app.active()) {
+            Some(t) => seek_to_mode(app, player, &st, t),
+            None => seek_to_mode(app, player, &st, 0.0),
+        },
         KeyCode::Char('g') => app.pending = Pending::G,
         KeyCode::Char('G') | KeyCode::Char('$') => seek_to_mode(app, player, &st, app.total()),
         KeyCode::Char('e') => commit_extend(app, player),
@@ -2627,7 +2673,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
     if matches!(app.mode, Mode::Extend(_)) {
         return vec![
             "extend mode — move the armed edge, then commit",
-            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · gg/G/0 ends",
+            "h/l ±1s · H/L ±5s · f/F frame · j/k cuts · w/b clips · n/N gaps · gg/G/0",
             "e commit · E ripple on/off · [ ] side · < > (, .) end · Esc cancel",
         ];
     }
@@ -2641,7 +2687,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
     }
     vec![
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
-        "motion     j/k cuts · w/b clips · < > (, .) clip start/end",
+        "motion     j/k cuts · w/b clips · n/N gaps · < > (, .) clip start/end",
         "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
         "           R speed (rate prompt) · e/E extend · [ ] side · m pool",
         "extend     e/E enter · [ ] side · m pool · u undo · r reload · : cmd · q quit",
@@ -5285,6 +5331,38 @@ mod tests {
         assert_eq!(next_cut(&pts, 2.9995, eps), Some(5.0));
         assert_eq!(next_clip_start(&project(), 2.9995, eps, 0), Some(5.0));
         assert_eq!(prev_clip_start(&project(), 3.0005, eps, 0), Some(0.0));
+    }
+
+    #[test]
+    fn gap_navigation_skips_clip_boundaries() {
+        // project(): [C1 0..3][gap 3..5][C2 5..7]
+        let eps = 0.5 / 30.0;
+        assert_eq!(next_gap_start(&project(), 0.0, eps, 0), Some(3.0));
+        assert_eq!(next_gap_start(&project(), 2.0, eps, 0), Some(3.0));
+        // Within half a frame of the gap we're "at" it, so there is no next
+        // one (same drift tolerance as `j`/`k`).
+        assert_eq!(next_gap_start(&project(), 2.9995, eps, 0), None);
+        assert_eq!(next_gap_start(&project(), 3.0, eps, 0), None);
+        assert_eq!(next_gap_start(&project(), 6.0, eps, 0), None);
+        assert_eq!(prev_gap_start(&project(), 7.0, eps, 0), Some(3.0));
+        assert_eq!(prev_gap_start(&project(), 4.0, eps, 0), Some(3.0));
+        assert_eq!(prev_gap_start(&project(), 2.0, eps, 0), None);
+    }
+
+    #[test]
+    fn n_and_shift_n_jump_to_gaps() {
+        let mut app = App::new(project(), PathBuf::from("t.json"));
+        app.loaded = true;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('n'));
+        assert_eq!(app.playhead, 3.0, "n → the gap start");
+        // From the gap start there is no earlier gap; the playhead stays.
+        handle_key(&mut app, &fake, key('N'));
+        assert_eq!(app.playhead, 3.0);
+        // From a clip past the gap, N comes back to it.
+        app.playhead = 6.0;
+        handle_key(&mut app, &fake, key('N'));
+        assert_eq!(app.playhead, 3.0, "N → the previous gap start");
     }
 
     #[test]

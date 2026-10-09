@@ -26,8 +26,8 @@ N=./target/release/nle        # or just `nle` if cargo-installed
 # Interactive editor (the point)
 $N edit                       # TUI + mpv monitor; vim keys:
 #   transport: space play/pause · h/l ±1s · H/L ±5s · f/F frame step
-#   motion:    j/k next/prev cut · w/b next/prev clip · gg/G/0 ends
-#              < / > (, / .) clip start/end · 3l = 3s (counts)
+#   motion:    j/k next/prev cut · w/b next/prev clip · n/N next/prev gap
+#              gg/G/0 ends · < / > (, / .) clip start/end · 3l = 3s (counts)
 #   editing:   i/o trim in/out (I/O ripple; a gap always ripples) ·
 #              at a segment's edge i/o delete it, I/O or a gap ripples ·
 #              s split at playhead · _ insert gap (count = frames) ·
