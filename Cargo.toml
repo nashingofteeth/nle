@@ -20,8 +20,23 @@ serde_json = "1"
 num-rational = "0.4"
 tempfile = "3"
 
-# Optimization profile for release builds (what you actually run).
-# "fat" LTO + codegen-units=1 = slower to compile, faster to run.
+# Release = what you actually run. The heavy work (decode/encode/probe) happens
+# in external ffmpeg/mpv processes and nle-core is pure timeline math, so full
+# cross-crate LTO buys almost nothing at runtime — but it re-links the whole
+# graph on every edit. "thin" LTO + parallel codegen keeps rebuilds ~3x faster.
 [profile.release]
+lto = "thin"
+codegen-units = 16
+strip = true
+
+# Opt-in max-optimization build when you actually want one:
+#   cargo build --profile release-lto
+[profile.release-lto]
+inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+# Dev/testing: line-table debug info only (backtraces still resolve) instead of
+# full DWARF — smaller target/, faster links. Incremental stays on.
+[profile.dev]
+debug = 1
