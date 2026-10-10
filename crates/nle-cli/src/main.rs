@@ -1263,8 +1263,11 @@ fn cmd_import_otio(
         .iter()
         .filter_map(|a| a.duration().map(|d| (a.id, d)))
         .collect();
-    let clamp_notes =
-        otio::clamp_to_media(&mut project.timeline, &|id| durations.get(&id).copied());
+    let clamp_notes = otio::clamp_to_media(
+        &mut project.timeline,
+        &|id| durations.get(&id).copied(),
+        fps,
+    );
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
@@ -1480,6 +1483,7 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
             append_spans(&mut project, audio_ti, start, audio_segments);
         }
 
+        clamp_to_media_warn(&mut project);
         project.validate()?;
         save_and_reset_history(&project, project_path)?;
         println!(
@@ -1525,6 +1529,7 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         });
     }
     project.timeline = Timeline { tracks };
+    clamp_to_media_warn(&mut project);
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
@@ -1537,6 +1542,28 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         format_seconds(&fps),
     );
     Ok(())
+}
+
+/// Keep every clip inside its media and on the frame grid (see
+/// [`otio::clamp_to_media`]); warns about each adjustment. Applied by both
+/// import paths so neither can leave a clip reading past EOF or ending off the
+/// project's frame grid.
+fn clamp_to_media_warn(project: &mut Project) {
+    let Some(fps) = project.fps else {
+        return;
+    };
+    let durations: HashMap<u32, Seconds> = project
+        .media
+        .iter()
+        .filter_map(|a| a.duration().map(|d| (a.id, d)))
+        .collect();
+    for n in otio::clamp_to_media(
+        &mut project.timeline,
+        &|id| durations.get(&id).copied(),
+        fps,
+    ) {
+        eprintln!("warning: {n}");
+    }
 }
 
 /// Build the clip/gap segments for a run of spans, allocating clip ids from
