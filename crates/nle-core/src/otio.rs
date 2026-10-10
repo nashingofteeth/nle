@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::time::Seconds;
+use crate::time::{Seconds, format_seconds};
 use crate::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 
 #[derive(Debug, Error, PartialEq)]
@@ -153,6 +153,13 @@ pub fn parse(input: &str) -> Result<OtioDoc, OtioError> {
         };
         let muted = !t.get("enabled").and_then(Value::as_bool).unwrap_or(true);
         let items = track_items(t, ti, &mut warnings)?;
+        if items.is_empty() {
+            // Kdenlive exports its unused tracks too. An empty track carries no
+            // edit, so skip it rather than litter the timeline with empty rows
+            // (and a later re-import re-adding them). Not a silent *content*
+            // drop: there is nothing in it.
+            continue;
+        }
         tracks.push(OtioTrack { kind, muted, items });
     }
     if tracks.iter().all(|t| t.kind != TrackKind::Video) {
@@ -387,6 +394,46 @@ pub fn build(
     Ok(Timeline { tracks })
 }
 
+/// Clamp each clip's out-point to its media duration. A Kdenlive rate conform
+/// can round an out-point a hair past the file's end (e.g. a 0.4× clip on a
+/// 59.94 render); the export would then read past EOF and fall short by that
+/// sliver, drifting everything after it. `media` maps an asset id to its
+/// duration. Returns one note per adjusted clip (and drops a clip whose whole
+/// range is past the end).
+pub fn clamp_to_media(
+    timeline: &mut Timeline,
+    media: &dyn Fn(u32) -> Option<Seconds>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    for track in &mut timeline.tracks {
+        track.segments.retain_mut(|seg| {
+            let Segment::Clip(c) = seg else {
+                return true;
+            };
+            let Some(d) = media(c.asset) else {
+                return true;
+            };
+            if c.asset_out <= d {
+                return true;
+            }
+            if d > c.asset_in {
+                notes.push(format!(
+                    "clip #{}: out {} → media end {}",
+                    c.id,
+                    format_seconds(&c.asset_out),
+                    format_seconds(&d)
+                ));
+                c.asset_out = d;
+                true
+            } else {
+                notes.push(format!("clip #{}: past the media end — dropped", c.id));
+                false
+            }
+        });
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,8 +569,20 @@ mod tests {
     fn tracks_are_preserved_with_kind_and_mute() {
         let doc = parse(
             r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
-              { "OTIO_SCHEMA": "Track.1", "kind": "Video", "enabled": false, "children": [] },
-              { "OTIO_SCHEMA": "Track.1", "kind": "Audio", "children": [] }
+              { "OTIO_SCHEMA": "Track.1", "kind": "Video", "enabled": false, "children": [
+                { "OTIO_SCHEMA": "Clip.1", "name": "a.mp4",
+                  "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 0.0 },
+                    "duration":   { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 24.0 } },
+                  "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "/m/a.mp4" } }
+              ] },
+              { "OTIO_SCHEMA": "Track.1", "kind": "Audio", "children": [
+                { "OTIO_SCHEMA": "Clip.1", "name": "a.mp4",
+                  "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 0.0 },
+                    "duration":   { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 24.0 } },
+                  "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "/m/a.mp4" } }
+              ] }
             ] } }"#,
         )
         .unwrap();
@@ -535,12 +594,64 @@ mod tests {
     }
 
     #[test]
+    fn empty_tracks_are_skipped() {
+        // Kdenlive exports its unused tracks; they must not come back as rows.
+        let doc = parse(
+            r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
+              { "OTIO_SCHEMA": "Track.1", "kind": "Video", "children": [
+                { "OTIO_SCHEMA": "Clip.1", "name": "a.mp4",
+                  "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 0.0 },
+                    "duration":   { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 24.0 } },
+                  "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "/m/a.mp4" } }
+              ] },
+              { "OTIO_SCHEMA": "Track.1", "kind": "Video", "children": [] },
+              { "OTIO_SCHEMA": "Track.1", "kind": "Audio", "children": [] }
+            ] } }"#,
+        )
+        .unwrap();
+        assert_eq!(doc.tracks.len(), 1, "empty tracks dropped");
+        assert_eq!(doc.tracks[0].kind, TrackKind::Video);
+    }
+
+    #[test]
+    fn clamp_to_media_trims_or_drops_past_the_end() {
+        let doc = parse(CUTS).unwrap();
+        // Both clips resolve to asset 1; with a 3s media, each [..4) out-point
+        // overruns and is clamped.
+        let mut t = build(&doc, &|_| Some(1)).unwrap();
+        let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(3)));
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let Segment::Clip(c) = &t.tracks[0].segments[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(c.asset_out, Seconds::from_integer(3));
+
+        // A clip wholly past the media end (in-point at/after it) is dropped.
+        let mut t = build(&doc, &|_| Some(1)).unwrap();
+        let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(1)));
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(
+            t.tracks[0]
+                .segments
+                .iter()
+                .all(|s| matches!(s, Segment::Gap(_))),
+            "both clips dropped; the gap survives"
+        );
+    }
+
+    #[test]
     fn transitions_and_nesting_are_warned_not_silent() {
         let doc = parse(
             r#"{ "OTIO_SCHEMA": "Timeline.1", "tracks": { "OTIO_SCHEMA": "Stack.1", "children": [
               { "OTIO_SCHEMA": "Track.1", "kind": "Video", "children": [
                 { "OTIO_SCHEMA": "Transition.1", "name": "t" },
-                { "OTIO_SCHEMA": "Stack.1", "children": [] }
+                { "OTIO_SCHEMA": "Stack.1", "children": [] },
+                { "OTIO_SCHEMA": "Clip.1", "name": "a.mp4",
+                  "source_range": { "OTIO_SCHEMA": "TimeRange.1",
+                    "start_time": { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 0.0 },
+                    "duration":   { "OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": 24.0 } },
+                  "media_reference": { "OTIO_SCHEMA": "ExternalReference.1", "target_url": "/m/a.mp4" } }
               ] }
             ] } }"#,
         )

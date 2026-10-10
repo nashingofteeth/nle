@@ -1256,10 +1256,19 @@ fn cmd_import_otio(
     let timeline = otio::build(&doc, &|p| by_path.get(p).copied())
         .with_context(|| format!("building timeline from {}", otio_path.display()))?;
     project.timeline = timeline;
+    // A Kdenlive rate conform can round an out-point a hair past the file's
+    // end; clamp it so the export doesn't read past EOF and fall short.
+    let durations: HashMap<u32, Seconds> = project
+        .media
+        .iter()
+        .filter_map(|a| a.duration().map(|d| (a.id, d)))
+        .collect();
+    let clamp_notes =
+        otio::clamp_to_media(&mut project.timeline, &|id| durations.get(&id).copied());
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
-    for w in &doc.warnings {
+    for w in doc.warnings.iter().chain(clamp_notes.iter()) {
         eprintln!("warning: {w}");
     }
     let clips = project

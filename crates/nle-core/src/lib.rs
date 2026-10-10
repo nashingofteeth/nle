@@ -22,7 +22,7 @@ pub use edit::{
 };
 pub use edl::{EdlDoc, EdlError, EdlEvent};
 pub use media::{RawFormat, RawProbe, RawStream};
-pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
+pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack, clamp_to_media};
 pub use project::{Asset, Project, ProjectError, VideoSettings};
 pub use time::{
     Seconds, Timecode, format_seconds, frames_to_seconds, nominal_fps, parse_rate, parse_time,
