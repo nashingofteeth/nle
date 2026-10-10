@@ -303,6 +303,11 @@ a transitive tree for most needs).
   helpers).
 - `Cargo.lock` is committed — builds are reproducible; upgrades are
   deliberate events, not side effects.
+- **Release profile is deliberately light** (`lto = "thin"`,
+  `codegen-units = 16`). The hot work is in external ffmpeg/mpv
+  subprocesses, not Rust, so fat LTO bought no runtime win while forcing a
+  full relink (~28s) on every edit. The old `fat`/`cgu = 1` settings live in
+  the opt-in `release-lto` profile — use that only when you actually want it.
 - After any dependency change: `cargo update` deliberately, then run
   `cargo audit` (RustSec advisories) before committing.
 - External system binaries (`ffmpeg`, `ffprobe`, `mpv`) are the real
