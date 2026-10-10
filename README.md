@@ -38,6 +38,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :track add video|audio · :track mute [N] · :track rm N ·
 #              navigation, edits, and the monitor all follow the active
 #              track (the timeline draws one row per track)
+#   commands:  :speed <rate> (or R) · :purge (drop sub-frame stumps, snap the
+#              grid) · :track … · :q quit
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of
 #              a cut (bracket opens toward its side) ·
@@ -79,6 +81,7 @@ $N import-otio sequence.otio            # OpenTimelineIO (.otio) → project
 #   itself (--media/--remap for moved media). Kdenlive rate conforms
 #   (timewarp) import as per-clip speed.
 $N speed 3 0.5                          # clip #3 plays at half speed (ripples)
+$N purge-stumps                        # drop sub-frame stumps; snap to the grid
 $N detect-edits edit.mov               # rebuild a project from a rendered file
 $N detect-edits edit.mov --list        # print the detected cuts, write nothing
 $N detect-edits edit.mov --append      # append the shots to an existing project

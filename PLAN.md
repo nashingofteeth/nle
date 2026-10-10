@@ -1,6 +1,6 @@
 # nle — plan of record
 
-Status: **M4 + EDL/OTIO import + clip speed complete, M5 next.** This file is the
+Status: **M4 + EDL/OTIO import + clip speed + edit-detect complete, M5 next.** This file is the
 design/roadmap; the README is the user-facing how-to. Keep it in sync as
 milestones land.
 
@@ -56,7 +56,7 @@ mpv blocks `lavfi://` inside EDL (hence black-file cache).
 
 Canonical keymap lives in **README.md** (the user manual); keep it there
 and update it in place. Summary only, for orientation: transport/motion
-(`space`, `h/l/H/L`, `f/F`, `j/k`, `w/b`, `gg/G/0/$`, `< >`, counts),
+(`space`, `h/l/H/L`, `f/F`, `j/k`, `w/b`, `n/N`, `gg/G/0/$`, `< >`, counts),
 editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 (`e/E`, `[ ]`, `< >`).
 
@@ -156,17 +156,21 @@ existing project.
   clips: 26× 0.8008 + 1× 0.4004, total exactly 37538/24 s).
 - **Clip speed** (`timeline.rs`): `Clip.speed` (rational, default 1); timeline
   duration = `(asset_out - asset_in) / speed`. `PROJECT_VERSION` → 4,
-  `HISTORY_VERSION` → 6 (the `Atom` carries speed as num/den, so undo/redo is
-  exact).
-- **Editing:** timeline↔source deltas scale by speed (`source_span`); a speed
-  change **always ripples** (`set_speed` / `:speed` / `nle speed`).
+  `HISTORY_VERSION` → 7 (the `Atom` carries **exact** source times + speed, so
+  undo/redo is bit-for-bit; an earlier frame-count form quantized source
+  seconds and slowly drifted speed clips).
+- **Editing:** timeline↔source deltas scale by speed (`source_span`, or
+  `Clip::source_at`/`timeline_offset_of`); a speed change **always ripples**
+  (`set_speed` / `:speed` / `nle speed`, and the `R` key).
+- **Repair:** `nle purge-stumps [--track N]` / `:purge` drops sub-frame stumps
+  and snaps a drifted timeline back onto the frame grid (cumulative snap, so
+  cuts stay within half a frame).
 - **Export:** `setpts=(PTS-STARTPTS)/speed`, `atempo` (chained outside its
   range, e.g. 0.4× → 0.5 × 0.8008), source-span trim; the 1× graph stays
   byte-identical. Preview plays speed clips at 1× with a notice (mpv's EDL has
   no speed).
 
-**Deferred:** a TUI speed key (only `:speed` today); OTIO transitions/nesting;
-audio-only OTIO.
+**Deferred:** OTIO transitions/nesting; audio-only OTIO.
 
 ## Edit detect (`detect-edits`) — shipped
 
@@ -233,7 +237,6 @@ graph reads); speed + audio sync.
 
 - Pool **import** (path prompt) — not built.
 - Pool **keyframe `j`/`k`** — discussed, not built.
-- **Purge sub-frame stumps** cleanup — offered, not built.
 - `v` visual/select mode — deferred.
 - Runtime device detection (hardcoded `renderD128`) — folds into M6.
 
