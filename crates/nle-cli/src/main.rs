@@ -91,6 +91,12 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         track: usize,
     },
+    /// Drop sub-frame stumps and snap a drifted timeline to the frame grid
+    PurgeStumps {
+        /// Only this track (1-based); default: every track
+        #[arg(long, value_name = "N")]
+        track: Option<usize>,
+    },
     /// Show the timeline
     Show {
         /// Print the raw project JSON
@@ -332,6 +338,7 @@ fn main() -> Result<()> {
         ),
         Cmd::Remove { id } => cmd_remove(&cli.project, id),
         Cmd::Speed { id, rate, track } => cmd_speed(&cli.project, id, &rate, track),
+        Cmd::PurgeStumps { track } => cmd_purge_stumps(&cli.project, track),
         Cmd::Show { json } => cmd_show(&cli.project, json),
         Cmd::Media { action } => cmd_media(&cli.project, action),
         Cmd::Track { action } => cmd_track(&cli.project, action),
@@ -646,6 +653,36 @@ fn cmd_speed(project_path: &Path, id: u32, rate: &str, track: usize) -> Result<(
     history.apply(&mut project, batch, 0)?;
     save_and_reset_history(&project, project_path)?;
     println!("✓ clip #{id} → {}× (track rippled)", format_seconds(&speed));
+    Ok(())
+}
+
+fn cmd_purge_stumps(project_path: &Path, track: Option<usize>) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    let fps = project
+        .fps
+        .context("no frame rate set — add a clip first")?;
+    let indices: Vec<usize> = match track {
+        Some(n) => {
+            let i = n.saturating_sub(1);
+            if i >= project.timeline.tracks.len() {
+                bail!("no track #{n}");
+            }
+            vec![i]
+        }
+        None => (0..project.timeline.tracks.len()).collect(),
+    };
+    let mut dropped = 0usize;
+    for ti in indices {
+        let (cleaned, n) = edit::purge_stumps(&project.timeline.tracks[ti], fps);
+        project.timeline.tracks[ti].segments = cleaned;
+        dropped += n;
+    }
+    project.validate()?;
+    save_and_reset_history(&project, project_path)?;
+    println!(
+        "✓ {} — purged {dropped} sub-frame segment(s)",
+        project_path.display()
+    );
     Ok(())
 }
 

@@ -1025,6 +1025,10 @@ fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
                     let arg = other.strip_prefix("speed").unwrap_or("").trim();
                     speed_command(app, player, arg);
                 }
+                "purge" | "clean" => {
+                    let msg = purge_command(app);
+                    app.set_message(&msg);
+                }
                 other => app.set_message(&format!("unknown command: {other}  (try :q)")),
             }
             app.mode = Mode::Normal;
@@ -1890,6 +1894,29 @@ fn speed_command(app: &mut App, player: &dyn Mpv, arg: &str) {
     };
     let result = edit::set_speed_on(&app.project, ti, id, speed);
     run_edit(app, player, result);
+}
+
+/// `:purge` — drop sub-frame stumps and snap every track back onto the frame
+/// grid. Repairs a project that accumulated sub-frame drift; the topology
+/// changes, so it re-baselines the undo stack and reloads the monitor.
+fn purge_command(app: &mut App) -> String {
+    let Some(fps) = app.project.fps else {
+        return "no frame rate set — add a clip first".to_string();
+    };
+    let mut dropped = 0usize;
+    for track in &mut app.project.timeline.tracks {
+        let (cleaned, n) = edit::purge_stumps(track, fps);
+        track.segments = cleaned;
+        dropped += n;
+    }
+    if let Err(e) = app.project.validate() {
+        return format!("purge failed: {e}");
+    }
+    app.history = History::default();
+    let _ = std::fs::remove_file(History::sidecar_path(&app.path));
+    let _ = app.project.save(&app.path);
+    app.reload_requested = true;
+    format!("purged {dropped} sub-frame segment(s)")
 }
 
 /// Atomic save + view refresh. Called after every successful edit (and
@@ -5802,6 +5829,28 @@ mod tests {
         assert_eq!(c.speed, Seconds::new(1, 2));
         assert_eq!(track.segments[0].duration(), Seconds::from_integer(6));
         assert_eq!(track.start_of(1), Seconds::from_integer(6));
+    }
+
+    #[test]
+    fn purge_command_snaps_a_drifted_clip() {
+        let mut app = App::new(asset_project(), temp_project_path("purge"));
+        // Give clip #1 a fractional (drifted) duration: 60.4 frames at 30fps.
+        if let TimelineSegment::Clip(c) =
+            &mut app.project.timeline.video_track_mut().unwrap().segments[0]
+        {
+            c.asset_out = c.asset_in + Seconds::new(604, 300);
+        }
+        let msg = purge_command(&mut app);
+        assert!(msg.contains("purged"), "{msg}");
+        let TimelineSegment::Clip(c) = &app.project.timeline.video_track().unwrap().segments[0]
+        else {
+            panic!("expected clip")
+        };
+        assert_eq!(
+            c.asset_out - c.asset_in,
+            Seconds::from_integer(2),
+            "snapped to 60 frames"
+        );
     }
 
     #[test]

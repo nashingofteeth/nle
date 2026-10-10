@@ -847,6 +847,53 @@ pub fn set_speed(project: &Project, clip_id: u32, speed: Seconds) -> Result<Batc
     set_speed_on(project, video_track_index(project)?, clip_id, speed)
 }
 
+/// Snap a track's segment boundaries back onto the project frame grid and drop
+/// any segment that collapses to under one frame (a "stump"), coalescing the
+/// gaps a drop leaves adjacent. Boundaries snap *cumulatively*, so each cut
+/// stays within half a frame of where it was rather than drifting with the sum
+/// of per-segment rounding. Returns the cleaned segments and how many were
+/// dropped.
+///
+/// Repairs a project that accumulated sub-frame drift (an older lossy undo
+/// `Atom` could do this; fractional boundaries then made `snap` land edits on
+/// the wrong segment). `nle purge-stumps` / `:purge`.
+pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
+    if fps <= Seconds::from_integer(0) {
+        return (track.segments.clone(), 0);
+    }
+    let frame = Seconds::from_integer(1) / fps;
+    let snap = |t: Seconds| Seconds::new((t * fps).round().to_integer(), 1) / fps;
+    let mut pos = Seconds::from_integer(0);
+    let mut out: Vec<Segment> = Vec::with_capacity(track.segments.len());
+    let mut dropped = 0usize;
+    for seg in &track.segments {
+        let end = snap(pos + seg.duration());
+        let dur = end - pos;
+        if dur < frame {
+            dropped += 1;
+            continue;
+        }
+        let cleaned = match seg {
+            Segment::Clip(c) => Segment::Clip(Clip {
+                id: c.id,
+                asset: c.asset,
+                asset_in: c.asset_in,
+                asset_out: c.asset_in + dur * c.speed,
+                speed: c.speed,
+            }),
+            Segment::Gap(_) => Segment::Gap(Gap { duration: dur }),
+        };
+        // Dropping a stump can leave two gaps adjacent; fold them.
+        if let (Segment::Gap(g), Some(Segment::Gap(prev))) = (&cleaned, out.last_mut()) {
+            prev.duration += g.duration;
+        } else {
+            out.push(cleaned);
+        }
+        pos = end;
+    }
+    (out, dropped)
+}
+
 pub fn trim_in(project: &Project, playhead: f64) -> Result<Batch, EditError> {
     trim_in_on(project, video_track_index(project)?, playhead)
 }
@@ -4362,6 +4409,47 @@ mod tests {
         assert_eq!(split_sides(&p, dur, dur - frame / 4), (true, false));
         // A whole-frame split leaves both pieces.
         assert_eq!(split_sides(&p, dur, frame * 10), (true, true));
+    }
+
+    #[test]
+    fn purge_stumps_snaps_the_grid_and_drops_sub_frame_segments() {
+        let mut p = fixture();
+        p.fps = Some(Seconds::new(30, 1));
+        let t = p.timeline.video_track_mut().unwrap();
+        t.segments = vec![
+            // 60.4 frames of clip -> snaps to 60
+            Segment::Clip(Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::new(604, 300),
+                speed: Seconds::from_integer(1),
+            }),
+            // a 0.3-frame stump -> dropped
+            Segment::Clip(Clip {
+                id: 2,
+                asset: 1,
+                asset_in: Seconds::from_integer(5),
+                asset_out: Seconds::new(501, 100),
+                speed: Seconds::from_integer(1),
+            }),
+            // 30.6 frames of gap -> snaps to 31
+            Segment::Gap(Gap {
+                duration: Seconds::new(51, 50),
+            }),
+        ];
+        let (cleaned, dropped) =
+            purge_stumps(p.timeline.video_track().unwrap(), Seconds::new(30, 1));
+        assert_eq!(dropped, 1);
+        assert_eq!(cleaned.len(), 2);
+        let Segment::Clip(c) = &cleaned[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(c.asset_out, Seconds::from_integer(2), "60 frames");
+        let Segment::Gap(g) = &cleaned[1] else {
+            panic!("expected gap")
+        };
+        assert_eq!(g.duration, Seconds::new(31, 30), "31 frames");
     }
 
     #[test]
