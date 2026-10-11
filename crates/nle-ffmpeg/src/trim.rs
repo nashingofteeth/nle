@@ -15,8 +15,35 @@ use thiserror::Error;
 
 /// This machine's encode engines. Intel UHD 630 supports both hardware
 /// APIs (VAAPI + QSV); the CPU path is libx264.
-// TODO(M2+): detect devices at runtime instead of hardcoding the path.
-const VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+const DEFAULT_VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+
+/// The VAAPI render node. Picks the first `/dev/dri/renderD*` at runtime —
+/// the node number can change after a driver/kernel update — overridable
+/// with `NLE_VAAPI_DEVICE`. Falls back to `renderD128` when the directory
+/// can't be read.
+pub fn vaapi_device() -> String {
+    if let Ok(p) = std::env::var("NLE_VAAPI_DEVICE") {
+        return p;
+    }
+    pick_render_node(read_render_nodes()).unwrap_or_else(|| DEFAULT_VAAPI_DEVICE.to_string())
+}
+
+/// Lowest-numbered render node, as an absolute path.
+fn pick_render_node(mut nodes: Vec<String>) -> Option<String> {
+    nodes.sort();
+    nodes.into_iter().next().map(|n| format!("/dev/dri/{n}"))
+}
+
+fn read_render_nodes() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/dev/dri") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("renderD"))
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Encoder {
@@ -72,7 +99,7 @@ pub fn device_args(encoder: Encoder, hw_decode: bool) -> Vec<String> {
         Encoder::Cpu => {}
         Encoder::Vaapi => {
             a.push("-init_hw_device".into());
-            a.push(format!("vaapi=va:{VAAPI_DEVICE}"));
+            a.push(format!("vaapi=va:{}", vaapi_device()));
             a.push("-filter_hw_device".into());
             a.push("va".into());
         }
@@ -218,6 +245,22 @@ mod tests {
         // `--` guards the positional output against option-injection
         assert_eq!(args.last().map(String::as_str), Some("out.mp4"));
         assert_eq!(args[args.len() - 2], "--");
+    }
+
+    #[test]
+    fn vaapi_device_picks_the_lowest_render_node() {
+        assert_eq!(
+            pick_render_node(vec!["renderD129".into(), "renderD128".into()]),
+            Some("/dev/dri/renderD128".into())
+        );
+        assert_eq!(pick_render_node(vec![]), None);
+        assert!(vaapi_device().starts_with("/dev/dri/"));
+    }
+
+    #[test]
+    fn vaapi_args_name_a_device() {
+        let line = device_args(Encoder::Vaapi, false).join(" ");
+        assert!(line.contains("vaapi=va:/dev/dri/"), "{line}");
     }
 
     #[test]
