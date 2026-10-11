@@ -12,8 +12,10 @@ editing** (track rows, active track, overlay video + mixed audio), and
 undo/redo — auto-saved, instant preview. The CLI can also **import a CMX3600
 EDL or an OpenTimelineIO (`.otio`) timeline**, set a **clip's playback
 speed**, **detect the cuts in a rendered file** (`detect-edits`), and **purge
-sub-frame stumps** (`purge-stumps`). Full roadmap and current status:
-`PLAN.md`.
+sub-frame stumps** (`purge-stumps`). **Every action is reachable from both
+sides** — the TUI's `:cmd` line and the CLI share one grammar and one undo
+history (see "One action catalog, three front-ends"). Full roadmap and
+current status: `PLAN.md`.
 
 ## Usage
 
@@ -39,8 +41,15 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :track add video|audio · :track mute [N] · :track rm N ·
 #              navigation, edits, and the monitor all follow the active
 #              track (the timeline draws one row per track)
-#   commands:  :speed <rate> (or R) · :purge (drop sub-frame stumps, snap the
-#              grid) · :import PATH… · :track … · :help · :q quit
+#   commands:  the :cmd line is the CLI grammar, flag for flag — every
+#              action has both spellings:
+#              :trim-in|out [--ripple] · :split · :gap [--frames N|--dur T] ·
+#              :delete|--yank [--at T|--clip N|--seg N] · :paste [--ripple] ·
+#              :extend --edge in|out --to T [--ripple] · :speed RATE (or R) ·
+#              :undo · :redo · :purge · :track … · :media ls|rm · :import ·
+#              :add · :show · :export -o FILE · :detect FILE · :edl-import ·
+#              :otio-import · :help · :q quit
+#              (--at defaults to the playhead, --track to the active track)
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of
 #              a cut (bracket opens toward its side) ·
@@ -84,6 +93,25 @@ $N import-otio sequence.otio            # OpenTimelineIO (.otio) → project
 $N speed 3 0.5                          # clip #3 at half speed (--track N, 1-based)
 $N purge-stumps                        # drop sub-frame stumps; snap to the grid
 #   --track N cleans just that track (1-based).
+
+# Timeline edits from the shell — the same actions as the TUI's keys,
+# addressed explicitly (see `nle show` for clip ids and [seg] indices):
+$N split --at 3                        # cut at 3 s (TUI: s)
+$N trim-in --at 2 --ripple             # move the in-edge to 2, close up (TUI: I)
+$N trim-out --at 6                     # move the out-edge (TUI: o / O --ripple)
+$N gap --at 4 --frames 30              # insert 30 frames of gap (TUI: _)
+$N delete --at 5                       # leave a gap behind (TUI: dd)
+$N delete --clip 3 --ripple            # by clip id, close up (TUI: D)
+$N delete --seg 2                      # by segment index from `nle show`
+$N yank --clip 3                       # into the shared register (TUI: yy)
+$N paste --at 5 --ripple               # from the register (TUI: p / P --ripple)
+$N extend --clip 3 --edge out --to 8   # move one edge (the extend-mode commit)
+$N extend --seg 4 --edge in --to 2 --ripple
+$N undo                                # works on TUI edits too; redo likewise
+$N show                                # [i] = --seg index, #n = --clip id
+#   --track N (1-based) picks the track for position-based commands;
+#   --clip N finds its own track. Times are seconds or timecodes; `--to`
+#   may be negative (a gap head reaching back past time 0).
 $N detect-edits edit.mov               # rebuild a project from a rendered file
 $N detect-edits edit.mov --list        # print the detected cuts, write nothing
 $N detect-edits edit.mov --append      # append the shots to an existing project
@@ -112,6 +140,29 @@ Times accept plain seconds (`12.5`) or timecodes (`0:01:23.500`).
 Track numbers are 1-based (`v1`, `a1`), matching `nle track ls` and the TUI.
 The project file (`nle.json`) is plain JSON — human-readable, vim-editable,
 and drift-free.
+
+## One action catalog, three front-ends
+
+Everything the timeline can do is one `Action` (in `nle-core`), executed
+by one runner — so the three spellings can't drift apart:
+
+| front-end | for | example |
+|---|---|---|
+| TUI keys | high-frequency actions | `s`, `dd`, `p`, `e`/`E`, `u` |
+| TUI `:` line | every action | `:delete --at 3 --ripple` |
+| CLI | every action | `nle delete --at 3 --ripple` |
+
+The `:cmd` line takes the CLI's flags verbatim (with `--at` defaulting to
+the playhead, `--track` to the active track, `--clip` to the clip under
+the playhead). Edits record undo history on both sides: `nle undo` undoes
+a TUI edit and vice versa (`nle.history.json`, both stacks). The yank
+register is shared too (`nle.clipboard.json`): `nle yank` then `p` in the
+TUI, or `yy` in the TUI then `nle paste` from a script.
+
+Commands that need processes (probe, export, detect, EDL/OTIO import) are
+CLI-only in the model sense, but the TUI spells them too (`:export`,
+`:detect`, `:edl-import`, `:otio-import`, `:add`) — long ones run in a
+worker while the monitor keeps playing.
 
 ## Export presets (planned, M6)
 

@@ -2,10 +2,10 @@
   "version": 1,
   "segment": {
     "Clip": {
-      "id": 42,
+      "id": 1,
       "asset": 1,
-      "asset_in": "0/1",
-      "asset_out": "2/1",
+      "asset_in": "1/1",
+      "asset_out": "4/1",
       "speed": "1/1"
     }
   }

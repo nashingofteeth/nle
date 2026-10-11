@@ -137,6 +137,32 @@ for t in 0.5 1.5 2.5 3.5 4.5; do
 done
 rm -f pixel.raw
 
+echo "== agent chain: shell edits + undo + shared register =="
+rm -f agent.json agent.history.json agent.clipboard.json
+$N --project agent.json init --force >/dev/null
+$N --project agent.json import red.mp4 blue.mp4 >/dev/null
+$N --project agent.json add red.mp4  --in 0 --out 4 >/dev/null   # #1 0–4
+$N --project agent.json add blue.mp4 --at 4 --in 0 --out 4 >/dev/null  # #2 4–8
+$N --project agent.json split --at 2                             # #1 0–2, #3 2–4
+$N --project agent.json delete --clip 1 --ripple
+$N --project agent.json undo                                     # the delete undoes
+$N --project agent.json gap --at 4 --frames 30                   # gap 4–5
+$N --project agent.json yank --clip 3
+$N --project agent.json paste --at 5 --ripple                    # red 5–7
+$N --project agent.json show
+$N --project agent.json export -o agent.mp4 >/dev/null
+echo "  expect: red 0–4 · black 4–5 · red 5–7 · blue 7–11"
+for t in 1 4.5 6 9; do
+  ffmpeg -v error -y -ss "$t" -i agent.mp4 -frames:v 1 -f rawvideo -pix_fmt rgb24 pixel.raw
+  printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
+done
+rm -f pixel.raw
+if [ -f agent.clipboard.json ]; then
+  echo "  ✓ shared register written (nle yank → nle paste)"
+else
+  echo "  ✗ no register sidecar"; exit 1
+fi
+
 echo "== log check (NLE_LOG end-to-end) =="
 LOG="$(pwd)/nle-log-check.txt"
 rm -f "$LOG" log-check.json
