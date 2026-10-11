@@ -659,6 +659,8 @@ fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('G') | KeyCode::Char('$') => pool_seek_end(app, player),
         KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
         KeyCode::Char('d') => remove_from_pool(app, player),
+        // Import a file into the pool: opens the command line pre-filled.
+        KeyCode::Char('i') => app.mode = Mode::Command("import ".to_string()),
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         // Preview transport (asset seconds).
@@ -1006,6 +1008,9 @@ fn track_command(app: &mut App, cmd: &str) -> String {
     }
 }
 
+/// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
+const COMMAND_HELP: &str = "commands — :track · :speed · :purge · :import · :w · :q";
+
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale
 /// `Change::Assets` entry would otherwise refuse to apply).
@@ -1071,6 +1076,7 @@ fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
                     let msg = import_command(app, other);
                     app.set_message(&msg);
                 }
+                "help" | "?" => app.set_message(COMMAND_HELP),
                 other => app.set_message(&format!("unknown command: {other}  (try :q)")),
             }
             app.mode = Mode::Normal;
@@ -2746,7 +2752,14 @@ fn render_message(f: &mut Frame, area: Rect, app: &App) {
 /// The mode-specific key cheat-sheet (single source of truth for hints).
 fn hints_for(app: &App) -> Vec<&'static str> {
     if let Mode::Command(_) = app.mode {
-        return vec!["type a command · enter run · esc cancel · :q quit"];
+        return vec![
+            "type a command · enter run · esc cancel",
+            ":track add video|audio · mute [N] · rm N",
+            ":speed N — retime the clip under the playhead",
+            ":purge — snap to frames, drop stumps, clamp to media",
+            ":import PATH… — probe into the media pool",
+            ":help · :q quit",
+        ];
     }
     if matches!(app.mode, Mode::Extend(_)) {
         return vec![
@@ -2759,7 +2772,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         return vec![
             "media pool — the monitor previews the selected file",
             "j/k assets · { } list ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
-            "space play · enter insert at playhead · d remove · u undo · m/esc close",
+            "space play · enter insert · i import · d remove · u undo · m/esc close",
             "tracks     t/T target · <N>t jump · insert goes to the active track",
         ];
     }
@@ -6069,5 +6082,34 @@ mod tests {
         assert!(!is_pool(&app));
         handle_key(&mut app, &fake, key('m')); // reopen
         assert_eq!(pool_sel(&app), Some(1), "reopened on the last row");
+    }
+
+    // `i` in the pool opens the import path prompt (command line pre-filled).
+    #[test]
+    fn pool_i_opens_the_import_prompt() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.loaded = true;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('m')); // open the pool
+        handle_key(&mut app, &fake, key('i'));
+        assert_eq!(app.mode, Mode::Command("import ".to_string()));
+    }
+
+    // `:help` names the available commands.
+    #[test]
+    fn help_command_lists_commands() {
+        let mut app = App::new(asset_project(), temp_project_path("help"));
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key(':'));
+        for c in "help".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(app.message.contains(":import"), "{}", app.message);
+        assert!(app.message.contains(":track"), "{}", app.message);
     }
 }
