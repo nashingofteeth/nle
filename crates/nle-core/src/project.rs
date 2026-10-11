@@ -12,14 +12,14 @@ use tempfile::NamedTempFile;
 use thiserror::Error;
 
 use crate::media::RawProbe;
-use crate::time::{Seconds, rational_ser};
+use crate::time::{Seconds, grid_time, rational_ser, secs_f64};
 use crate::timeline::{Segment, Timeline, TimelineError};
 
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
 /// never silently misread. v3 added the per-track `muted` flag;
-/// v4 added the per-clip `speed` rate.
-pub const PROJECT_VERSION: u32 = 4;
+/// v4 added the per-clip `speed` rate; v5 added the stored playhead.
+pub const PROJECT_VERSION: u32 = 5;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -89,6 +89,11 @@ pub struct Project {
     pub media: Vec<Asset>,
     #[serde(default)]
     pub timeline: Timeline,
+    /// The shared playhead (`nle seek`, the TUI's position) — stored so a
+    /// shell and the TUI can hand the cursor back and forth. Session
+    /// state, not edit state: no edit op reads it (they take `--at`).
+    #[serde(default, with = "rational_ser")]
+    pub playhead: Seconds,
 }
 
 impl Default for Project {
@@ -105,7 +110,19 @@ impl Project {
             video: None,
             media: Vec::new(),
             timeline: Timeline::new(),
+            playhead: Seconds::from_integer(0),
         }
+    }
+
+    /// Move the stored playhead to `at`: snapped onto the frame grid and
+    /// clamped into the timeline (the last representable position is
+    /// `end - 1/fps`, but `end` is a valid parking spot for an empty tail).
+    /// Returns where it landed, in seconds.
+    pub fn set_playhead(&mut self, at: f64) -> f64 {
+        let grid = grid_time(self.fps.as_ref(), at);
+        let landed = grid.clamp(Seconds::from_integer(0), self.timeline.end());
+        self.playhead = landed;
+        secs_f64(&landed)
     }
 
     pub fn load(path: &Path) -> Result<Self, ProjectError> {
@@ -383,6 +400,24 @@ mod tests {
         p.save(&path).unwrap();
         let loaded = Project::load(&path).unwrap();
         assert_eq!(p, loaded);
+    }
+
+    #[test]
+    fn the_playhead_snaps_to_the_grid_and_clamps_into_the_timeline() {
+        let mut p = sample_project();
+        p.fps = Some(Seconds::new(30000, 1001));
+        assert_eq!(p.set_playhead(-5.0), 0.0, "never before the start");
+        let total = secs_f64(&p.timeline.end());
+        assert_eq!(p.set_playhead(total + 10.0), total, "never past the end");
+        // An off-grid request lands on the project's frame grid.
+        let landed = p.set_playhead(1.0005);
+        let fps = secs_f64(&p.fps.unwrap());
+        let frames = landed * fps;
+        assert!(
+            (frames - frames.round()).abs() < 1e-6,
+            "{landed} s is not on the {fps} fps grid"
+        );
+        assert_eq!(secs_f64(&p.playhead), landed, "the stored value agrees");
     }
 
     #[test]

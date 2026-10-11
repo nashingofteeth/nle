@@ -26,7 +26,7 @@ use nle_core::otio::{self, OtioItem};
 use nle_core::time::{parse_signed_time, parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 use nle_core::{
-    Action, Asset, Edge, GapLen, Project, Seconds, Target, VideoSettings, format_seconds,
+    Action, Asset, Edge, GapLen, Project, Seconds, Target, VideoSettings, format_seconds, frame_of,
     load_register, parse_rate, parse_time, run_action, save_register, track_label,
 };
 use nle_ffmpeg::detect::{DetectOptions, detect};
@@ -237,6 +237,12 @@ enum Cmd {
         /// Print the raw project JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Show or move the stored playhead (shared with the TUI)
+    Seek {
+        /// Where to move it (seconds or timecode); omit to print it
+        #[arg(value_name = "TIME")]
+        at: Option<String>,
     },
     /// Media pool: list assets and their usage
     Media {
@@ -699,6 +705,7 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Show { json } => return cmd_show(&cli.project, *json),
+        Cmd::Seek { at } => return cmd_seek(&cli.project, at.as_deref()),
         Cmd::Track {
             action: TrackCmd::Ls,
         } => return cmd_track_ls(&cli.project),
@@ -841,7 +848,7 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
     )?;
     player.observe()?;
     let edl = preview::build_composite_edl(&project)?;
-    player.load(&edl, None);
+    player.load(&edl, Some(secs_f64(&project.playhead)));
     tui::run(project, project_path.to_path_buf(), player)?;
     Ok(())
 }
@@ -1053,6 +1060,29 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `nle seek [TIME]` — move the stored playhead (snapped to the frame grid,
+/// clamped into the timeline) or print it. The TUI opens where it lands.
+fn cmd_seek(project_path: &Path, at: Option<&str>) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    let Some(s) = at else {
+        println!("{}", format_seconds(&project.playhead));
+        return Ok(());
+    };
+    let t = parse_signed_time(s).with_context(|| format!("invalid time {s:?}"))?;
+    let landed = project.set_playhead(secs_f64(&t));
+    project.save(project_path)?;
+    log::line(&format!("seek -> {landed} s"));
+    let frame = frame_of(project.fps.as_ref(), landed);
+    match project.fps {
+        Some(_) => println!(
+            "✓ playhead → {} s (f{frame})",
+            format_seconds(&project.playhead)
+        ),
+        None => println!("✓ playhead → {} s", format_seconds(&project.playhead)),
+    }
+    Ok(())
+}
+
 /// The human timeline report behind `nle show` (and the TUI's `:show`):
 /// a summary line, then one line per segment (`[i]` is the segment index
 /// `--seg` addresses). A trailing newline.
@@ -1076,6 +1106,7 @@ pub(crate) fn show_report(project: &Project) -> String {
     if let Some(v) = &project.video {
         out += &format!(" · {}×{}", v.width, v.height);
     }
+    out += &format!(" · at {} s", format_seconds(&project.playhead));
     out.push('\n');
 
     for (ti, track) in project.timeline.tracks.iter().enumerate() {
@@ -2351,6 +2382,39 @@ mod tests {
 
     /// A CLI edit records history — `nle undo` undoes it, and the
     /// playhead attribution comes back with the entry.
+    /// `nle seek` stores a snapped, clamped playhead — the TUI opens there.
+    #[test]
+    fn seek_stores_a_clamped_playhead() {
+        let dir = std::env::temp_dir().join(format!("nle-seek-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.json");
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset(PathBuf::from("/media/red.mp4"), RawProbe::default());
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            a,
+            Seconds::from_integer(0),
+            Seconds::from_integer(4),
+        ))];
+        p.save(&path).unwrap();
+
+        cmd_seek(&path, Some("2")).unwrap();
+        assert_eq!(
+            Project::load(&path).unwrap().playhead,
+            Seconds::from_integer(2)
+        );
+        // Past the end clamps into the timeline…
+        cmd_seek(&path, Some("99")).unwrap();
+        assert_eq!(
+            Project::load(&path).unwrap().playhead,
+            Seconds::from_integer(4)
+        );
+        // …and an off-grid request snaps to a frame (1.02 s @ 30 = f30.6).
+        cmd_seek(&path, Some("1.02")).unwrap();
+        assert_eq!(Project::load(&path).unwrap().playhead, Seconds::new(31, 30));
+    }
+
     #[test]
     fn cli_edits_go_through_the_undo_history() {
         let dir = std::env::temp_dir().join(format!("nle-cli-test-{}", std::process::id()));

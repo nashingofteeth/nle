@@ -485,6 +485,8 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     app.history = history;
     // The shared register: what `nle yank` (or an earlier session) left.
     app.register = load_register(&app.path);
+    // Open where `nle seek` (or the last session) left the playhead.
+    app.playhead = secs(&app.project.playhead);
     if let Some(notice) = preview::speed_notice(&app.project) {
         app.set_message(&notice);
     }
@@ -564,6 +566,8 @@ fn reload_project(app: &mut App, player: &dyn Mpv) -> anyhow::Result<()> {
         .active_track
         .min(app.project.timeline.tracks.len().saturating_sub(1));
     app.history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
+    // Adopt the file's playhead: a shell may have moved it (`nle seek`).
+    app.playhead = secs(&app.project.playhead);
     let edl = preview::build_composite_edl(&app.project)?;
     player.load(&edl, Some(app.playhead));
     Ok(())
@@ -937,7 +941,7 @@ fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale
@@ -998,6 +1002,7 @@ fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
             None
         }
         "add" => add_command(app, player, &mut f),
+        "seek" => seek_command(app, player, &mut f),
         "export" => export_command(app, &mut f),
         "detect" => detect_command(app, &mut f),
         "edl-import" => edl_import_command(app, &mut f),
@@ -1081,6 +1086,33 @@ fn add_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option
         },
     );
     None
+}
+
+/// `:seek T` — move the playhead (and the monitor) to T. The stored
+/// playhead follows immediately, so a shell and the TUI share one cursor
+/// (`nle seek` reads the same slot).
+fn seek_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option<String> {
+    let at = match f.positional().or_else(|| f.take("at")) {
+        Some(v) => v,
+        None => return Some("usage: :seek T".to_string()),
+    };
+    if let Err(e) = f.finish(":seek T") {
+        return Some(e.to_string());
+    }
+    let t = match nle_core::parse_signed_time(&at) {
+        Ok(t) => secs(&t),
+        Err(e) => return Some(format!("invalid time {at:?} ({e})")),
+    };
+    // Same clamp as every other seek: into the timeline.
+    app.seek_to(player, t.clamp(0.0, app.total()));
+    app.project.set_playhead(app.playhead);
+    if let Err(e) = app.project.save(&app.path) {
+        return Some(format!("save failed: {e}"));
+    }
+    Some(format!(
+        "playhead → {}",
+        fmt_timecode(app.playhead, app.project.fps.as_ref())
+    ))
 }
 
 /// `:export -o FILE [--encoder cpu|vaapi|qsv] [--crf N] [--preset P]
@@ -2061,6 +2093,9 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
 /// whichever view is showing: the pool's raw file when the pool is open, or
 /// the timeline EDL (with the playhead baked into the load) otherwise.
 fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
+    // The stored playhead follows the session — it is what `nle seek`
+    // reads and where the next TUI session opens.
+    app.project.set_playhead(app.playhead);
     if let Err(e) = app.project.save(&app.path) {
         app.set_message(&format!("save failed: {e}"));
         return;
@@ -2751,7 +2786,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
             "edits   :split :trim-in|out :delete :yank :paste :gap :extend :speed :undo :redo",
             "tracks  :track add video|audio · :track mute [N] · :track rm N · :track ls",
             "media   :import PATH… · :add FILE · :media ls · :media rm N",
-            "more    :show :purge :detect :edl-import :otio-import :export · :help · :q",
+            "more    :show :seek T :purge :detect :edl-import :otio-import :export · :help · :q",
         ];
     }
     if matches!(app.mode, Mode::Extend(_)) {
@@ -3950,6 +3985,35 @@ mod tests {
             nle_core::register_path(&path).exists(),
             "the register sidecar is written on yank"
         );
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    // `:seek` moves the playhead and the stored cursor in one step, so a
+    // shell and the TUI share one position.
+    #[test]
+    fn seek_moves_the_playhead_and_persists_it() {
+        let path = temp_project_path("seek");
+        asset_project().save(&path).unwrap();
+        let mut app = App::new(asset_project(), path.clone());
+        app.loaded = true;
+        assert_eq!(cmd(&mut app, "seek 2"), "playhead → 00:02:00");
+        assert_eq!(app.playhead, 2.0);
+        assert_eq!(
+            Project::load(&path).unwrap().playhead,
+            Seconds::from_integer(2)
+        );
+        // Past the end clamps, like every other seek.
+        cmd(&mut app, "seek 999");
+        assert_eq!(app.playhead, app.total());
+        // An edit re-saves the cursor with the session position.
+        cmd(&mut app, "seek 2");
+        cmd(&mut app, "split");
+        assert_eq!(
+            Project::load(&path).unwrap().playhead,
+            Seconds::from_integer(2)
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
         let _ = std::fs::remove_file(nle_core::register_path(&path));
     }
 

@@ -232,14 +232,20 @@ plainly.
 
 ## Interaction conventions added this session
 
-- **One action catalog, three front-ends.** Every project-mutating action is
+- **One action catalog, three front-ends.** Every timeline-editing action is
   an `Action` (`nle-core/src/action.rs`) run by `run_action`; keybinds cover
   the high-frequency ones, the `:cmd` line covers **all** of them, and the
   CLI has a matching subcommand. The `:cmd` grammar *is* the CLI grammar
   (same flags; `--at`/`--track`/`--clip` default to the playhead/active
   track/clip-under in the TUI). A new action = a new `Action` variant + a
   slot in `Action::slot` (the match is exhaustive) + both parity tests — they
-  fail loudly if a spelling misses it.
+  fail loudly if a spelling misses it. **Session state is not an action**:
+  the playhead (`nle seek`/`:seek`) and the yank register are shared slots,
+  not catalog entries.
+- **The message line has one writer.** `run_action` sets the edit's notice,
+  then `persist_and_refresh` runs; a failure there **appends**
+  (`{notice} — preview rebuild failed: …`) instead of replacing it — plumbing
+  must not erase what happened to the timeline.
 - **`e`/`E` = replace/ripple**; case encodes the ripple flag everywhere.
 - **`keys` cheat-sheet (`hints_for`) is the single source of mode hints**;
   the **`message`** panel shows the latest notice only. Don't put the hint

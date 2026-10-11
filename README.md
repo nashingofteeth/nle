@@ -47,8 +47,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :delete|--yank [--at T|--clip N|--seg N] · :paste [--ripple] ·
 #              :extend --edge in|out --to T [--ripple] · :speed RATE (or R) ·
 #              :undo · :redo · :purge · :track … · :media ls|rm · :import ·
-#              :add · :show · :export -o FILE · :detect FILE · :edl-import ·
-#              :otio-import · :help · :q quit
+#              :add · :show · :seek T · :export -o FILE · :detect FILE ·
+#              :edl-import · :otio-import · :help · :q quit
 #              (--at defaults to the playhead, --track to the active track)
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of
@@ -112,6 +112,10 @@ $N show                                # [i] = --seg index, #n = --clip id
 #   --track N (1-based) picks the track for position-based commands;
 #   --clip N finds its own track. Times are seconds or timecodes; `--to`
 #   may be negative (a gap head reaching back past time 0).
+$N seek 12.5                           # park the shared playhead (or print it)
+#   Stored in the project, snapped to the frame grid and clamped into the
+#   timeline. The TUI opens here; `nle seek` alone prints it. `nle show`
+#   ends its summary with `at N s`.
 $N detect-edits edit.mov               # rebuild a project from a rendered file
 $N detect-edits edit.mov --list        # print the detected cuts, write nothing
 $N detect-edits edit.mov --append      # append the shots to an existing project
@@ -157,7 +161,9 @@ the playhead, `--track` to the active track, `--clip` to the clip under
 the playhead). Edits record undo history on both sides: `nle undo` undoes
 a TUI edit and vice versa (`nle.history.json`, both stacks). The yank
 register is shared too (`nle.clipboard.json`): `nle yank` then `p` in the
-TUI, or `yy` in the TUI then `nle paste` from a script.
+TUI, or `yy` in the TUI then `nle paste` from a script. The **playhead** is
+the third shared slot (`nle.json`'s `playhead`): `nle seek T` / `:seek T`
+move it, the TUI opens there and re-saves its position after every edit.
 
 Commands that need processes (probe, export, detect, EDL/OTIO import) are
 CLI-only in the model sense, but the TUI spells them too (`:export`,
