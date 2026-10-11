@@ -230,8 +230,13 @@ below.)
   `delete --clip` → `undo` → `gap` → `yank` → `paste` → `export`) with pixel
   checks and a register check.
 
-**Deferred:** `nle seek` / a persistent playhead (stateless `--at` won);
-`nle paste --from-clip` (the register covers it); TUI `:probe`.
+- **The stored playhead** (`PROJECT_VERSION` 5): `nle seek T` / `:seek T` move
+  a shared cursor — snapped to the frame grid, clamped into the timeline; the
+  TUI opens there and re-saves its position after every edit, and a reload
+  adopts the file's value. `nle show` reports `at N s`. Session state, not a
+  catalog action (no history entry; `--at` stays explicit).
+
+**Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
 
 ## M5 — transitions, effects, proxies (planned)
 

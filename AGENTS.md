@@ -121,6 +121,11 @@ plainly.
   the project; `yy`/`nle yank` write it and `p`/`nle paste` read it, so a
   shell and the TUI hand segments back and forth. Convenience, never
   critical: a missing or version-skewed register reads as empty.
+- **The playhead is stored in the project** (`Project.playhead`, v5) — the
+  shared cursor `nle seek`/`:seek` move. Snapped to the frame grid and
+  clamped into the timeline; the TUI opens there, re-saves it in
+  `persist_and_refresh`, and adopts the file's value on reload. Session
+  state: no history entry, and edits still take explicit `--at`.
 - **Frames are 0-based everywhere** (`f0` = first frame; timecode `:FF`
   matches notices). A file/timeline of `dur` spans `[0, dur)`; the last
   representable position is `dur - 1/fps` — clamp seeks there.

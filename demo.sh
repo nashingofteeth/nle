@@ -149,6 +149,8 @@ $N --project agent.json undo                                     # the delete un
 $N --project agent.json gap --at 4 --frames 30                   # gap 4–5
 $N --project agent.json yank --clip 3
 $N --project agent.json paste --at 5 --ripple                    # red 5–7
+$N --project agent.json seek 2.5
+$N --project agent.json seek                                     # prints the cursor
 $N --project agent.json show
 $N --project agent.json export -o agent.mp4 >/dev/null
 echo "  expect: red 0–4 · black 4–5 · red 5–7 · blue 7–11"
@@ -157,6 +159,11 @@ for t in 1 4.5 6 9; do
   printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
 done
 rm -f pixel.raw
+if $N --project agent.json show | grep -q "at 2.5 s"; then
+  echo "  ✓ shared playhead stored (nle seek → nle show)"
+else
+  echo "  ✗ playhead not stored"; exit 1
+fi
 if [ -f agent.clipboard.json ]; then
   echo "  ✓ shared register written (nle yank → nle paste)"
 else
