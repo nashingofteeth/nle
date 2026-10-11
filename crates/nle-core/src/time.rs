@@ -99,6 +99,19 @@ pub fn frame_to_secs(fps: Option<&Seconds>, frame: i64) -> f64 {
     }
 }
 
+/// A position snapped onto the frame grid, as exact `Seconds` — the grid
+/// the model's `index_at`/history use. Without a frame rate the grid is
+/// whole seconds.
+pub fn grid_time(fps: Option<&Seconds>, t: f64) -> Seconds {
+    match fps {
+        Some(fps) => {
+            let n = (t * secs_f64(fps)).round() as i64;
+            Seconds::new(n, 1) / *fps
+        }
+        None => Seconds::from_integer(t.round() as i64),
+    }
+}
+
 /// Format for display and for ffmpeg arguments (25/2 → "12.5").
 /// Math stays rational; we only touch f64 at this boundary.
 pub fn format_seconds(t: &Seconds) -> String {

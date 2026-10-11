@@ -5,6 +5,7 @@
 //! spawned (the project save/load is I/O but pure-data I/O).
 //! Keeping it pure means it can be unit-tested exhaustively and instantly.
 
+pub mod action;
 pub mod detect;
 pub mod edit;
 pub mod edl;
@@ -15,6 +16,10 @@ pub mod project;
 pub mod time;
 pub mod timeline;
 
+pub use action::{
+    Action, Edge, Outcome, ParseDefaults, ParseError, Target, load_register, register_path,
+    run_action, save_register,
+};
 pub use detect::{Span, reconstruct};
 pub use edit::{
     Atom, Batch, Change, EditError, EditOp, History, absorb_outward, clamp_to_media,
@@ -30,7 +35,7 @@ pub use media::{RawFormat, RawProbe, RawStream};
 pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
 pub use project::{Asset, Project, ProjectError, VideoSettings};
 pub use time::{
-    Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, nominal_fps,
-    parse_rate, parse_time, parse_timecode, secs_f64, timecode_to_frames,
+    Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, grid_time,
+    nominal_fps, parse_rate, parse_time, parse_timecode, secs_f64, timecode_to_frames,
 };
 pub use timeline::{Clip, Timeline, TimelineError, Track, TrackKind};

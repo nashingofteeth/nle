@@ -1626,18 +1626,11 @@ fn fallback_position(project: &Project, a: &MediaAnchor, ti: usize) -> f64 {
 
 /// The playhead's position on the project's frame grid, as Seconds.
 fn grid_time(project: &Project, t: f64) -> Seconds {
-    match project.fps.as_ref() {
-        Some(fps) => {
-            let n = (t * secs(fps)).round() as i64;
-            Seconds::new(n, 1) / *fps
-        }
-        None => Seconds::from_integer(t.round() as i64),
-    }
+    nle_core::grid_time(project.fps.as_ref(), t)
 }
 
-/// `i`/`I`/`o`/`O` routing: on a gap every case ripples (the gap just
-/// shortens and the followers slide left); on a clip, `i`/`o` leave the
-/// trimmed material as a gap and `I`/`O` ripple.
+/// `i`/`I`/`o`/`O` routing — the shared [`edit::trim_at_on`], renamed for
+/// the key handlers' call sites.
 fn trim_key(
     project: &Project,
     ph: f64,
@@ -1645,28 +1638,7 @@ fn trim_key(
     ripple: bool,
     ti: usize,
 ) -> Result<Batch, EditError> {
-    // At a segment's edge the trim would consume it whole, so delete it
-    // instead. `o`/`O` at a segment's start; `i`/`I` at its end.
-    if let Some(si) = edit::trim_consume_target_on(project, ti, ph, out) {
-        return edit::delete_segment_on(project, ti, si, ripple);
-    }
-    if edit::is_gap_at_on(project, ti, ph) {
-        if out {
-            edit::ripple_gap_out_on(project, ti, ph)
-        } else {
-            edit::ripple_gap_in_on(project, ti, ph)
-        }
-    } else if out {
-        if ripple {
-            edit::trim_out_ripple_on(project, ti, ph)
-        } else {
-            edit::trim_out_on(project, ti, ph)
-        }
-    } else if ripple {
-        edit::trim_in_ripple_on(project, ti, ph)
-    } else {
-        edit::trim_in_on(project, ti, ph)
-    }
+    edit::trim_at_on(project, ti, ph, out, ripple)
 }
 
 /// Apply an edit batch, then save + rebuild the preview so the monitor

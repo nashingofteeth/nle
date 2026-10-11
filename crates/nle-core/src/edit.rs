@@ -61,6 +61,12 @@ pub enum EditError {
     NothingToUndo,
     #[error("nothing to redo")]
     NothingToRedo,
+    #[error("the yank register is empty — yank a segment first")]
+    RegisterEmpty,
+    #[error("can't remove the only video track")]
+    LastVideoTrack,
+    #[error("{0}")]
+    Extend(String),
     #[error("history entry does not apply: {0}")]
     History(String),
     #[error("no frame rate set — add a clip first")]
@@ -1106,6 +1112,40 @@ pub fn absorb_outward(
 }
 
 // ------------------------------------------------------------ operations
+
+/// The trim keys' routing (`i`/`I`/`o`/`O`): on a gap every case ripples
+/// (the gap just shortens and the followers slide left); on a clip,
+/// `i`/`o` leave the trimmed material as a gap and `I`/`O` ripple. At a
+/// segment's edge the trim would consume it whole, so delete it instead —
+/// `o`/`O` at a segment's start, `i`/`I` at its end.
+pub fn trim_at_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+    out: bool,
+    ripple: bool,
+) -> Result<Batch, EditError> {
+    if let Some(si) = trim_consume_target_on(project, track, playhead, out) {
+        return delete_segment_on(project, track, si, ripple);
+    }
+    if is_gap_at_on(project, track, playhead) {
+        if out {
+            ripple_gap_out_on(project, track, playhead)
+        } else {
+            ripple_gap_in_on(project, track, playhead)
+        }
+    } else if out {
+        if ripple {
+            trim_out_ripple_on(project, track, playhead)
+        } else {
+            trim_out_on(project, track, playhead)
+        }
+    } else if ripple {
+        trim_in_ripple_on(project, track, playhead)
+    } else {
+        trim_in_on(project, track, playhead)
+    }
+}
 
 /// `i` — trim the in-edge of whatever is under the playhead:
 /// - clip: its head is cut at the playhead and a gap of the trimmed
