@@ -233,16 +233,13 @@ graph reads); speed + audio sync.
 - `balanced` — libx264, good quality/speed trade
 - `max` — libx265 / SVT-AV1, slow, archival
 
-## Open / deferred (post-M3)
+## Open / deferred
 
-- Pool **import** (path prompt) — not built.
 - Pool **keyframe `j`/`k`** — discussed, not built.
 - `v` visual/select mode — deferred.
-- Runtime device detection (hardcoded `renderD128`) — folds into M6.
 
 ## Open decisions (non-blocking)
 
 1. M6 encode-tier presets (`preview`/`balanced`/`max`).
 2. `v` visual/select semantics.
 3. M7 GUI technology.
-4. Runtime device detection (→ M6 machine config).

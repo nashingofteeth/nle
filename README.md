@@ -54,8 +54,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   misc:      m media pool — takes over the info pane: asset list
 #              (j/k, { }) + probe metadata; the monitor previews the file
 #              (space play, h/l ±1s, f/F frame, gg/0 start, G/$ end);
-#              enter inserts it, d removes, u undoes ·
-#              r reload project · :q quit · q quit
+#              enter inserts it, i imports a file, d removes, u undoes ·
+#              r reload project · : cmd (:help lists them) · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 # The bottom "keys" panel always shows the current mode's cheat-sheet and the
 # latest notice.
@@ -93,6 +93,7 @@ $N detect-edits edit.mov --append      # append the shots to an existing project
 #   structure, not the sources.
 $N export -o final.mp4                 # libx264, frame-exact
 $N export -o fast.mp4 --encoder vaapi  # GPU (also: qsv)
+#   VAAPI picks the first /dev/dri/renderD*; override with NLE_VAAPI_DEVICE.
 
 # One-shot tools (no project needed)
 $N probe clip.mp4 [--json]
