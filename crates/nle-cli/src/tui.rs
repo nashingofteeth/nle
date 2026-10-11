@@ -1903,6 +1903,8 @@ fn purge_command(app: &mut App) -> String {
     let Some(fps) = app.project.fps else {
         return "no frame rate set — add a clip first".to_string();
     };
+    // Clamp inside the media first, then snap the grid / drop stumps.
+    let notes = crate::clamp_project_to_media(&mut app.project);
     let mut dropped = 0usize;
     for track in &mut app.project.timeline.tracks {
         let (cleaned, n) = edit::purge_stumps(track, fps);
@@ -1916,7 +1918,10 @@ fn purge_command(app: &mut App) -> String {
     let _ = std::fs::remove_file(History::sidecar_path(&app.path));
     let _ = app.project.save(&app.path);
     app.reload_requested = true;
-    format!("purged {dropped} sub-frame segment(s)")
+    format!(
+        "purged {dropped} sub-frame segment(s), adjusted {} clip(s)",
+        notes.len()
+    )
 }
 
 /// Atomic save + view refresh. Called after every successful edit (and

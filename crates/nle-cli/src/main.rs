@@ -671,17 +671,30 @@ fn cmd_purge_stumps(project_path: &Path, track: Option<usize>) -> Result<()> {
         }
         None => (0..project.timeline.tracks.len()).collect(),
     };
+    let durations: HashMap<u32, Seconds> = project
+        .media
+        .iter()
+        .filter_map(|a| a.duration().map(|d| (a.id, d)))
+        .collect();
+    let media = |id: u32| durations.get(&id).copied();
+    let mut notes = Vec::new();
     let mut dropped = 0usize;
     for ti in indices {
-        let (cleaned, n) = edit::purge_stumps(&project.timeline.tracks[ti], fps);
-        project.timeline.tracks[ti].segments = cleaned;
+        let t = &mut project.timeline.tracks[ti];
+        notes.extend(edit::clamp_to_media(t, &media, fps));
+        let (cleaned, n) = edit::purge_stumps(t, fps);
+        t.segments = cleaned;
         dropped += n;
+    }
+    for n in &notes {
+        eprintln!("warning: {n}");
     }
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
     println!(
-        "✓ {} — purged {dropped} sub-frame segment(s)",
-        project_path.display()
+        "✓ {} — purged {dropped} sub-frame segment(s), adjusted {} clip(s)",
+        project_path.display(),
+        notes.len()
     );
     Ok(())
 }
@@ -1256,18 +1269,8 @@ fn cmd_import_otio(
     let timeline = otio::build(&doc, &|p| by_path.get(p).copied())
         .with_context(|| format!("building timeline from {}", otio_path.display()))?;
     project.timeline = timeline;
-    // A Kdenlive rate conform can round an out-point a hair past the file's
-    // end; clamp it so the export doesn't read past EOF and fall short.
-    let durations: HashMap<u32, Seconds> = project
-        .media
-        .iter()
-        .filter_map(|a| a.duration().map(|d| (a.id, d)))
-        .collect();
-    let clamp_notes = otio::clamp_to_media(
-        &mut project.timeline,
-        &|id| durations.get(&id).copied(),
-        fps,
-    );
+    // Keep every clip inside its media and on the frame grid.
+    let clamp_notes = clamp_project_to_media(&mut project);
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
@@ -1483,7 +1486,9 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
             append_spans(&mut project, audio_ti, start, audio_segments);
         }
 
-        clamp_to_media_warn(&mut project);
+        for n in clamp_project_to_media(&mut project) {
+            eprintln!("warning: {n}");
+        }
         project.validate()?;
         save_and_reset_history(&project, project_path)?;
         println!(
@@ -1529,7 +1534,9 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         });
     }
     project.timeline = Timeline { tracks };
-    clamp_to_media_warn(&mut project);
+    for n in clamp_project_to_media(&mut project) {
+        eprintln!("warning: {n}");
+    }
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
@@ -1545,25 +1552,25 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
 }
 
 /// Keep every clip inside its media and on the frame grid (see
-/// [`otio::clamp_to_media`]); warns about each adjustment. Applied by both
-/// import paths so neither can leave a clip reading past EOF or ending off the
-/// project's frame grid.
-fn clamp_to_media_warn(project: &mut Project) {
+/// [`edit::clamp_to_media`]). Returns one note per adjustment; applied by both
+/// import paths and by `purge-stumps`, so no write path leaves a clip reading
+/// past EOF or ending off the project's frame grid.
+fn clamp_project_to_media(project: &mut Project) -> Vec<String> {
     let Some(fps) = project.fps else {
-        return;
+        return Vec::new();
     };
     let durations: HashMap<u32, Seconds> = project
         .media
         .iter()
         .filter_map(|a| a.duration().map(|d| (a.id, d)))
         .collect();
-    for n in otio::clamp_to_media(
-        &mut project.timeline,
-        &|id| durations.get(&id).copied(),
-        fps,
-    ) {
-        eprintln!("warning: {n}");
-    }
+    let media = |id: u32| durations.get(&id).copied();
+    project
+        .timeline
+        .tracks
+        .iter_mut()
+        .flat_map(|t| edit::clamp_to_media(t, &media, fps))
+        .collect()
 }
 
 /// Build the clip/gap segments for a run of spans, allocating clip ids from

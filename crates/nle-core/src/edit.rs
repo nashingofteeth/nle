@@ -847,6 +847,60 @@ pub fn set_speed(project: &Project, clip_id: u32, speed: Seconds) -> Result<Batc
     set_speed_on(project, video_track_index(project)?, clip_id, speed)
 }
 
+/// Keep one track's clips inside their media and on the frame grid. The
+/// out-point is clamped to the media's duration, then the timeline duration is
+/// snapped to whole frames (rounded, falling back to the floor when rounding
+/// would run past the media end). A clip shorter than one frame is dropped.
+/// `media` maps an asset id to its duration; `fps` is the timeline's frame
+/// rate. Returns one note per adjusted or dropped clip.
+///
+/// Every write path needs this: a Kdenlive rate conform can round an out-point
+/// a hair past the file's end, and `reconstruct` snaps a rendered file's end up
+/// to the project grid. Either way a clip would read past EOF (the export falls
+/// short) and leave a fractional boundary for `snap` to land on the wrong side
+/// of.
+pub fn clamp_to_media(
+    track: &mut Track,
+    media: &dyn Fn(u32) -> Option<Seconds>,
+    fps: Seconds,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    if fps <= Seconds::from_integer(0) {
+        return notes;
+    }
+    let frame_secs = |n: i64| Seconds::new(n, 1) / fps;
+    track.segments.retain_mut(|seg| {
+        let Segment::Clip(c) = seg else {
+            return true;
+        };
+        let Some(d) = media(c.asset) else {
+            return true;
+        };
+        let out = c.asset_out.min(d);
+        let mut frames = ((out - c.asset_in) / c.speed * fps).round().to_integer();
+        let mut new_out = c.asset_in + frame_secs(frames) * c.speed;
+        if new_out > d {
+            frames -= 1;
+            new_out = c.asset_in + frame_secs(frames) * c.speed;
+        }
+        if frames < 1 {
+            notes.push(format!("clip #{}: holds no whole frame — dropped", c.id));
+            return false;
+        }
+        if new_out != c.asset_out {
+            notes.push(format!(
+                "clip #{}: out {} → {}",
+                c.id,
+                format_seconds(&c.asset_out),
+                format_seconds(&new_out)
+            ));
+        }
+        c.asset_out = new_out;
+        true
+    });
+    notes
+}
+
 /// Snap a track's segment boundaries back onto the project frame grid and drop
 /// any segment that collapses to under one frame (a "stump"), coalescing the
 /// gaps a drop leaves adjacent. Boundaries snap *cumulatively*, so each cut
@@ -4450,6 +4504,75 @@ mod tests {
             panic!("expected gap")
         };
         assert_eq!(g.duration, Seconds::new(31, 30), "31 frames");
+    }
+
+    #[test]
+    fn clamp_to_media_trims_or_drops_past_the_end() {
+        let fps = Seconds::from_integer(30);
+        let mut t = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![
+                Segment::Clip(Clip::new(
+                    1,
+                    1,
+                    Seconds::from_integer(0),
+                    Seconds::from_integer(3),
+                )),
+                Segment::Clip(Clip::new(
+                    2,
+                    1,
+                    Seconds::from_integer(1),
+                    Seconds::from_integer(4),
+                )),
+            ],
+        };
+        // Media is 2s: both out-points overrun and are clamped onto whole
+        // frames inside it.
+        let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(2)), fps);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let Segment::Clip(c) = &t.segments[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(c.asset_out, Seconds::from_integer(2));
+
+        // A clip wholly past the media end is dropped.
+        let mut t = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(Clip::new(
+                3,
+                1,
+                Seconds::from_integer(5),
+                Seconds::from_integer(8),
+            ))],
+        };
+        let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(2)), fps);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(t.segments.is_empty());
+    }
+
+    #[test]
+    fn clamp_to_media_floors_when_rounding_would_pass_the_media_end() {
+        let fps = Seconds::from_integer(30);
+        let mut t = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(Clip::new(
+                1,
+                1,
+                Seconds::from_integer(2),
+                Seconds::from_integer(4),
+            ))],
+        };
+        // 3.49s of media: rounding the duration up to 45 frames would reach
+        // 3.5s — past the file — so it floors to 44 instead.
+        clamp_to_media(&mut t, &|_| Some(Seconds::new(349, 100)), fps);
+        let Segment::Clip(c) = &t.segments[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(c.asset_out - c.asset_in, Seconds::new(44, 30));
+        assert!(c.asset_out <= Seconds::new(349, 100));
     }
 
     #[test]
