@@ -1,6 +1,7 @@
 # nle — plan of record
 
-Status: **M4 + EDL/OTIO import + clip speed + edit-detect complete, M5 next.** This file is the
+Status: **M4 + EDL/OTIO import + clip speed + edit-detect + CLI/TUI action parity
+complete, M5 next.** This file is the
 design/roadmap; the README is the user-facing how-to. Keep it in sync as
 milestones land.
 
@@ -136,8 +137,9 @@ track is a no-op in the fast path.
 - **Verified:** unit fixtures (cuts, drop-frame, gaps, linked audio) +
   `./demo.sh` (import → export → red/gap/blue pixels).
 
-**Deferred:** TUI `:edl import`; audio-only EDLs; additive import into an
-existing project.
+**Deferred:** audio-only EDLs; additive import into an
+existing project. (TUI `:edl-import` landed with the action-parity work
+below.)
 
 ## OTIO import + clip speed — shipped
 
@@ -191,9 +193,45 @@ existing project.
   run on a 1.4 GB 1080p60 dailies `.mov`: 19 cuts + 2 gaps, including 3 s
   of leading black and a 0.2 s black flash that scene detection missed.
 
-**Deferred:** TUI `:detect FILE`; matching shots back to pooled source
+**Deferred:** matching shots back to pooled source
 assets (frame fingerprinting) — a rendered file can't recover its sources,
-only the cut structure.
+only the cut structure. (TUI `:detect` landed with the action-parity work
+below.)
+
+## CLI/TUI action parity — shipped
+
+- **The action catalog** (`nle-core/src/action.rs`): one `Action` enum with
+  explicit addressing (`--at` position, `--clip` id, `--seg` index — no
+  hidden playhead) and one `run_action` executor over `Project` + `History`
+  + the yank register. Three front-ends build the same values: TUI keybinds
+  (high-frequency actions only), the TUI `:cmd` line (**every** action), and
+  CLI subcommands (every action).
+- **One grammar:** `Action::parse` is the `:cmd` syntax and mirrors the CLI
+  flags (`:delete --at 3 --ripple` ≡ `nle delete --at 3 --ripple`), with
+  `--at`/`--track`/`--clip` defaulting to the playhead / active track /
+  clip-under in the TUI. `to_action` is the single CLI `Cmd`→`Action`
+  mapping. Coverage tests walk `Action::slot`/`SLOTS` and fail if either
+  spelling misses a variant — parity is enforced, not promised.
+- **Shared session state:** the undo sidecar persists **both** stacks
+  (`HISTORY_VERSION` 9), so `nle undo`/`nle redo` work across processes and
+  on TUI-made edits; the yank register (`nle.clipboard.json`) is shared —
+  `nle yank` ↔ `yy`, `nle paste` ↔ `p`.
+- **New CLI surface:** `nle trim-in|trim-out|split|gap|delete|yank|paste|
+  extend|undo|redo`, `remove --ripple`, `--at`/`--clip`/`--seg` addressing,
+  and `nle show` segment indices.
+- **IO commands in both:** `:export`/`:detect`/`:edl-import`/`:otio-import`/
+  `:add` run in a worker thread (mpsc polled by the event loop) so the
+  monitor keeps playing; the printing `cmd_*` functions became `*_work`
+  functions returning a `CommandReport` (warnings + summary).
+- **Extend routing moved to `nle-core::extend`** (`resolve_armed`,
+  `armed_edge`, `plan_commit`, `commit_batch`): the shell's `nle extend
+  --edge in|out --to T` commits under the same rules as the TUI's `e`/`E`.
+- **Verified:** 284 tests, clippy clean, `./demo.sh` agent chain (split →
+  `delete --clip` → `undo` → `gap` → `yank` → `paste` → `export`) with pixel
+  checks and a register check.
+
+**Deferred:** `nle seek` / a persistent playhead (stateless `--at` won);
+`nle paste --from-clip` (the register covers it); TUI `:probe`.
 
 ## M5 — transitions, effects, proxies (planned)
 

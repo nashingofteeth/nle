@@ -110,11 +110,17 @@ plainly.
   files are **rejected with a clear error** (never silently misread) and
   the fix is "rebuild it" (`./demo.sh`). Bump the format version; don't
   write migration code.
-- **Out-of-band project writes must reset the undo sidecar.** Any path that
-  saves `nle.json` without going through the TUI's `History` (CLI
-  `init`/`import`/`add`/`remove`/`media rm`) re-baselines the project, so it
-  deletes `nle.history.json` via `save_and_reset_history`. Otherwise the
-  next TUI session refuses every undo with "history entry does not apply".
+- **Undo sidecar rule (revised).** Writes that go through `History`
+  (`run_action`, `history.remove_asset`) **record**; writes that don't (pool
+  *imports*, `init`, `track rm`, `import-*`, `detect-edits`, `purge`)
+  re-baseline it via `save_and_reset_history`, or the next undo refuses with
+  "history entry does not apply". `nle add` resets only when it auto-imports a
+  new file. Both stacks persist (`HISTORY_VERSION` 9) — a redo stack that
+  died with the session made `nle redo` permanently empty.
+- **The yank register is shared state.** `nle.clipboard.json` sits next to
+  the project; `yy`/`nle yank` write it and `p`/`nle paste` read it, so a
+  shell and the TUI hand segments back and forth. Convenience, never
+  critical: a missing or version-skewed register reads as empty.
 - **Frames are 0-based everywhere** (`f0` = first frame; timecode `:FF`
   matches notices). A file/timeline of `dur` spans `[0, dur)`; the last
   representable position is `dur - 1/fps` — clamp seeks there.
@@ -226,6 +232,14 @@ plainly.
 
 ## Interaction conventions added this session
 
+- **One action catalog, three front-ends.** Every project-mutating action is
+  an `Action` (`nle-core/src/action.rs`) run by `run_action`; keybinds cover
+  the high-frequency ones, the `:cmd` line covers **all** of them, and the
+  CLI has a matching subcommand. The `:cmd` grammar *is* the CLI grammar
+  (same flags; `--at`/`--track`/`--clip` default to the playhead/active
+  track/clip-under in the TUI). A new action = a new `Action` variant + a
+  slot in `Action::slot` (the match is exhaustive) + both parity tests — they
+  fail loudly if a spelling misses it.
 - **`e`/`E` = replace/ripple**; case encodes the ripple flag everywhere.
 - **`keys` cheat-sheet (`hints_for`) is the single source of mode hints**;
   the **`message`** panel shows the latest notice only. Don't put the hint
