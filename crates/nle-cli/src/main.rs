@@ -1035,6 +1035,18 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&project)?);
         return Ok(());
     }
+    println!(
+        "{} — {}",
+        project_path.display(),
+        show_report(&project).trim_end()
+    );
+    Ok(())
+}
+
+/// The human timeline report behind `nle show` (and the TUI's `:show`):
+/// a summary line, then one line per segment (`[i]` is the segment index
+/// `--seg` addresses). A trailing newline.
+pub(crate) fn show_report(project: &Project) -> String {
     let clip_count: usize = project
         .timeline
         .tracks
@@ -1043,31 +1055,30 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         .filter(|s| matches!(s, Segment::Clip(_)))
         .count();
 
-    let mut head = format!(
-        "{} — {} clip(s) · {} s",
-        project_path.display(),
+    let mut out = format!(
+        "{} clip(s) · {} s",
         clip_count,
         format_seconds(&project.timeline.end())
     );
     if let Some(fps) = &project.fps {
-        head += &format!(" · {}/{} fps", fps.numer(), fps.denom());
+        out += &format!(" · {}/{} fps", fps.numer(), fps.denom());
     }
     if let Some(v) = &project.video {
-        head += &format!(" · {}×{}", v.width, v.height);
+        out += &format!(" · {}×{}", v.width, v.height);
     }
-    println!("{head}");
+    out.push('\n');
 
     for (ti, track) in project.timeline.tracks.iter().enumerate() {
         let mute = if track.muted { " (muted)" } else { "" };
-        println!("  {}{mute}", track_label(&project, ti));
+        out += &format!("  {}{mute}\n", track_label(project, ti));
 
         let mut cursor = Seconds::from_integer(0);
         for (si, seg) in track.segments.iter().enumerate() {
             match seg {
                 Segment::Gap(g) => {
                     let end = cursor + g.duration;
-                    println!(
-                        "      [{si}] ┄ gap {}–{}",
+                    out += &format!(
+                        "      [{si}] ┄ gap {}–{}\n",
                         format_seconds(&cursor),
                         format_seconds(&end)
                     );
@@ -1085,8 +1096,8 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
                     } else {
                         String::new()
                     };
-                    println!(
-                        "    [{si}] #{:<4}{:>9} – {:<9} {}{speed}  (src {}–{})",
+                    out += &format!(
+                        "    [{si}] #{:<4}{:>9} – {:<9} {}{speed}  (src {}–{})\n",
                         clip.id,
                         format_seconds(&start),
                         format_seconds(&end),
@@ -1099,7 +1110,7 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
             }
         }
     }
-    Ok(())
+    out
 }
 
 /// `nle media ls` — the pool listing. (`nle media rm` is a catalog

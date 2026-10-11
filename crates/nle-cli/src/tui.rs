@@ -15,12 +15,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
+use nle_core::action::{self, Action, Edge, GapLen, ParseDefaults, ParseError, Target};
+#[cfg(test)]
 use nle_core::edit;
-use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind};
+use nle_core::timeline::{Segment as TimelineSegment, Track};
 use nle_core::{
-    Armed, Batch, Clip, CommitKind, EditError, History, Project, Seconds, clip_span, commit_batch,
-    frame_of, frame_to_secs, gap_span, plan_commit, resolve_armed, track_label,
+    Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_to_secs,
+    gap_span, load_register, plan_commit, resolve_armed, save_register, track_label,
 };
+#[cfg(test)]
+use nle_core::{Batch, EditError, frame_of};
 
 use crate::mpv::{Mpv, PlaybackState};
 use crate::preview;
@@ -285,8 +289,9 @@ pub struct App {
     pub count: Option<u32>,
     /// Pending two-key sequence.
     pub pending: Pending,
-    /// Yanked clip, for `p`/`P`.
-    pub clipboard: Option<TimelineSegment>,
+    /// Yanked segment, for `p`/`P` — the shared register (`nle.clipboard.json`),
+    /// so `nle yank` and `yy` fill the same slot.
+    pub register: Option<TimelineSegment>,
     /// Undo/redo stack of edit batches (session-only).
     pub history: History,
     pub reload_requested: bool,
@@ -318,7 +323,7 @@ impl App {
             playhead: 0.0,
             count: None,
             pending: Pending::None,
-            clipboard: None,
+            register: None,
             history: History::default(),
             reload_requested: false,
             quit: false,
@@ -465,6 +470,8 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
     app.history = history;
+    // The shared register: what `nle yank` (or an earlier session) left.
+    app.register = load_register(&app.path);
     if let Some(notice) = preview::speed_notice(&app.project) {
         app.set_message(&notice);
     }
@@ -851,26 +858,12 @@ fn pool_step_target(app: &App, dir: i64) -> (f64, f64) {
 
 /// Undo the last edit, restoring the playhead to where it was made.
 fn do_undo(app: &mut App, player: &dyn Mpv) {
-    match app.history.undo(&mut app.project) {
-        Ok(outcome) => {
-            app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
-            app.set_message(&format!("undo: {}", outcome.desc));
-            persist_and_refresh(app, player);
-        }
-        Err(e) => app.set_message(&e.to_string()),
-    }
+    run_action(app, player, &Action::Undo);
 }
 
 /// Redo the last undone edit.
 fn do_redo(app: &mut App, player: &dyn Mpv) {
-    match app.history.redo(&mut app.project) {
-        Ok(outcome) => {
-            app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
-            app.set_message(&format!("redo: {}", outcome.desc));
-            persist_and_refresh(app, player);
-        }
-        Err(e) => app.set_message(&e.to_string()),
-    }
+    run_action(app, player, &Action::Redo);
 }
 
 /// Insert a clip from the selected pool asset at the playhead (ripple).
@@ -902,10 +895,15 @@ fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
         asset_out: whole,
         speed: Seconds::from_integer(1),
     });
-    let _ = run_edit(
+    run_action(
         app,
         player,
-        edit::paste_ripple_on(&app.project, app.active(), &snapshot, app.playhead),
+        &Action::Paste {
+            track: app.active(),
+            at: app.playhead,
+            ripple: true,
+            segment: Some(snapshot),
+        },
     );
 }
 
@@ -916,89 +914,13 @@ fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
         app.set_message("no asset selected");
         return;
     };
-    let id = asset.id;
-    let playhead = frame_of(app.project.fps.as_ref(), app.playhead);
-    match app.history.remove_asset(&mut app.project, id, playhead) {
-        Ok(desc) => {
-            app.set_message(&desc);
-            persist_and_refresh(app, player);
-        }
-        Err(e) => app.set_message(&e.to_string()),
-    }
-}
-
-/// `:track ...` — add / mute / remove tracks. Structural changes save
-/// immediately. Removal resets the undo sidecar: track indices shift, so
-/// any recorded `Change::Track` would point at the wrong track.
-fn track_command(app: &mut App, cmd: &str) -> String {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    let idx_arg = |parts: &[&str]| -> Option<usize> {
-        parts
-            .get(2)
-            .and_then(|s| s.parse::<usize>().ok())
-            .map(|n| n.saturating_sub(1))
-    };
-    match parts.get(1).copied().unwrap_or("") {
-        "add" => {
-            let kind = match parts.get(2).copied() {
-                Some("video") => TrackKind::Video,
-                Some("audio") => TrackKind::Audio,
-                _ => return "usage: :track add video|audio".to_string(),
-            };
-            let idx = app.project.timeline.add_track(kind);
-            app.active_track = idx;
-            let label = track_label(&app.project, idx);
-            match app.project.save(&app.path) {
-                Ok(()) => format!("added track {label}"),
-                Err(e) => format!("added track {label} — save failed: {e}"),
-            }
-        }
-        "mute" => {
-            let idx = idx_arg(&parts).unwrap_or_else(|| app.active());
-            let Some(track) = app.project.timeline.track_mut(idx) else {
-                return format!("no track #{}", idx + 1);
-            };
-            track.muted = !track.muted;
-            let muted = track.muted;
-            let label = track_label(&app.project, idx);
-            let _ = app.project.save(&app.path);
-            format!("{label} {}", if muted { "muted" } else { "unmuted" })
-        }
-        "rm" | "remove" => {
-            let idx = idx_arg(&parts).unwrap_or_else(|| app.active());
-            let n = app.project.timeline.tracks.len();
-            if idx >= n {
-                return format!("no track #{}", idx + 1);
-            }
-            let is_video = app.project.timeline.tracks[idx].kind == TrackKind::Video;
-            if is_video && app.project.timeline.video_tracks().count() <= 1 {
-                return "can't remove the only video track".to_string();
-            }
-            // The track's clips go with it. Track indices shift under the
-            // undo stack, so this re-baselines history (not undoable).
-            let removed = app.project.timeline.tracks.remove(idx);
-            let clips = removed
-                .segments
-                .iter()
-                .filter(|s| matches!(s, TimelineSegment::Clip(_)))
-                .count();
-            app.history = History::default();
-            let _ = std::fs::remove_file(History::sidecar_path(&app.path));
-            app.active_track = app
-                .active_track
-                .min(app.project.timeline.tracks.len().saturating_sub(1));
-            match app.project.save(&app.path) {
-                Ok(()) if clips > 0 => format!("removed track ({clips} clip(s) deleted)"),
-                Ok(()) => "removed track".to_string(),
-                Err(e) => format!("removed track — save failed: {e}"),
-            }
-        }
-        _ => "usage: :track add video|audio · :track mute [N] · :track rm N".to_string(),
-    }
+    run_action(app, player, &Action::AssetRm { id: asset.id });
 }
 
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
-const COMMAND_HELP: &str = "commands — :track · :speed · :purge · :import · :w · :q";
+/// The edit commands are the CLI's, flag for flag (`--at` defaults to the
+/// playhead here).
+const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :track · :media · :import · :show · :purge · :w · :q";
 
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale
@@ -1038,37 +960,29 @@ fn import_command(app: &mut App, cmd: &str) -> String {
     msg
 }
 
+/// The `:` parser's defaults: the playhead, the active track, and the
+/// clip under the playhead — so `:delete`, `:split`, `:speed` need no
+/// `--at`/`--track`/`--clip` (the CLI passes every flag explicitly).
+fn parse_defaults(app: &App) -> ParseDefaults {
+    ParseDefaults {
+        at: Some(app.playhead),
+        track: app.active(),
+        clip: clip_under(&app.project, app.playhead, app.active()).map(|c| c.id),
+    }
+}
+
 fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
             let cmd = buf.trim().to_string();
-            match cmd.as_str() {
-                "q" | "q!" | "quit" | "wq" => {
-                    app.quit = true;
-                    return; // keep the command text visible while exiting
-                }
-                "w" | "write" => app.set_message("edits save automatically — nothing to save"),
-                "" => {}
-                other if other == "track" || other.starts_with("track ") => {
-                    let msg = track_command(app, other);
-                    app.set_message(&msg);
-                }
-                other if other == "speed" || other.starts_with("speed ") => {
-                    let arg = other.strip_prefix("speed").unwrap_or("").trim();
-                    speed_command(app, player, arg);
-                }
-                "purge" | "clean" => {
-                    let msg = purge_command(app);
-                    app.set_message(&msg);
-                }
-                other if other == "import" || other.starts_with("import ") => {
-                    let msg = import_command(app, other);
-                    app.set_message(&msg);
-                }
-                "help" | "?" => app.set_message(COMMAND_HELP),
-                other => app.set_message(&format!("unknown command: {other}  (try :q)")),
+            let quitting = matches!(cmd.as_str(), "q" | "q!" | "quit" | "wq");
+            if let Some(msg) = run_command(app, player, &cmd) {
+                app.set_message(&msg);
             }
-            app.mode = Mode::Normal;
+            if !quitting {
+                app.mode = Mode::Normal;
+            }
+            // else: keep the command text visible while exiting
         }
         KeyCode::Esc => app.mode = Mode::Normal,
         KeyCode::Backspace => {
@@ -1079,6 +993,87 @@ fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
         KeyCode::Char(c) => app.mode = Mode::Command(buf + &c.to_string()),
         _ => app.mode = Mode::Command(buf),
     }
+}
+
+/// Run one `:cmd`, returning a notice for the commands that don't set one
+/// themselves (built-ins and queries). Every edit is an [`Action`] — the
+/// same values the keybinds and the CLI build — so the `:cmd` line and
+/// `nle …` can't drift apart.
+fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
+    match cmd {
+        "" => None,
+        "q" | "q!" | "quit" | "wq" => {
+            app.quit = true;
+            None
+        }
+        "w" | "write" => Some("edits save automatically — nothing to save".to_string()),
+        "help" | "?" => Some(COMMAND_HELP.to_string()),
+        _ => match action::parse(cmd, &parse_defaults(app)) {
+            Ok(action) => {
+                // A new track becomes the active one (where the next
+                // edit goes) — `:track add` used to do this inline.
+                let is_add = matches!(action, Action::TrackAdd { .. });
+                if run_action(app, player, &action) && is_add {
+                    app.active_track = app.project.timeline.tracks.len().saturating_sub(1);
+                }
+                None
+            }
+            // The verb is an edit, the arguments are not.
+            Err(ParseError::Invalid(msg)) => Some(msg),
+            // Not an edit action: the front-end's own (query/IO) commands.
+            Err(ParseError::Unknown(_)) => match cmd.split_whitespace().next() {
+                Some("import") => Some(import_command(app, cmd)),
+                Some("show") => Some(show_command(app)),
+                Some("media") => Some(media_ls_command(app)),
+                Some("track") => Some(track_ls_command(app)),
+                Some("reload") => {
+                    app.reload_requested = true;
+                    None
+                }
+                _ => Some(format!("unknown command: {cmd}  (try :help)")),
+            },
+        },
+    }
+}
+
+/// `:show` — the summary line; the full segment dump goes to the log.
+fn show_command(app: &App) -> String {
+    let report = crate::show_report(&app.project);
+    crate::log::line(&report);
+    report.lines().next().unwrap_or_default().to_string()
+}
+
+/// `:media ls` — pool summary; the per-asset listing goes to the log.
+fn media_ls_command(app: &App) -> String {
+    let used = app
+        .project
+        .media
+        .iter()
+        .filter(|a| !app.project.asset_usage(a.id).is_empty())
+        .count();
+    for a in &app.project.media {
+        crate::log::line(&format!("asset #{} {}", a.id, a.path.display()));
+    }
+    format!("{} asset(s) · {used} in use", app.project.media.len())
+}
+
+/// `:track ls` — one line per track (the label carries the number).
+fn track_ls_command(app: &App) -> String {
+    app.project
+        .timeline
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mute = if t.muted { " (muted)" } else { "" };
+            format!(
+                "{} {} seg{mute}",
+                track_label(&app.project, i),
+                t.segments.len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
@@ -1118,7 +1113,7 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         }
         (Pending::Y, KeyCode::Char('y')) => {
             app.pending = Pending::None;
-            edit_yank(app);
+            edit_yank(app, player);
             return;
         }
         _ => {}
@@ -1198,75 +1193,104 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('y') => app.pending = Pending::Y,
         // ---- editing: uniform playhead-based ops (counts don't multiply) ----
         KeyCode::Char('i') => {
-            let _ = run_edit(
+            run_action(
                 app,
                 player,
-                trim_key(&app.project, app.playhead, false, false, app.active()),
+                &Action::TrimIn {
+                    track: app.active(),
+                    at: app.playhead,
+                    ripple: false,
+                },
             );
         }
         KeyCode::Char('I') => {
-            let _ = run_edit(
+            run_action(
                 app,
                 player,
-                trim_key(&app.project, app.playhead, false, true, app.active()),
+                &Action::TrimIn {
+                    track: app.active(),
+                    at: app.playhead,
+                    ripple: true,
+                },
             );
         }
         KeyCode::Char('o') => {
-            let _ = run_edit(
+            run_action(
                 app,
                 player,
-                trim_key(&app.project, app.playhead, true, false, app.active()),
+                &Action::TrimOut {
+                    track: app.active(),
+                    at: app.playhead,
+                    ripple: false,
+                },
             );
         }
         KeyCode::Char('O') => {
-            let _ = run_edit(
+            run_action(
                 app,
                 player,
-                trim_key(&app.project, app.playhead, true, true, app.active()),
+                &Action::TrimOut {
+                    track: app.active(),
+                    at: app.playhead,
+                    ripple: true,
+                },
             );
         }
         KeyCode::Char('s') => {
-            let _ = run_edit(
+            run_action(
                 app,
                 player,
-                edit::split_on(&app.project, app.active(), app.playhead),
+                &Action::Split {
+                    track: app.active(),
+                    at: app.playhead,
+                },
             );
         }
         KeyCode::Char('_') => {
-            let _ = run_edit(
+            run_action(
                 app,
                 player,
-                edit::insert_gap_on(&app.project, app.active(), app.playhead, mult as i64),
+                &Action::InsertGap {
+                    track: app.active(),
+                    at: app.playhead,
+                    len: GapLen::Frames(mult as i64),
+                },
             );
         }
         KeyCode::Char('D') => {
-            edit_yank(app); // D yanks too
-            run_edit(
+            edit_yank(app, player); // D yanks too
+            run_action(
                 app,
                 player,
-                edit::delete_ripple_on(&app.project, app.active(), app.playhead),
+                &Action::Delete {
+                    track: app.active(),
+                    target: Target::At(app.playhead),
+                    ripple: true,
+                },
             );
         }
         KeyCode::Char('p') => {
-            let Some(clipboard) = app.clipboard.clone() else {
-                app.set_message("clipboard empty — yy first");
-                return;
-            };
-            run_edit(
+            run_action(
                 app,
                 player,
-                edit::paste_on(&app.project, app.active(), &clipboard, app.playhead),
+                &Action::Paste {
+                    track: app.active(),
+                    at: app.playhead,
+                    ripple: false,
+                    segment: None,
+                },
             );
         }
         KeyCode::Char('P') => {
-            let Some(clipboard) = app.clipboard.clone() else {
-                app.set_message("clipboard empty — yy first");
-                return;
-            };
-            run_edit(
+            run_action(
                 app,
                 player,
-                edit::paste_ripple_on(&app.project, app.active(), &clipboard, app.playhead),
+                &Action::Paste {
+                    track: app.active(),
+                    at: app.playhead,
+                    ripple: true,
+                    segment: None,
+                },
             );
         }
         KeyCode::Char('u') => do_undo(app, player),
@@ -1629,8 +1653,9 @@ fn grid_time(project: &Project, t: f64) -> Seconds {
     nle_core::grid_time(project.fps.as_ref(), t)
 }
 
-/// `i`/`I`/`o`/`O` routing — the shared [`edit::trim_at_on`], renamed for
-/// the key handlers' call sites.
+/// The trim keys' routing, as the key handlers call it (tests drive the
+/// shared [`edit::trim_at_on`] through this shim).
+#[cfg(test)]
 fn trim_key(
     project: &Project,
     ph: f64,
@@ -1641,38 +1666,42 @@ fn trim_key(
     edit::trim_at_on(project, ti, ph, out, ripple)
 }
 
-/// Apply an edit batch, then save + rebuild the preview so the monitor
-/// reflects the new timeline at the current playhead.
-fn run_edit(app: &mut App, player: &dyn Mpv, result: Result<Batch, EditError>) -> bool {
-    let batch = match result {
-        Ok(b) => b,
-        Err(e) => {
-            app.set_message(&e.to_string());
-            return false;
-        }
-    };
-    let desc = batch.desc.clone();
+/// Run one catalog action — the single path every edit takes, keybind or
+/// `:cmd`: apply through the undo history, reanchor the playhead, persist,
+/// refresh the monitor. Returns whether it applied (the action set its own
+/// notice either way).
+fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
     // Keep the playhead on the frame it was showing, not the same
-    // timecode (a trim can move material under it). An extend commit is
-    // the exception: land on the edge we extended to (the playhead is
-    // already the target), not one frame short of a fresh tail.
+    // timecode (a trim can move material under it). Undo/redo carry their
+    // own restore position; an extend commit is made from the armed edge,
+    // and lands on the edge it moved to.
+    let restore = matches!(action, Action::Undo | Action::Redo);
     let in_extend = matches!(app.mode, Mode::Extend(_));
-    let anchor = (!in_extend)
+    let anchor = (!in_extend && !restore)
         .then(|| edit_anchor(&app.project, app.playhead, app.active()))
         .flatten();
-    // Undo attribution: a normal edit is made from the playhead; an extend
-    // commit is made from where extend mode was entered (the armed edge),
-    // so undoing it returns there rather than to the commit target.
     let from = match &app.mode {
         Mode::Extend(st) => st.edge_pos,
         _ => app.playhead,
     };
-    let at_frame = frame_of(app.project.fps.as_ref(), from);
-    match app.history.apply(&mut app.project, batch, at_frame) {
-        Ok(()) => {
-            reanchor_playhead(app, anchor);
-            app.set_message(&desc);
-            persist_and_refresh(app, player);
+    match nle_core::run_action(
+        &mut app.project,
+        &mut app.history,
+        &mut app.register,
+        action,
+        from,
+    ) {
+        Ok(outcome) => {
+            match outcome.playhead {
+                Some(frame) => app.playhead = frame_to_secs(app.project.fps.as_ref(), frame),
+                None => reanchor_playhead(app, anchor),
+            }
+            app.set_message(&outcome.desc);
+            // The register is shared with the CLI (`nle yank`/`nle paste`).
+            let _ = save_register(&app.path, app.register.as_ref());
+            if outcome.changed {
+                persist_and_refresh(app, player);
+            }
             true
         }
         Err(e) => {
@@ -1680,57 +1709,6 @@ fn run_edit(app: &mut App, player: &dyn Mpv, result: Result<Batch, EditError>) -
             false
         }
     }
-}
-
-/// `:speed <rate>` — retime the clip under the playhead. The track ripples
-/// to fit (nle's timeline is a sequence, so a new duration moves followers).
-fn speed_command(app: &mut App, player: &dyn Mpv, arg: &str) {
-    if arg.is_empty() {
-        app.set_message("usage: :speed 0.5  (rate for the clip under the playhead)");
-        return;
-    }
-    let speed = match crate::parse_speed_arg(arg) {
-        Ok(s) => s,
-        Err(e) => {
-            app.set_message(&e.to_string());
-            return;
-        }
-    };
-    let ti = app.active();
-    let Some(id) = clip_under(&app.project, app.playhead, ti).map(|c| c.id) else {
-        app.set_message("no clip under the playhead");
-        return;
-    };
-    let result = edit::set_speed_on(&app.project, ti, id, speed);
-    run_edit(app, player, result);
-}
-
-/// `:purge` — drop sub-frame stumps and snap every track back onto the frame
-/// grid. Repairs a project that accumulated sub-frame drift; the topology
-/// changes, so it re-baselines the undo stack and reloads the monitor.
-fn purge_command(app: &mut App) -> String {
-    let Some(fps) = app.project.fps else {
-        return "no frame rate set — add a clip first".to_string();
-    };
-    // Clamp inside the media first, then snap the grid / drop stumps.
-    let notes = crate::clamp_project_to_media(&mut app.project);
-    let mut dropped = 0usize;
-    for track in &mut app.project.timeline.tracks {
-        let (cleaned, n) = edit::purge_stumps(track, fps);
-        track.segments = cleaned;
-        dropped += n;
-    }
-    if let Err(e) = app.project.validate() {
-        return format!("purge failed: {e}");
-    }
-    app.history = History::default();
-    let _ = std::fs::remove_file(History::sidecar_path(&app.path));
-    let _ = app.project.save(&app.path);
-    app.reload_requested = true;
-    format!(
-        "purged {dropped} sub-frame segment(s), adjusted {} clip(s)",
-        notes.len()
-    )
 }
 
 /// Atomic save + view refresh. Called after every successful edit (and
@@ -1763,46 +1741,39 @@ fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
                 crate::log::line(&format!("load timeline EDL at {:.3}", app.playhead));
                 player.load(&edl, Some(app.playhead));
             }
-            Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
+            Err(e) => {
+                // Keep the edit's notice — a monitor problem shouldn't
+                // erase what happened to the timeline.
+                crate::log::line(&format!("preview rebuild failed: {e}"));
+                let prev = app.message.clone();
+                app.set_message(&format!("{prev} — preview rebuild failed: {e}"));
+            }
         }
     }
 }
 
 fn edit_delete(app: &mut App, player: &dyn Mpv) {
-    edit_yank(app); // dd yanks first (vim: dd fills the register)
-    run_edit(
+    edit_yank(app, player); // dd yanks first (vim: dd fills the register)
+    run_action(
         app,
         player,
-        edit::delete_under_on(&app.project, app.active(), app.playhead),
+        &Action::Delete {
+            track: app.active(),
+            target: Target::At(app.playhead),
+            ripple: false,
+        },
     );
 }
 
-fn edit_yank(app: &mut App) {
-    let Some(track) = app.track() else {
-        app.set_message("nothing to yank — empty timeline");
-        return;
-    };
-    let Some(si) = track.index_at(grid_time(&app.project, app.playhead)) else {
-        app.set_message("nothing to yank — past the end");
-        return;
-    };
-    let seg = track.segments[si].clone();
-    let msg = match &seg {
-        TimelineSegment::Clip(c) => format!("yanked clip #{}", c.id),
-        TimelineSegment::Gap(g) => {
-            let frames = app
-                .project
-                .fps
-                .as_ref()
-                .map(|f| (secs(&g.duration) * secs(f)).round() as i64);
-            match frames {
-                Some(n) => format!("yanked gap (f{n})"),
-                None => "yanked gap".to_string(),
-            }
-        }
-    };
-    app.clipboard = Some(seg);
-    app.set_message(&msg);
+fn edit_yank(app: &mut App, player: &dyn Mpv) {
+    run_action(
+        app,
+        player,
+        &Action::Yank {
+            track: app.active(),
+            target: Target::At(app.playhead),
+        },
+    );
 }
 
 // ------------------------------------------------------------ extend mode
@@ -2073,8 +2044,9 @@ fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
     app.set_message(msg);
 }
 
-/// Map a commit kind to its edit op. The playhead does the routing: it
-/// sits wherever navigation left it, and each op reads positionally.
+/// Map a commit kind to its edit op for the playhead under `app` — the
+/// extend commit's routing, as a test-facing shim over [`commit_batch`].
+#[cfg(test)]
 fn run_commit_action(
     app: &App,
     armed: &Armed,
@@ -2122,7 +2094,18 @@ fn projected_total(app: &App, st: &ExtendState) -> f64 {
     secs(&probe.timeline.end())
 }
 
-/// Commit: route, apply as one undo step, and leave the mode. Failures
+/// Map an armed boundary to the catalog's addressing — extend mode
+/// resolved it interactively, and the action resolves it back the same
+/// way (gap edges by segment index, clip edges by id).
+fn target_of_armed(armed: &Armed) -> (Target, Edge) {
+    match armed {
+        Armed::Clip { id, head } => (Target::Clip(*id), if *head { Edge::In } else { Edge::Out }),
+        Armed::GapHead { index } => (Target::Segment(*index), Edge::In),
+        Armed::GapTail { index } => (Target::Segment(*index), Edge::Out),
+    }
+}
+
+/// Commit: run the extend as one undo step and leave the mode. Failures
 /// keep the mode (and its preview) so the position isn't lost.
 fn commit_extend(app: &mut App, player: &dyn Mpv) {
     let Some(st) = extend_state(app) else { return };
@@ -2137,10 +2120,17 @@ fn commit_extend(app: &mut App, player: &dyn Mpv) {
         exit_extend(app, player, st.edge_pos, "edge already there");
         return;
     }
-    if run_edit(
+    let (target, edge) = target_of_armed(&st.armed);
+    if run_action(
         app,
         player,
-        run_commit_action(app, &st.armed, kind, st.ripple),
+        &Action::Extend {
+            track: st.track,
+            target,
+            edge,
+            to: app.playhead,
+            ripple: st.ripple,
+        },
     ) {
         app.mode = Mode::Normal;
     }
@@ -2414,11 +2404,11 @@ fn hints_for(app: &App) -> Vec<&'static str> {
     if let Mode::Command(_) = app.mode {
         return vec![
             "type a command · enter run · esc cancel",
-            ":track add video|audio · mute [N] · rm N",
-            ":speed N — retime the clip under the playhead",
-            ":purge — snap to frames, drop stumps, clamp to media",
-            ":import PATH… — probe into the media pool",
-            ":help · :q quit",
+            "edits   :split · :trim-in|out · :delete · :yank · :paste · :gap · :extend",
+            "        :speed RATE · :undo · :redo · flags: --at T --track N --ripple",
+            "tracks  :track add video|audio · :track mute [N] · :track rm N",
+            "media   :import PATH… · :media ls · :media rm N",
+            "more    :show · :purge · :help · :q quit",
         ];
     }
     if matches!(app.mode, Mode::Extend(_)) {
@@ -3529,6 +3519,15 @@ mod tests {
         );
     }
 
+    /// Run a `:cmd` and report what the user sees (the action runner sets
+    /// the message itself; built-ins return a notice).
+    fn cmd(app: &mut App, line: &str) -> String {
+        match run_command(app, &FakeMpv::new(), line) {
+            Some(msg) => msg,
+            None => app.message.clone(),
+        }
+    }
+
     #[test]
     fn track_command_adds_mutes_and_removes() {
         let path = std::env::temp_dir().join(format!(
@@ -3537,15 +3536,15 @@ mod tests {
         ));
         asset_project().save(&path).unwrap();
         let mut app = App::new(asset_project(), path.clone());
-        assert!(track_command(&mut app, "track add audio").contains("a1"));
+        assert!(cmd(&mut app, "track add audio").contains("a1"));
         assert_eq!(app.project.timeline.tracks.len(), 2);
         assert_eq!(app.active_track, 1, "the new track becomes active");
-        assert!(track_command(&mut app, "track mute 2").contains("muted"));
+        assert!(cmd(&mut app, "track mute 2").contains("muted"));
         assert!(app.project.timeline.track(1).unwrap().muted);
         // Refuses to remove the only video track…
-        assert!(track_command(&mut app, "track rm 1").contains("only video"));
+        assert!(cmd(&mut app, "track rm 1").contains("only video"));
         // …but removes the empty audio track.
-        assert!(track_command(&mut app, "track rm 2").contains("removed"));
+        assert!(cmd(&mut app, "track rm 2").contains("removed"));
         assert_eq!(app.project.timeline.tracks.len(), 1);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
@@ -3558,6 +3557,57 @@ mod tests {
         let msg = import_command(&mut app, "import /no/such/file.xyz");
         assert!(msg.contains("not found"), "{msg}");
         assert_eq!(app.project.media.len(), 1, "nothing was added");
+    }
+
+    // The `:cmd` grammar is the CLI's, flag for flag, with --at defaulting
+    // to the playhead — one parser, three front-ends.
+    #[test]
+    fn the_command_line_runs_catalog_actions() {
+        let mut app = App::new(asset_project(), temp_project_path("cmd-grammar"));
+        app.playhead = 1.0;
+        let d = parse_defaults(&app);
+        assert_eq!(
+            action::parse("delete --at 2 --ripple", &d).unwrap(),
+            Action::Delete {
+                track: 0,
+                target: Target::At(2.0),
+                ripple: true,
+            }
+        );
+        assert_eq!(
+            action::parse("split", &d).unwrap(),
+            Action::Split { track: 0, at: 1.0 }
+        );
+        assert_eq!(
+            action::parse("speed 0.5", &d).unwrap(),
+            Action::SetSpeed {
+                track: 0,
+                clip: 1,
+                rate: Seconds::new(1, 2),
+            }
+        );
+        // Unknown verbs fall through to the front-end's own commands.
+        assert!(
+            run_command(&mut app, &FakeMpv::new(), "nope")
+                .unwrap()
+                .contains("unknown")
+        );
+    }
+
+    // A yank writes the register the CLI reads (`nle paste`), so a shell
+    // and the TUI can hand segments back and forth.
+    #[test]
+    fn a_yank_writes_the_shared_register_file() {
+        let path = temp_project_path("register");
+        let mut app = App::new(asset_project(), path.clone());
+        app.playhead = 1.0;
+        cmd(&mut app, "yank");
+        assert!(matches!(app.register, Some(TimelineSegment::Clip(_))));
+        assert!(
+            nle_core::register_path(&path).exists(),
+            "the register sidecar is written on yank"
+        );
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
     }
 
     // `:track rm N` takes the track's clips with it (no "empty it first").
@@ -3581,7 +3631,7 @@ mod tests {
             )));
         p.save(&path).unwrap();
         let mut app = App::new(p, path.clone());
-        let msg = track_command(&mut app, "track rm 2");
+        let msg = cmd(&mut app, "track rm 2");
         assert!(msg.contains("removed") && msg.contains("1 clip"), "{msg}");
         assert_eq!(app.project.timeline.tracks.len(), 1);
         let _ = std::fs::remove_file(&path);
@@ -4271,13 +4321,13 @@ mod tests {
     fn yank_grabs_gaps_too() {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 4.0; // inside the [3..5) gap
-        edit_yank(&mut app);
+        edit_yank(&mut app, &FakeMpv::new());
         assert!(
-            matches!(&app.clipboard, Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(2))
+            matches!(&app.register, Some(TimelineSegment::Gap(g)) if g.duration == Seconds::from_integer(2))
         );
         app.playhead = 1.0; // inside clip #1
-        edit_yank(&mut app);
-        assert!(matches!(&app.clipboard, Some(TimelineSegment::Clip(c)) if c.id == 1));
+        edit_yank(&mut app, &FakeMpv::new());
+        assert!(matches!(&app.register, Some(TimelineSegment::Clip(c)) if c.id == 1));
     }
 
     // yy/dd/D follow the active track, not the first video track.
@@ -4296,11 +4346,11 @@ mod tests {
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.active_track = ti;
         app.playhead = 1.0; // over clip #42 on track 1 and clip #1 on track 0
-        edit_yank(&mut app);
+        edit_yank(&mut app, &FakeMpv::new());
         assert!(
-            matches!(&app.clipboard, Some(TimelineSegment::Clip(c)) if c.id == 42),
+            matches!(&app.register, Some(TimelineSegment::Clip(c)) if c.id == 42),
             "yanked the active track's clip, not v1's: {:?}",
-            app.clipboard
+            app.register
         );
     }
 
@@ -5550,7 +5600,7 @@ mod tests {
         {
             c.asset_out = c.asset_in + Seconds::new(604, 300);
         }
-        let msg = purge_command(&mut app);
+        let msg = cmd(&mut app, "purge");
         assert!(msg.contains("purged"), "{msg}");
         let TimelineSegment::Clip(c) = &app.project.timeline.video_track().unwrap().segments[0]
         else {
