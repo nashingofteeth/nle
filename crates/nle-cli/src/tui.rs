@@ -1006,6 +1006,44 @@ fn track_command(app: &mut App, cmd: &str) -> String {
     }
 }
 
+/// `:import PATH…` — probe files and add them to the media pool. An
+/// out-of-band pool write, so it re-baselines the undo sidecar (a stale
+/// `Change::Assets` entry would otherwise refuse to apply).
+fn import_command(app: &mut App, cmd: &str) -> String {
+    let rest = cmd.strip_prefix("import").unwrap_or("").trim();
+    if rest.is_empty() {
+        return "usage: :import PATH [PATH…]".to_string();
+    }
+    let mut new = 0usize;
+    let mut existing = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for arg in rest.split_whitespace() {
+        match PathBuf::from(arg).canonicalize() {
+            Ok(path) => match nle_ffmpeg::probe(&path) {
+                Ok(report) => {
+                    if app.project.add_asset(path, report).1 {
+                        new += 1;
+                    } else {
+                        existing += 1;
+                    }
+                }
+                Err(e) => failed.push(format!("{arg}: {e}")),
+            },
+            Err(_) => failed.push(format!("{arg}: not found")),
+        }
+    }
+    if new > 0 {
+        app.history = History::default();
+        let _ = std::fs::remove_file(History::sidecar_path(&app.path));
+        let _ = app.project.save(&app.path);
+    }
+    let mut msg = format!("imported {new} new, {existing} already pooled");
+    if !failed.is_empty() {
+        msg.push_str(&format!(" — failed: {}", failed.join("; ")));
+    }
+    msg
+}
+
 fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
@@ -1027,6 +1065,10 @@ fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
                 }
                 "purge" | "clean" => {
                     let msg = purge_command(app);
+                    app.set_message(&msg);
+                }
+                other if other == "import" || other.starts_with("import ") => {
+                    let msg = import_command(app, other);
                     app.set_message(&msg);
                 }
                 other => app.set_message(&format!("unknown command: {other}  (try :q)")),
@@ -3853,6 +3895,15 @@ mod tests {
         assert_eq!(app.project.timeline.tracks.len(), 1);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+    }
+
+    #[test]
+    fn import_command_reports_usage_and_missing_files() {
+        let mut app = App::new(asset_project(), temp_project_path("import-cmd"));
+        assert!(import_command(&mut app, "import").contains("usage"));
+        let msg = import_command(&mut app, "import /no/such/file.xyz");
+        assert!(msg.contains("not found"), "{msg}");
+        assert_eq!(app.project.media.len(), 1, "nothing was added");
     }
 
     // `:track rm N` takes the track's clips with it (no "empty it first").
