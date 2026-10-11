@@ -17,8 +17,8 @@ pub mod time;
 pub mod timeline;
 
 pub use action::{
-    Action, Edge, Outcome, ParseDefaults, ParseError, Target, load_register, register_path,
-    run_action, save_register,
+    Action, Edge, GapLen, Outcome, ParseDefaults, ParseError, Target, load_register, register_path,
+    run_action, save_register, track_label,
 };
 pub use detect::{Span, reconstruct};
 pub use edit::{
@@ -36,6 +36,7 @@ pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
 pub use project::{Asset, Project, ProjectError, VideoSettings};
 pub use time::{
     Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, grid_time,
-    nominal_fps, parse_rate, parse_time, parse_timecode, secs_f64, timecode_to_frames,
+    nominal_fps, parse_rate, parse_signed_time, parse_time, parse_timecode, secs_f64,
+    timecode_to_frames,
 };
 pub use timeline::{Clip, Timeline, TimelineError, Track, TrackKind};

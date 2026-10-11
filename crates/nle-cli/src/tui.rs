@@ -19,7 +19,7 @@ use nle_core::edit;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind};
 use nle_core::{
     Armed, Batch, Clip, CommitKind, EditError, History, Project, Seconds, clip_span, commit_batch,
-    frame_of, frame_to_secs, gap_span, plan_commit, resolve_armed,
+    frame_of, frame_to_secs, gap_span, plan_commit, resolve_armed, track_label,
 };
 
 use crate::mpv::{Mpv, PlaybackState};
@@ -2651,25 +2651,6 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("{icon} · {mode}{count}"), style),
     ]);
     f.render_widget(Paragraph::new(line), area);
-}
-
-/// Short label for a track: video tracks are `v1..`, audio `a1..`, numbered
-/// within their kind by stacking order.
-fn track_label(project: &Project, ti: usize) -> String {
-    let (mut v, mut a) = (0, 0);
-    for (i, t) in project.timeline.tracks.iter().enumerate() {
-        match t.kind {
-            TrackKind::Video => v += 1,
-            TrackKind::Audio => a += 1,
-        }
-        if i == ti {
-            return match t.kind {
-                TrackKind::Video => format!("v{v}"),
-                TrackKind::Audio => format!("a{a}"),
-            };
-        }
-    }
-    "—".to_string()
 }
 
 /// Make track `idx` active (clamped) and return its label. Leaves the monitor

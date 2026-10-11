@@ -23,9 +23,12 @@ use nle_core::detect::{Span, reconstruct};
 use nle_core::edit;
 use nle_core::edl::{self, EdlEvent};
 use nle_core::otio::{self, OtioItem};
-use nle_core::time::{parse_timecode, timecode_to_frames};
+use nle_core::time::{parse_signed_time, parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
-use nle_core::{Asset, Project, Seconds, VideoSettings, format_seconds, parse_rate, parse_time};
+use nle_core::{
+    Action, Asset, Edge, GapLen, Project, Seconds, Target, VideoSettings, format_seconds,
+    load_register, parse_rate, parse_time, run_action, save_register, track_label,
+};
 use nle_ffmpeg::detect::{DetectOptions, detect};
 use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
 
@@ -46,7 +49,7 @@ struct Cli {
     command: Cmd,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Cmd {
     /// Create an empty project
     Init {
@@ -76,10 +79,13 @@ enum Cmd {
         #[arg(long = "out", value_name = "TIME")]
         out_point: Option<String>,
     },
-    /// Remove a clip by id (see `nle show`)
+    /// Remove a clip by id (see `nle show`); `--ripple` closes the gap
     Remove {
         /// Clip id
         id: u32,
+        /// Ripple: followers slide left instead of leaving a gap
+        #[arg(long)]
+        ripple: bool,
     },
     /// Change a clip's playback speed (the track ripples to fit)
     Speed {
@@ -91,6 +97,135 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         track: usize,
     },
+    /// Move a segment's in-edge to a position (TUI `i`; `--ripple` = `I`)
+    TrimIn {
+        /// Where the new edge lands (seconds or timecode)
+        #[arg(long, value_name = "TIME")]
+        at: String,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+        /// Ripple: followers slide left to close the trimmed span
+        #[arg(long)]
+        ripple: bool,
+    },
+    /// Move a segment's out-edge to a position (TUI `o` / `O`)
+    TrimOut {
+        /// Where the new edge lands (seconds or timecode)
+        #[arg(long, value_name = "TIME")]
+        at: String,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+        /// Ripple: followers slide left to close the trimmed span
+        #[arg(long)]
+        ripple: bool,
+    },
+    /// Split the segment under a position (TUI `s`)
+    Split {
+        /// Where to cut (seconds or timecode)
+        #[arg(long, value_name = "TIME")]
+        at: String,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+    },
+    /// Insert a gap at a position (TUI `_`)
+    Gap {
+        /// Where to insert (seconds or timecode)
+        #[arg(long, value_name = "TIME")]
+        at: String,
+        /// Gap length in frames (default 1)
+        #[arg(long)]
+        frames: Option<i64>,
+        /// Gap length as a time (alternative to --frames)
+        #[arg(long, value_name = "TIME")]
+        dur: Option<String>,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+    },
+    /// Delete a segment (TUI `dd`; `--ripple` = `D`)
+    Delete {
+        /// Delete the segment under this position
+        #[arg(
+            long,
+            value_name = "TIME",
+            required_unless_present_any = ["clip", "seg"]
+        )]
+        at: Option<String>,
+        /// Delete this clip by id (finds its track)
+        #[arg(long)]
+        clip: Option<u32>,
+        /// Delete this segment by index (from `nle show`)
+        #[arg(long)]
+        seg: Option<usize>,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+        /// Ripple: followers slide left instead of leaving a gap
+        #[arg(long)]
+        ripple: bool,
+    },
+    /// Yank a segment into the shared register (TUI `yy`)
+    Yank {
+        /// Yank the segment under this position
+        #[arg(
+            long,
+            value_name = "TIME",
+            required_unless_present_any = ["clip", "seg"]
+        )]
+        at: Option<String>,
+        /// Yank this clip by id (finds its track)
+        #[arg(long)]
+        clip: Option<u32>,
+        /// Yank this segment by index (from `nle show`)
+        #[arg(long)]
+        seg: Option<usize>,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+    },
+    /// Paste the register at a position (TUI `p`; `--ripple` = `P`)
+    Paste {
+        /// Where to insert (seconds or timecode)
+        #[arg(long, value_name = "TIME")]
+        at: String,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+        /// Ripple: insert and push followers right
+        #[arg(long)]
+        ripple: bool,
+    },
+    /// Move one edge of a clip or gap to a position (the extend commit)
+    Extend {
+        /// The clip whose edge to move (finds its track)
+        #[arg(long, required_unless_present_any = ["seg", "at"])]
+        clip: Option<u32>,
+        /// The segment whose edge to move (index from `nle show`)
+        #[arg(long)]
+        seg: Option<usize>,
+        /// The segment under this position (alternative to --clip/--seg)
+        #[arg(long, value_name = "TIME")]
+        at: Option<String>,
+        /// Which edge: in (head/left) or out (tail/right)
+        #[arg(long, value_name = "EDGE")]
+        edge: String,
+        /// Where the edge lands (seconds or timecode; may be negative)
+        #[arg(long, value_name = "TIME")]
+        to: String,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+        /// Ripple: push followers aside instead of overwriting
+        #[arg(long)]
+        ripple: bool,
+    },
+    /// Undo the last edit (TUI `u`; works on TUI-made edits too)
+    Undo {},
+    /// Redo the last undone edit (TUI `Ctrl-r`)
+    Redo {},
     /// Drop sub-frame stumps and snap a drifted timeline to the frame grid
     PurgeStumps {
         /// Only this track (1-based); default: every track
@@ -255,7 +390,7 @@ enum Cmd {
 }
 
 /// Media-pool subcommands.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum MediaCmd {
     /// List pooled assets and how many clips use each
     Ls,
@@ -267,7 +402,7 @@ enum MediaCmd {
 }
 
 /// Track subcommands.
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum TrackCmd {
     /// List tracks (index, kind, mute, segment count)
     Ls,
@@ -314,34 +449,262 @@ impl From<EncoderArg> for Encoder {
     }
 }
 
+// ------------------------------------------------------------ action mapping
+
+/// A CLI time: seconds or timecode, optionally negative (an extend target
+/// can reach back past time 0).
+fn cli_time(s: &str) -> Result<f64, String> {
+    parse_signed_time(s)
+        .map(|t| *t.numer() as f64 / *t.denom() as f64)
+        .map_err(|e| format!("invalid time {s:?} ({e})"))
+}
+
+/// A 1-based CLI index (`--track N`, `nle track rm N`) → 0-based model
+/// index. Track numbers are 1-based everywhere, matching `v1`/`a1`.
+fn cli_index(n: usize, what: &str) -> Result<usize, String> {
+    if n >= 1 {
+        Ok(n - 1)
+    } else {
+        Err(format!("{what} is 1-based, got {n}"))
+    }
+}
+
+/// `--at`/`--clip`/`--seg`: exactly one way to address a segment.
+fn cli_target(
+    at: &Option<String>,
+    clip: Option<u32>,
+    seg: Option<usize>,
+) -> Result<Target, String> {
+    match (at, clip, seg) {
+        (Some(_), None, None) => cli_time(at.as_deref().unwrap_or_default()).map(Target::At),
+        (None, Some(c), None) => Ok(Target::Clip(c)),
+        (None, None, Some(s)) => Ok(Target::Segment(s)),
+        (None, None, None) => Err("pass --at T, --clip N, or --seg N".to_string()),
+        _ => Err("use only one of --at/--clip/--seg".to_string()),
+    }
+}
+
+/// `--edge in|out` (head/tail aliases accepted).
+fn cli_edge(s: &str) -> Result<Edge, String> {
+    match s {
+        "in" | "head" => Ok(Edge::In),
+        "out" | "tail" => Ok(Edge::Out),
+        other => Err(format!("--edge expects in|out, got {other:?}")),
+    }
+}
+
+/// The edit-shaped CLI commands as catalog [`Action`]s — the single
+/// mapping behind both `main`'s dispatch and the CLI-parity test, so a
+/// command can't exist without its action. `None` means "not an action"
+/// (probe, export, imports, queries); `Some(Err)` is an argument problem.
+///
+/// `nle add` is the one exception: it is a pool write + paste in one
+/// step, so it builds its `Paste` action after probing.
+fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
+    match cmd {
+        Cmd::TrimIn { at, track, ripple } => Some(cli_index(*track, "--track").and_then(|track| {
+            cli_time(at).map(|at| Action::TrimIn {
+                track,
+                at,
+                ripple: *ripple,
+            })
+        })),
+        Cmd::TrimOut { at, track, ripple } => {
+            Some(cli_index(*track, "--track").and_then(|track| {
+                cli_time(at).map(|at| Action::TrimOut {
+                    track,
+                    at,
+                    ripple: *ripple,
+                })
+            }))
+        }
+        Cmd::Split { at, track } => Some(
+            cli_index(*track, "--track")
+                .and_then(|track| cli_time(at).map(|at| Action::Split { track, at })),
+        ),
+        Cmd::Gap {
+            at,
+            frames,
+            dur,
+            track,
+        } => Some(cli_index(*track, "--track").and_then(|track| {
+            let at = cli_time(at)?;
+            let len = match (frames, dur) {
+                (Some(_), Some(_)) => return Err("use either --frames or --dur".to_string()),
+                (Some(n), None) => GapLen::Frames(*n),
+                (None, Some(d)) => cli_time(d).map(GapLen::Seconds)?,
+                (None, None) => GapLen::Frames(1),
+            };
+            Ok(Action::InsertGap { track, at, len })
+        })),
+        Cmd::Delete {
+            at,
+            clip,
+            seg,
+            track,
+            ripple,
+        } => Some(cli_index(*track, "--track").and_then(|track| {
+            cli_target(at, *clip, *seg).map(|target| Action::Delete {
+                track,
+                target,
+                ripple: *ripple,
+            })
+        })),
+        Cmd::Yank {
+            at,
+            clip,
+            seg,
+            track,
+        } => Some(cli_index(*track, "--track").and_then(|track| {
+            cli_target(at, *clip, *seg).map(|target| Action::Yank { track, target })
+        })),
+        Cmd::Paste { at, track, ripple } => Some(cli_index(*track, "--track").and_then(|track| {
+            cli_time(at).map(|at| Action::Paste {
+                track,
+                at,
+                ripple: *ripple,
+                segment: None,
+            })
+        })),
+        Cmd::Extend {
+            clip,
+            seg,
+            at,
+            edge,
+            to,
+            track,
+            ripple,
+        } => Some(cli_index(*track, "--track").and_then(|track| {
+            let target = cli_target(at, *clip, *seg)?;
+            let edge = cli_edge(edge)?;
+            let to = cli_time(to)?;
+            Ok(Action::Extend {
+                track,
+                target,
+                edge,
+                to,
+                ripple: *ripple,
+            })
+        })),
+        Cmd::Remove { id, ripple } => Some(Ok(Action::Delete {
+            track: 0,
+            target: Target::Clip(*id),
+            ripple: *ripple,
+        })),
+        Cmd::Speed { id, rate, track } => Some(cli_index(*track, "--track").and_then(|track| {
+            parse_speed_arg(rate)
+                .map_err(|e| e.to_string())
+                .map(|rate| Action::SetSpeed {
+                    track,
+                    clip: *id,
+                    rate,
+                })
+        })),
+        Cmd::PurgeStumps { track } => Some(
+            track
+                .map(|n| cli_index(n, "--track"))
+                .transpose()
+                .map(|track| Action::PurgeStumps { track }),
+        ),
+        Cmd::Undo {} => Some(Ok(Action::Undo)),
+        Cmd::Redo {} => Some(Ok(Action::Redo)),
+        Cmd::Track { action } => match action {
+            TrackCmd::Ls => None,
+            TrackCmd::Add { kind } => Some(Ok(Action::TrackAdd {
+                kind: match kind {
+                    TrackKindArg::Video => TrackKind::Video,
+                    TrackKindArg::Audio => TrackKind::Audio,
+                },
+            })),
+            TrackCmd::Mute { index } => Some(
+                index
+                    .map(|n| cli_index(n, "track index"))
+                    .transpose()
+                    .map(|track| Action::TrackMute {
+                        track: track.unwrap_or(0),
+                    }),
+            ),
+            TrackCmd::Rm { index } => {
+                Some(cli_index(*index, "track index").map(|track| Action::TrackRm { track }))
+            }
+        },
+        Cmd::Media { action } => match action {
+            MediaCmd::Ls => None,
+            MediaCmd::Rm { id } => Some(Ok(Action::AssetRm { id: *id })),
+        },
+        _ => None,
+    }
+}
+
+/// Run one catalog action against the project file: load, apply through
+/// the undo history, persist project + sidecar + register. A CLI edit is
+/// undoable (`nle undo`) exactly like a TUI edit — same executor, same
+/// history.
+fn run_cli_action(project_path: &Path, action: &Action) -> Result<()> {
+    let mut project = Project::load(project_path)?;
+    let mut history =
+        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
+    let mut register = load_register(project_path);
+    // The edit is "made from" its own position, so undoing it returns
+    // there (the TUI passes the playhead instead — its session state).
+    let from = match action {
+        Action::TrimIn { at, .. }
+        | Action::TrimOut { at, .. }
+        | Action::Split { at, .. }
+        | Action::InsertGap { at, .. }
+        | Action::Paste { at, .. } => *at,
+        Action::Delete { target, .. } | Action::Yank { target, .. } => match target {
+            Target::At(t) => *t,
+            _ => 0.0,
+        },
+        _ => 0.0,
+    };
+    let outcome = run_action(&mut project, &mut history, &mut register, action, from)?;
+    project.save(project_path)?;
+    history.save(&edit::History::sidecar_path(project_path))?;
+    save_register(project_path, register.as_ref())?;
+    log::line(&format!("action {}", outcome.desc));
+    match outcome.playhead {
+        Some(f) => println!("✓ {} (playhead f{f})", outcome.desc),
+        None => println!("✓ {}", outcome.desc),
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    // Process-bound commands and queries dispatch here; every edit-shaped
+    // command falls through to the action catalog below — the same
+    // executor (and undo history) the TUI uses.
+    match &cli.command {
         #[cfg(feature = "tui")]
-        Cmd::Edit {} => cmd_edit(&cli.project),
-        Cmd::Edl { track } => cmd_edl(&cli.project, track),
-        Cmd::Init { force } => cmd_init(&cli.project, force),
-        Cmd::Import { files } => cmd_import(&cli.project, &files),
+        Cmd::Edit {} => return cmd_edit(&cli.project),
+        Cmd::Edl { track } => return cmd_edl(&cli.project, *track),
+        Cmd::Init { force } => return cmd_init(&cli.project, *force),
+        Cmd::Import { files } => return cmd_import(&cli.project, files),
         Cmd::Add {
             file,
             track,
             at,
             in_point,
             out_point,
-        } => cmd_add(
-            &cli.project,
-            &file,
-            track,
-            at.as_deref(),
-            in_point.as_deref(),
-            out_point.as_deref(),
-        ),
-        Cmd::Remove { id } => cmd_remove(&cli.project, id),
-        Cmd::Speed { id, rate, track } => cmd_speed(&cli.project, id, &rate, track),
-        Cmd::PurgeStumps { track } => cmd_purge_stumps(&cli.project, track),
-        Cmd::Show { json } => cmd_show(&cli.project, json),
-        Cmd::Media { action } => cmd_media(&cli.project, action),
-        Cmd::Track { action } => cmd_track(&cli.project, action),
+        } => {
+            return cmd_add(
+                &cli.project,
+                file,
+                *track,
+                at.as_deref(),
+                in_point.as_deref(),
+                out_point.as_deref(),
+            );
+        }
+        Cmd::Show { json } => return cmd_show(&cli.project, *json),
+        Cmd::Track {
+            action: TrackCmd::Ls,
+        } => return cmd_track_ls(&cli.project),
+        Cmd::Media {
+            action: MediaCmd::Ls,
+        } => return cmd_media_ls(&cli.project),
         Cmd::ImportEdl {
             file,
             media,
@@ -349,29 +712,33 @@ fn main() -> Result<()> {
             src_offset,
             map,
             force,
-        } => cmd_import_edl(
-            &cli.project,
-            &file,
-            &media,
-            fps.as_deref(),
-            &src_offset,
-            &map,
-            force,
-        ),
+        } => {
+            return cmd_import_edl(
+                &cli.project,
+                file,
+                media,
+                fps.as_deref(),
+                src_offset,
+                map,
+                *force,
+            );
+        }
         Cmd::ImportOtio {
             file,
             media,
             fps,
             remap,
             force,
-        } => cmd_import_otio(
-            &cli.project,
-            &file,
-            media.as_deref(),
-            fps.as_deref(),
-            &remap,
-            force,
-        ),
+        } => {
+            return cmd_import_otio(
+                &cli.project,
+                file,
+                media.as_deref(),
+                fps.as_deref(),
+                remap,
+                *force,
+            );
+        }
         Cmd::DetectEdits {
             file,
             threshold,
@@ -384,35 +751,39 @@ fn main() -> Result<()> {
             append,
             track,
             force,
-        } => cmd_detect_edits(DetectArgs {
-            project: &cli.project,
-            file: &file,
-            threshold,
-            min_shot: &min_shot,
-            black_min: &black_min,
-            no_gaps,
-            fps: fps.as_deref(),
-            video_only,
-            list,
-            append,
-            track,
-            force,
-        }),
+        } => {
+            return cmd_detect_edits(DetectArgs {
+                project: &cli.project,
+                file: file.as_path(),
+                threshold: *threshold,
+                min_shot: min_shot.as_str(),
+                black_min: black_min.as_str(),
+                no_gaps: *no_gaps,
+                fps: fps.as_deref(),
+                video_only: *video_only,
+                list: *list,
+                append: *append,
+                track: *track,
+                force: *force,
+            });
+        }
         Cmd::Export {
             output,
             encoder,
             crf,
             preset,
             bitrate,
-        } => cmd_export(
-            &cli.project,
-            &output,
-            encoder.into(),
-            crf,
-            &preset,
-            &bitrate,
-        ),
-        Cmd::Probe { file, json } => cmd_probe(&file, json),
+        } => {
+            return cmd_export(
+                &cli.project,
+                output,
+                (*encoder).into(),
+                *crf,
+                preset,
+                bitrate,
+            );
+        }
+        Cmd::Probe { file, json } => return cmd_probe(file, *json),
         Cmd::Trim {
             input,
             in_point,
@@ -423,18 +794,25 @@ fn main() -> Result<()> {
             crf,
             preset,
             bitrate,
-        } => cmd_trim(
-            &input,
-            &in_point,
-            &out_point,
-            &output,
-            encoder.into(),
-            copy,
-            crf,
-            &preset,
-            &bitrate,
-        ),
+        } => {
+            return cmd_trim(
+                input,
+                in_point,
+                out_point,
+                output,
+                (*encoder).into(),
+                *copy,
+                *crf,
+                preset,
+                bitrate,
+            );
+        }
+        _ => {}
     }
+    // Everything else is an edit: run it through the catalog.
+    let action =
+        to_action(&cli.command).ok_or_else(|| anyhow::anyhow!("internal: not an action"))?;
+    run_cli_action(&cli.project, &action.map_err(anyhow::Error::msg)?)
 }
 
 // ------------------------------------------------------------ project cmds
@@ -556,12 +934,14 @@ fn cmd_add(
         .canonicalize()
         .with_context(|| format!("{} not found", file.display()))?;
 
+    let mut imported = false;
     let asset_id = match project.asset_by_path(&canonical) {
         Some(a) => a.id,
         None => {
             let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
             let (id, _) = project.add_asset(canonical, report);
             println!("· auto-imported as asset #{id}");
+            imported = true;
             id
         }
     };
@@ -624,92 +1004,29 @@ fn cmd_add(
         asset_out: out_t,
         speed: Seconds::from_integer(1),
     });
-    let mut history = edit::History::default();
-    let batch = edit::paste_ripple_on(&project, ti, &scratch, secs_f64(&append_at))?;
-    history.apply(&mut project, batch, 0)?;
-    save_and_reset_history(&project, project_path)?;
-    Ok(())
+    // The pool/settings writes land first: a fresh import re-baselines the
+    // undo sidecar (an out-of-band pool write), while an add of an
+    // already-pooled file records history like any other edit. The insert
+    // itself goes through the catalog — the same `Paste` the TUI's pool
+    // insert runs — so it is undoable.
+    if imported {
+        save_and_reset_history(&project, project_path)?;
+    } else {
+        project.save(project_path)?;
+    }
+    run_cli_action(
+        project_path,
+        &Action::Paste {
+            track: ti,
+            at: secs_f64(&append_at),
+            ripple: true,
+            segment: Some(scratch),
+        },
+    )
 }
 
 fn secs_f64(t: &Seconds) -> f64 {
     *t.numer() as f64 / *t.denom() as f64
-}
-
-fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
-    let mut project = Project::load(project_path)?;
-    // Clip ids are unique across tracks; find the one that holds it.
-    let Some(ti) = project
-        .timeline
-        .tracks
-        .iter()
-        .position(|t| t.clip_index(id).is_some())
-    else {
-        bail!("clip #{id} not found");
-    };
-    let batch = edit::delete_clip_by_id_on(&project, ti, id)?;
-    let mut history = edit::History::default();
-    history.apply(&mut project, batch, 0)?;
-    save_and_reset_history(&project, project_path)?;
-    println!("✓ removed clip #{id}");
-    Ok(())
-}
-
-fn cmd_speed(project_path: &Path, id: u32, rate: &str, track: usize) -> Result<()> {
-    let mut project = Project::load(project_path)?;
-    let ti = track.saturating_sub(1);
-    if ti >= project.timeline.tracks.len() {
-        bail!("no track #{track}");
-    }
-    let speed = parse_speed_arg(rate)?;
-    let batch = edit::set_speed_on(&project, ti, id, speed)?;
-    let mut history = edit::History::default();
-    history.apply(&mut project, batch, 0)?;
-    save_and_reset_history(&project, project_path)?;
-    println!("✓ clip #{id} → {}× (track rippled)", format_seconds(&speed));
-    Ok(())
-}
-
-fn cmd_purge_stumps(project_path: &Path, track: Option<usize>) -> Result<()> {
-    let mut project = Project::load(project_path)?;
-    let fps = project
-        .fps
-        .context("no frame rate set — add a clip first")?;
-    let indices: Vec<usize> = match track {
-        Some(n) => {
-            let i = n.saturating_sub(1);
-            if i >= project.timeline.tracks.len() {
-                bail!("no track #{n}");
-            }
-            vec![i]
-        }
-        None => (0..project.timeline.tracks.len()).collect(),
-    };
-    let durations: HashMap<u32, Seconds> = project
-        .media
-        .iter()
-        .filter_map(|a| a.duration().map(|d| (a.id, d)))
-        .collect();
-    let media = |id: u32| durations.get(&id).copied();
-    let mut notes = Vec::new();
-    let mut dropped = 0usize;
-    for ti in indices {
-        let t = &mut project.timeline.tracks[ti];
-        notes.extend(edit::clamp_to_media(t, &media, fps));
-        let (cleaned, n) = edit::purge_stumps(t, fps);
-        t.segments = cleaned;
-        dropped += n;
-    }
-    for n in &notes {
-        eprintln!("warning: {n}");
-    }
-    project.validate()?;
-    save_and_reset_history(&project, project_path)?;
-    println!(
-        "✓ {} — purged {dropped} sub-frame segment(s), adjusted {} clip(s)",
-        project_path.display(),
-        notes.len()
-    );
-    Ok(())
 }
 
 fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
@@ -745,12 +1062,12 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
         println!("  {}{mute}", track_label(&project, ti));
 
         let mut cursor = Seconds::from_integer(0);
-        for seg in &track.segments {
+        for (si, seg) in track.segments.iter().enumerate() {
             match seg {
                 Segment::Gap(g) => {
                     let end = cursor + g.duration;
                     println!(
-                        "      ┄ gap {}–{}",
+                        "      [{si}] ┄ gap {}–{}",
                         format_seconds(&cursor),
                         format_seconds(&end)
                     );
@@ -769,7 +1086,7 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
                         String::new()
                     };
                     println!(
-                        "    #{:<4}{:>9} – {:<9} {}{speed}  (src {}–{})",
+                        "    [{si}] #{:<4}{:>9} – {:<9} {}{speed}  (src {}–{})",
                         clip.id,
                         format_seconds(&start),
                         format_seconds(&end),
@@ -785,136 +1102,54 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Short label for a track: `v1..` for video, `a1..` for audio, numbered
-/// within their kind by stacking order (matches the TUI gutter).
-fn track_label(project: &Project, ti: usize) -> String {
-    let (mut v, mut a) = (0, 0);
+/// `nle media ls` — the pool listing. (`nle media rm` is a catalog
+/// action; `main` routes it there, undoably.)
+fn cmd_media_ls(project_path: &Path) -> Result<()> {
+    let project = Project::load(project_path)?;
+    if project.media.is_empty() {
+        println!("media pool is empty — `nle import <file>`");
+        return Ok(());
+    }
+    println!(
+        "{} — {} asset(s)",
+        project_path.display(),
+        project.media.len()
+    );
+    for a in &project.media {
+        let used = project.asset_usage(a.id);
+        let usage = if used.is_empty() {
+            "unused".to_string()
+        } else {
+            format!("used by {used:?}")
+        };
+        println!("  #{:<4} {:<9} {}", a.id, asset_summary(a), usage);
+    }
+    Ok(())
+}
+
+/// `nle track ls` — the track listing. (add/mute/rm are catalog actions.)
+fn cmd_track_ls(project_path: &Path) -> Result<()> {
+    let project = Project::load(project_path)?;
+    println!(
+        "{} — {} track(s)",
+        project_path.display(),
+        project.timeline.tracks.len()
+    );
     for (i, t) in project.timeline.tracks.iter().enumerate() {
-        match t.kind {
-            TrackKind::Video => v += 1,
-            TrackKind::Audio => a += 1,
-        }
-        if i == ti {
-            return match t.kind {
-                TrackKind::Video => format!("v{v}"),
-                TrackKind::Audio => format!("a{a}"),
-            };
-        }
+        let kind = match t.kind {
+            TrackKind::Video => "video",
+            TrackKind::Audio => "audio",
+        };
+        let mute = if t.muted { " (muted)" } else { "" };
+        println!(
+            "  {:<3} {:<6} {} segment(s){}",
+            i + 1,
+            kind,
+            t.segments.len(),
+            mute
+        );
     }
-    "—".to_string()
-}
-
-fn cmd_media(project_path: &Path, action: MediaCmd) -> Result<()> {
-    match action {
-        MediaCmd::Ls => {
-            let project = Project::load(project_path)?;
-            if project.media.is_empty() {
-                println!("media pool is empty — `nle import <file>`");
-                return Ok(());
-            }
-            println!(
-                "{} — {} asset(s)",
-                project_path.display(),
-                project.media.len()
-            );
-            for a in &project.media {
-                let used = project.asset_usage(a.id);
-                let usage = if used.is_empty() {
-                    "unused".to_string()
-                } else {
-                    format!("used by {used:?}")
-                };
-                println!("  #{:<4} {:<9} {}", a.id, asset_summary(a), usage);
-            }
-            Ok(())
-        }
-        MediaCmd::Rm { id } => {
-            let mut project = Project::load(project_path)?;
-            let removed = project.remove_asset(id)?;
-            save_and_reset_history(&project, project_path)?;
-            println!("✓ removed asset #{id} ({})", removed.path.display());
-            Ok(())
-        }
-    }
-}
-
-fn cmd_track(project_path: &Path, action: TrackCmd) -> Result<()> {
-    let mut project = Project::load(project_path)?;
-    match action {
-        TrackCmd::Ls => {
-            println!(
-                "{} — {} track(s)",
-                project_path.display(),
-                project.timeline.tracks.len()
-            );
-            for (i, t) in project.timeline.tracks.iter().enumerate() {
-                let kind = match t.kind {
-                    TrackKind::Video => "video",
-                    TrackKind::Audio => "audio",
-                };
-                let mute = if t.muted { " (muted)" } else { "" };
-                println!(
-                    "  {:<3} {:<6} {} segment(s){}",
-                    i + 1,
-                    kind,
-                    t.segments.len(),
-                    mute
-                );
-            }
-            Ok(())
-        }
-        TrackCmd::Add { kind } => {
-            let kind = match kind {
-                TrackKindArg::Video => TrackKind::Video,
-                TrackKindArg::Audio => TrackKind::Audio,
-            };
-            let idx = project.timeline.add_track(kind);
-            save_and_reset_history(&project, project_path)?;
-            println!("✓ added track #{}", idx + 1);
-            Ok(())
-        }
-        TrackCmd::Mute { index } => {
-            let idx = index.map(|n| n.saturating_sub(1)).unwrap_or(0);
-            let Some(track) = project.timeline.track_mut(idx) else {
-                bail!("no track #{}", idx + 1);
-            };
-            track.muted = !track.muted;
-            let muted = track.muted;
-            save_and_reset_history(&project, project_path)?;
-            println!(
-                "✓ track #{} {}",
-                idx + 1,
-                if muted { "muted" } else { "unmuted" }
-            );
-            Ok(())
-        }
-        TrackCmd::Rm { index } => {
-            let idx = index.saturating_sub(1);
-            if idx >= project.timeline.tracks.len() {
-                bail!("no track #{index}");
-            }
-            if project.timeline.tracks[idx].kind == TrackKind::Video
-                && project.timeline.video_tracks().count() <= 1
-            {
-                bail!("can't remove the only video track");
-            }
-            // The track's clips go with it; history is re-baselined because
-            // indices shift (see `save_and_reset_history`).
-            let removed = project.timeline.tracks.remove(idx);
-            let clips = removed
-                .segments
-                .iter()
-                .filter(|s| matches!(s, Segment::Clip(_)))
-                .count();
-            save_and_reset_history(&project, project_path)?;
-            if clips > 0 {
-                println!("✓ removed track #{index} ({clips} clip(s) deleted)");
-            } else {
-                println!("✓ removed track #{index}");
-            }
-            Ok(())
-        }
-    }
+    Ok(())
 }
 
 /// Media extensions probed when importing a `--media` directory.
@@ -1872,6 +2107,186 @@ fn cmd_trim(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every catalog action is reachable from the CLI — through the same
+    /// [`to_action`] mapping `main` dispatches with. A new `Action`
+    /// variant without a CLI spelling fails this.
+    #[test]
+    fn every_action_is_reachable_from_the_cli() {
+        let cmds = [
+            Cmd::TrimIn {
+                at: "1".into(),
+                track: 1,
+                ripple: false,
+            },
+            Cmd::TrimOut {
+                at: "1".into(),
+                track: 1,
+                ripple: false,
+            },
+            Cmd::Split {
+                at: "1".into(),
+                track: 1,
+            },
+            Cmd::Gap {
+                at: "1".into(),
+                frames: Some(3),
+                dur: None,
+                track: 1,
+            },
+            Cmd::Delete {
+                at: Some("1".into()),
+                clip: None,
+                seg: None,
+                track: 1,
+                ripple: false,
+            },
+            Cmd::Yank {
+                at: Some("1".into()),
+                clip: None,
+                seg: None,
+                track: 1,
+            },
+            Cmd::Paste {
+                at: "1".into(),
+                track: 1,
+                ripple: false,
+            },
+            Cmd::Speed {
+                id: 1,
+                rate: "2".into(),
+                track: 1,
+            },
+            Cmd::Extend {
+                clip: Some(1),
+                seg: None,
+                at: None,
+                edge: "in".into(),
+                to: "2".into(),
+                track: 1,
+                ripple: false,
+            },
+            Cmd::PurgeStumps { track: None },
+            Cmd::Track {
+                action: TrackCmd::Add {
+                    kind: TrackKindArg::Video,
+                },
+            },
+            Cmd::Track {
+                action: TrackCmd::Mute { index: None },
+            },
+            Cmd::Track {
+                action: TrackCmd::Rm { index: 1 },
+            },
+            Cmd::Media {
+                action: MediaCmd::Rm { id: 1 },
+            },
+            Cmd::Undo {},
+            Cmd::Redo {},
+        ];
+        let mut seen = vec![false; nle_core::action::SLOTS];
+        for cmd in &cmds {
+            let a = to_action(cmd)
+                .unwrap_or_else(|| panic!("{cmd:?} is an edit command"))
+                .unwrap_or_else(|e| panic!("{cmd:?}: {e}"));
+            let s = a.slot();
+            assert!(!seen[s], "{cmd:?} duplicates slot {s}");
+            seen[s] = true;
+        }
+        assert!(seen.iter().all(|&s| s), "CLI-unreachable actions: {seen:?}");
+    }
+
+    #[test]
+    fn cli_flags_map_to_the_expected_action() {
+        let cmd = Cmd::Delete {
+            at: Some("1.5".into()),
+            clip: None,
+            seg: None,
+            track: 2,
+            ripple: true,
+        };
+        assert_eq!(
+            to_action(&cmd).unwrap().unwrap(),
+            Action::Delete {
+                track: 1,
+                target: Target::At(1.5),
+                ripple: true,
+            }
+        );
+        // --dur resolves against the project's frame rate at run time.
+        let cmd = Cmd::Gap {
+            at: "0".into(),
+            frames: None,
+            dur: Some("2".into()),
+            track: 1,
+        };
+        assert_eq!(
+            to_action(&cmd).unwrap().unwrap(),
+            Action::InsertGap {
+                track: 0,
+                at: 0.0,
+                len: GapLen::Seconds(2.0),
+            }
+        );
+        // Conflicting addressing is refused, not silently picked.
+        let cmd = Cmd::Yank {
+            at: Some("1".into()),
+            clip: Some(3),
+            seg: None,
+            track: 1,
+        };
+        assert!(to_action(&cmd).unwrap().is_err());
+    }
+
+    /// A CLI edit records history — `nle undo` undoes it, and the
+    /// playhead attribution comes back with the entry.
+    #[test]
+    fn cli_edits_go_through_the_undo_history() {
+        let dir = std::env::temp_dir().join(format!("nle-cli-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.json");
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset(PathBuf::from("/media/red.mp4"), RawProbe::default());
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            a,
+            Seconds::from_integer(0),
+            Seconds::from_integer(4),
+        ))];
+        p.save(&path).unwrap();
+
+        run_cli_action(&path, &Action::Split { track: 0, at: 2.0 }).unwrap();
+        assert_eq!(
+            Project::load(&path)
+                .unwrap()
+                .timeline
+                .video_track()
+                .unwrap()
+                .segments
+                .len(),
+            2
+        );
+        run_cli_action(&path, &Action::Undo {}).unwrap();
+        let after = Project::load(&path).unwrap();
+        assert_eq!(
+            after.timeline.video_track().unwrap().segments.len(),
+            1,
+            "undo restores the pre-split timeline"
+        );
+        run_cli_action(&path, &Action::Redo {}).unwrap();
+        assert_eq!(
+            Project::load(&path)
+                .unwrap()
+                .timeline
+                .video_track()
+                .unwrap()
+                .segments
+                .len(),
+            2,
+            "redo reapplies it"
+        );
+    }
 
     fn gap(secs: i64) -> Segment {
         Segment::Gap(Gap {

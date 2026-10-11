@@ -25,7 +25,8 @@ pub const MAX_HISTORY: usize = 100;
 /// README "Compatibility: none, by design"): old sidecars start fresh.
 /// v7 stored clip speed as raw `speed_num`/`speed_den` integers; v8 stores
 /// it as a `rational_ser` fraction like every other time in the Atom.
-pub const HISTORY_VERSION: u32 = 8;
+/// v9 persists the redo stack too, so `nle redo` works across processes.
+pub const HISTORY_VERSION: u32 = 9;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -325,18 +326,18 @@ impl History {
         self.done.len()
     }
 
-    /// Serializable snapshot of the undo stack (persisted in a sidecar
-    /// file). Only `done` is stored: redo history dies across restarts
-    /// and is rebuilt live in-session.
+    /// Serializable snapshot of the undo stacks (persisted in a sidecar
+    /// file). Both stacks are stored: `nle redo` runs in its own process,
+    /// so a session-only redo stack would make it permanently empty.
     pub fn state(&self) -> HistoryState {
         HistoryState {
             version: HISTORY_VERSION,
             done: self.done.clone(),
+            undone: self.undone.clone(),
         }
     }
 
     /// Rebuild a History from a snapshot, honoring the depth cap.
-    /// The redo stack always starts empty.
     pub fn restore(state: HistoryState) -> Self {
         if state.version != HISTORY_VERSION {
             return Self::default();
@@ -346,10 +347,12 @@ impl History {
             let excess = done.len() - MAX_HISTORY;
             done.drain(0..excess);
         }
-        Self {
-            done,
-            undone: Vec::new(),
+        let mut undone = state.undone;
+        if undone.len() > MAX_HISTORY {
+            let excess = undone.len() - MAX_HISTORY;
+            undone.drain(0..excess);
         }
+        Self { done, undone }
     }
 
     /// Sidecar path for a project file (`nle.json` → `nle.history.json`).
@@ -388,12 +391,13 @@ impl History {
     }
 }
 
-/// Serializable snapshot of the undo stack (the sidecar file).
-/// Only the `done` stack is stored; `undone` (redo) is session-only.
+/// Serializable snapshot of the undo stacks (the sidecar file). Both
+/// stacks persist so `nle undo` / `nle redo` work across processes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryState {
     pub version: u32,
     pub done: Vec<Change>,
+    pub undone: Vec<Change>,
 }
 
 /// One timeline segment, snapshotted for the undo stack. Clips are located
@@ -4324,14 +4328,14 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_persists_done_only_and_round_trips() {
+    fn sidecar_round_trips_both_stacks() {
         let mut p = fixture();
         let mut h = History::default();
         let batch = split(&p, 4.0).unwrap();
         h.apply(&mut p, batch, 0).unwrap();
         let batch = trim_in(&p, 1.0).unwrap();
         h.apply(&mut p, batch, 0).unwrap();
-        h.undo(&mut p).unwrap(); // done=[split], undone=[trim] (dies on save)
+        h.undo(&mut p).unwrap(); // done=[split], undone=[trim]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.history.json");
         h.save(&path).unwrap();
@@ -4341,16 +4345,20 @@ mod tests {
             text.contains(&format!("\"version\": {HISTORY_VERSION}")),
             "{text}"
         );
-        assert!(!text.contains("undone"), "{text}");
+        // Both stacks persist: `nle redo` runs in its own process, so a
+        // session-only redo stack would be permanently empty.
+        assert!(text.contains("undone"), "{text}");
         assert!(!text.contains("30/1"), "{text}");
 
         let mut loaded = History::load(&path).unwrap();
         assert!(loaded.can_undo());
-        assert!(!loaded.can_redo(), "redo dies across restarts");
+        assert!(loaded.can_redo());
         let mut q = p.clone();
-        assert!(matches!(loaded.redo(&mut q), Err(EditError::NothingToRedo)));
-        // the surviving entry still undoes
+        loaded.redo(&mut q).unwrap(); // the trim reapplies
+        assert_eq!(clip_ids(&q), vec![1, 2, 3]);
+        // and both entries still undo, newest first
         loaded.undo(&mut q).unwrap();
+        loaded.undo(&mut q).unwrap(); // the split undoes
         assert_eq!(clip_ids(&q), vec![1, 2]);
     }
 
@@ -4745,7 +4753,8 @@ mod tests {
         assert!(
             History::restore(HistoryState {
                 version: 2,
-                done: vec![]
+                done: vec![],
+                undone: vec![],
             })
             .depth()
                 == 0

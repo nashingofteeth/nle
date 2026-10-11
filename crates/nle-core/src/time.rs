@@ -125,6 +125,15 @@ pub fn format_seconds(t: &Seconds) -> String {
     }
 }
 
+/// Like [`parse_time`], but allows a leading `-`: an extend target can
+/// reach back past time 0 (a gap head inserting space).
+pub fn parse_signed_time(input: &str) -> Result<Seconds, TimeError> {
+    match input.strip_prefix('-') {
+        Some(rest) => Ok(-parse_time(rest)?),
+        None => parse_time(input),
+    }
+}
+
 /// Parse ffprobe's frame-rate strings like "30000/1001".
 /// Returns None for unknown ("0/0") or malformed values.
 pub fn parse_rate(s: &str) -> Option<Seconds> {

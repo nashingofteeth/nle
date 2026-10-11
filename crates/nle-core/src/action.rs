@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::edit::{self, EditError, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
-use crate::time::{Seconds, frame_of, grid_time, parse_time, secs_f64};
+use crate::time::{Seconds, frame_of, grid_time, parse_signed_time, secs_f64};
 use crate::timeline::{Segment, TrackKind};
 
 /// What an action addresses: the segment under a timeline position, a
@@ -36,6 +36,15 @@ pub enum Target {
 pub enum Edge {
     In,
     Out,
+}
+
+/// How long an inserted gap is. `Seconds` resolves against the project's
+/// frame rate at run time (the `:cmd`/CLI spelling `--dur` can't know it
+/// at parse time).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GapLen {
+    Frames(i64),
+    Seconds(f64),
 }
 
 /// Every project-mutating action, addressed explicitly (no hidden
@@ -59,11 +68,11 @@ pub enum Action {
         track: usize,
         at: f64,
     },
-    /// Insert `frames` of gap at `at` (`_`).
+    /// Insert a gap at `at` (`_`).
     InsertGap {
         track: usize,
         at: f64,
-        frames: i64,
+        len: GapLen,
     },
     /// Remove the addressed segment (`dd` = no ripple, `D` = ripple).
     Delete {
@@ -127,6 +136,37 @@ pub enum Action {
     Redo,
 }
 
+impl Action {
+    /// The catalog's slot number. Every variant gets one, and a new
+    /// variant fails to compile here until it has one — which is what lets
+    /// the parity tests prove that *both* other spellings (the `:cmd`
+    /// grammar and the CLI) cover the whole catalog.
+    pub fn slot(&self) -> usize {
+        match self {
+            Action::TrimIn { .. } => 0,
+            Action::TrimOut { .. } => 1,
+            Action::Split { .. } => 2,
+            Action::InsertGap { .. } => 3,
+            Action::Delete { .. } => 4,
+            Action::Yank { .. } => 5,
+            Action::Paste { .. } => 6,
+            Action::SetSpeed { .. } => 7,
+            Action::Extend { .. } => 8,
+            Action::PurgeStumps { .. } => 9,
+            Action::TrackAdd { .. } => 10,
+            Action::TrackMute { .. } => 11,
+            Action::TrackRm { .. } => 12,
+            Action::AssetRm { .. } => 13,
+            Action::Undo => 14,
+            Action::Redo => 15,
+        }
+    }
+}
+
+/// How many slots the catalog has — the coverage tests assert exactly
+/// this many are reachable from each spelling.
+pub const SLOTS: usize = 16;
+
 /// What running an action produced. `changed` tells the caller whether
 /// the project needs persisting (a yank only writes the register).
 #[derive(Debug, Clone, PartialEq)]
@@ -146,7 +186,6 @@ pub struct ParseDefaults {
     pub at: Option<f64>,
     pub track: usize,
     pub clip: Option<u32>,
-    pub fps: Option<Seconds>,
 }
 
 /// Why a `:cmd` line didn't parse. [`Unknown`](ParseError::Unknown) verbs
@@ -192,8 +231,15 @@ pub fn run_action(
             let batch = edit::split_on(project, *track, *at)?;
             apply(project, history, batch, from)
         }
-        Action::InsertGap { track, at, frames } => {
-            let batch = edit::insert_gap_on(project, *track, *at, *frames)?;
+        Action::InsertGap { track, at, len } => {
+            let frames = match len {
+                GapLen::Frames(n) => *n,
+                GapLen::Seconds(s) => {
+                    let fps = project.fps.ok_or(EditError::NoFps)?;
+                    (s * secs_f64(&fps)).round() as i64
+                }
+            };
+            let batch = edit::insert_gap_on(project, *track, *at, frames)?;
             apply(project, history, batch, from)
         }
         Action::Delete {
@@ -201,11 +247,13 @@ pub fn run_action(
             target,
             ripple,
         } => {
-            let batch = delete_batch(project, *track, *target, *ripple)?;
+            let ti = resolve_track(project, *track, *target)?;
+            let batch = delete_batch(project, ti, *target, *ripple)?;
             apply(project, history, batch, from)
         }
         Action::Yank { track, target } => {
-            let seg = segment_at(project, *track, *target)?;
+            let ti = resolve_track(project, *track, *target)?;
+            let seg = segment_at(project, ti, *target)?;
             let desc = yank_desc(project, &seg);
             *register = Some(seg);
             Ok(Outcome {
@@ -242,13 +290,15 @@ pub fn run_action(
             to,
             ripple,
         } => {
-            let armed = arm(project, *track, *target, *edge)?;
-            let edge_pos =
-                extend::armed_edge(project, &armed, *track).map_err(EditError::Extend)?;
-            let kind = extend::plan_commit(project, &armed, edge_pos, *to, *track)
+            let ti = resolve_track(project, *track, *target)?;
+            let armed = arm(project, ti, *target, *edge)?;
+            let edge_pos = extend::armed_edge(project, &armed, ti).map_err(EditError::Extend)?;
+            let kind = extend::plan_commit(project, &armed, edge_pos, *to, ti)
                 .map_err(EditError::Extend)?;
-            let batch = extend::commit_batch(project, *to, &armed, kind, *ripple, *track)?;
-            apply(project, history, batch, from)
+            let batch = extend::commit_batch(project, *to, &armed, kind, *ripple, ti)?;
+            // Undo attribution: like an extend-mode entry, the edit is
+            // made from the edge it moved — undo returns there.
+            apply(project, history, batch, edge_pos)
         }
         Action::PurgeStumps { track } => purge_stumps(project, history, *track),
         Action::TrackAdd { kind } => {
@@ -318,6 +368,27 @@ fn apply(
         changed: true,
         playhead: None,
     })
+}
+
+/// The track an action's target lives on. Position and segment-index
+/// targets use the action's own track; a clip id resolves wherever the
+/// clip is (ids are unique across tracks), so `--clip N` needs no
+/// `--track`.
+fn resolve_track(project: &Project, track: usize, target: Target) -> Result<usize, EditError> {
+    match target {
+        Target::Clip(id) => project
+            .timeline
+            .tracks
+            .iter()
+            .position(|t| t.clip_index(id).is_some())
+            .ok_or(EditError::ClipNotFound(id)),
+        _ => {
+            if project.timeline.track(track).is_none() {
+                return Err(EditError::TrackNotFound(track));
+            }
+            Ok(track)
+        }
+    }
 }
 
 /// The delete op for a target: under a position, a clip by id, or a
@@ -686,14 +757,9 @@ fn opt_u32(f: &mut Flags, name: &str) -> Result<Option<u32>, ParseError> {
 /// Seconds or timecode, optionally negative (a gap head reaches back
 /// past time 0).
 fn parse_pos(s: &str) -> Result<f64, ParseError> {
-    let (neg, rest) = match s.strip_prefix('-') {
-        Some(r) => (true, r),
-        None => (false, s),
-    };
-    let t =
-        parse_time(rest).map_err(|e| ParseError::Invalid(format!("invalid time {s:?} ({e})")))?;
-    let v = secs_f64(&t);
-    Ok(if neg { -v } else { v })
+    parse_signed_time(s)
+        .map(|t| secs_f64(&t))
+        .map_err(|e| ParseError::Invalid(format!("invalid time {s:?} ({e})")))
 }
 
 /// `--at`/`--clip`/`--seg` — exactly one, falling back to the front-end's
@@ -791,31 +857,21 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
         }
         "gap" => {
             let (a, t) = (at(&mut f, d)?, parse_track(&mut f, d)?);
-            let frames = match (opt_usize(&mut f, "frames")?, opt_time(&mut f, "dur")?) {
+            let len = match (opt_usize(&mut f, "frames")?, opt_time(&mut f, "dur")?) {
                 (Some(_), Some(_)) => {
                     return Err(ParseError::Invalid(
                         "use either --frames N or --dur T".to_string(),
                     ));
                 }
-                (Some(n), None) => n as i64,
-                (None, Some(secs)) => {
-                    let fps = d.fps.ok_or_else(|| {
-                        ParseError::Invalid("--dur needs a frame rate — use --frames N".to_string())
-                    })?;
-                    (secs * secs_f64(&fps)).round() as i64
-                }
-                (None, None) => 1,
+                (Some(n), None) => GapLen::Frames(n as i64),
+                (None, Some(s)) => GapLen::Seconds(s),
+                (None, None) => GapLen::Frames(1),
             };
-            if frames < 1 {
-                return Err(ParseError::Invalid(
-                    "a gap needs at least one frame".to_string(),
-                ));
-            }
             f.finish(":gap [--at T] [--frames N | --dur T] [--track N]")?;
             Ok(Action::InsertGap {
                 track: t,
                 at: a,
-                frames,
+                len,
             })
         }
         "delete" | "del" => {
@@ -1007,36 +1063,12 @@ mod tests {
             at: Some(7.5),
             track: 5,
             clip: Some(42),
-            fps: Some(Seconds::from_integer(30)),
         }
     }
 
-    /// The catalog's slot number — every variant must be reachable from
-    /// the `:cmd` grammar *and* from the CLI, so the parity tests can
-    /// prove full coverage mechanically.
-    fn slot(a: &Action) -> usize {
-        match a {
-            Action::TrimIn { .. } => 0,
-            Action::TrimOut { .. } => 1,
-            Action::Split { .. } => 2,
-            Action::InsertGap { .. } => 3,
-            Action::Delete { .. } => 4,
-            Action::Yank { .. } => 5,
-            Action::Paste { .. } => 6,
-            Action::SetSpeed { .. } => 7,
-            Action::Extend { .. } => 8,
-            Action::PurgeStumps { .. } => 9,
-            Action::TrackAdd { .. } => 10,
-            Action::TrackMute { .. } => 11,
-            Action::TrackRm { .. } => 12,
-            Action::AssetRm { .. } => 13,
-            Action::Undo => 14,
-            Action::Redo => 15,
-        }
-    }
-
-    /// Every action has a `:cmd` spelling, and no slot is silently
-    /// missing from the table.
+    /// Every variant must be reachable from the `:cmd` grammar *and*
+    /// from the CLI — the parity tests prove it mechanically with
+    /// `Action::slot`.
     #[test]
     fn every_action_has_a_colon_spelling() {
         const SPECS: &[&str] = &[
@@ -1057,10 +1089,10 @@ mod tests {
             "undo",
             "redo",
         ];
-        let mut seen = [false; 16];
+        let mut seen = vec![false; SLOTS];
         for spec in SPECS {
             let a = parse(spec, &defaults()).unwrap_or_else(|e| panic!("{spec:?}: {e}"));
-            let s = slot(&a);
+            let s = a.slot();
             assert!(!seen[s], "{spec:?} duplicates slot {s}");
             seen[s] = true;
         }
