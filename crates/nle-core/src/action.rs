@@ -640,16 +640,22 @@ pub fn save_register(project_path: &Path, segment: Option<&Segment>) -> std::io:
 /// Boolean options (everything else takes a value).
 const BOOL_FLAGS: &[&str] = &["ripple"];
 
+/// Short flags the CLI uses, spelled `-o` in the `:cmd` line too
+/// (`:export -o out.mp4`). Only the ones that exist on the CLI.
+const SHORT_FLAGS: &[(&str, &str)] = &[("o", "out")];
+
 /// One command line: its verb, `--flag` options, and bare positional
 /// words (`:speed 0.5`, `:track mute 2`). The grammar mirrors the CLI
 /// flags — an agent that knows `nle delete --at 3 --ripple` knows
-/// `:delete --at 3 --ripple`.
-struct Flags {
+/// `:delete --at 3 --ripple`. Public so the front-ends' own (non-edit)
+/// commands tokenize the same way.
+pub struct Flags {
     opts: Vec<(String, Option<String>)>,
     pos: Vec<String>,
 }
 
-fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
+/// Split a command line into its verb and arguments.
+pub fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
     let mut it = input.split_whitespace();
     let verb = it
         .next()
@@ -662,6 +668,26 @@ fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
         let tok = raw[i];
         i += 1;
         let Some(name) = tok.strip_prefix("--") else {
+            // `-o out.mp4`: a short flag with a known long form. Anything
+            // else single-dashed is a positional (`--to -1` values never
+            // reach here — they are consumed by their flag).
+            if let Some(stripped) = tok.strip_prefix('-')
+                && !stripped.is_empty()
+                && !stripped.starts_with('-')
+                && !stripped.chars().next().is_some_and(|c| c.is_ascii_digit())
+            {
+                let name = SHORT_FLAGS
+                    .iter()
+                    .find(|(s, _)| *s == stripped)
+                    .map(|(_, long)| (*long).to_string())
+                    .ok_or_else(|| ParseError::Invalid(format!("unknown option {tok:?}")))?;
+                let v = raw
+                    .get(i)
+                    .ok_or_else(|| ParseError::Invalid(format!("{tok} needs a value")))?;
+                i += 1;
+                opts.push((name, Some((*v).to_string())));
+                continue;
+            }
             pos.push(tok.to_string());
             continue;
         };
@@ -692,12 +718,28 @@ fn split_args(input: &str) -> Result<(String, Flags), ParseError> {
 }
 
 impl Flags {
-    fn take(&mut self, name: &str) -> Option<String> {
+    pub fn take(&mut self, name: &str) -> Option<String> {
         let i = self.opts.iter().position(|(n, _)| n == name)?;
         self.opts.remove(i).1
     }
 
-    fn take_bool(&mut self, name: &str) -> bool {
+    /// Every occurrence of a repeatable flag (`--map A=B --map C=D`).
+    pub fn take_all(&mut self, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.opts.len() {
+            if self.opts[i].0 == name {
+                if let Some(v) = self.opts.remove(i).1 {
+                    out.push(v);
+                }
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    pub fn take_bool(&mut self, name: &str) -> bool {
         match self.opts.iter().position(|(n, _)| n == name) {
             Some(i) => {
                 self.opts.remove(i);
@@ -707,12 +749,12 @@ impl Flags {
         }
     }
 
-    fn positional(&mut self) -> Option<String> {
+    pub fn positional(&mut self) -> Option<String> {
         (!self.pos.is_empty()).then(|| self.pos.remove(0))
     }
 
     /// Error on anything unread — a typo'd flag must not vanish silently.
-    fn finish(self, usage: &str) -> Result<(), ParseError> {
+    pub fn finish(&self, usage: &str) -> Result<(), ParseError> {
         if let Some((n, _)) = self.opts.first() {
             return Err(ParseError::Invalid(format!(
                 "unknown option --{n} — {usage}"
@@ -1164,6 +1206,11 @@ mod tests {
             parse("delete --at 1 --clip 2", &defaults()),
             Err(ParseError::Invalid(_))
         ));
+        // The CLI's short flag works in the shared tokenizer too.
+        let (verb, mut f) = split_args("export -o out.mp4").unwrap();
+        assert_eq!(verb, "export");
+        assert_eq!(f.take("out").as_deref(), Some("out.mp4"));
+        assert!(f.positional().is_none(), "no stray positionals");
     }
 
     // ------------------------------------------------------------ run

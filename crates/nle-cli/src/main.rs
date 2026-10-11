@@ -930,19 +930,62 @@ fn cmd_add(
     if ti >= project.timeline.tracks.len() {
         bail!("no track #{track}");
     }
+    let (scratch, imported) = stage_clip(&mut project, file, in_point, out_point)?;
+    if imported && let Segment::Clip(c) = &scratch {
+        println!("· auto-imported as asset #{}", c.asset);
+    }
+
+    // Ripple paste: inserts at --at (splits clips/gaps) or appends.
+    let append_at = match at {
+        Some(s) => parse_time(s).with_context(|| format!("invalid --at time: {s:?}"))?,
+        None => project
+            .timeline
+            .track(ti)
+            .map(|t| t.end())
+            .unwrap_or_else(|| Seconds::from_integer(0)),
+    };
+    // The pool/settings writes land first: a fresh import re-baselines the
+    // undo sidecar (an out-of-band pool write), while an add of an
+    // already-pooled file records history like any other edit. The insert
+    // itself goes through the catalog — the same `Paste` the TUI's pool
+    // insert runs — so it is undoable.
+    if imported {
+        save_and_reset_history(&project, project_path)?;
+    } else {
+        project.save(project_path)?;
+    }
+    run_cli_action(
+        project_path,
+        &Action::Paste {
+            track: ti,
+            at: secs_f64(&append_at),
+            ripple: true,
+            segment: Some(scratch),
+        },
+    )
+}
+
+/// Probe `file` into the pool if it is new, validate the source range,
+/// and stage the clip to insert — shared by `nle add` and the TUI's
+/// `:add`. Returns the clip and whether the pool was written (an
+/// out-of-band pool write re-baselines the undo sidecar). The first clip
+/// defines the sequence settings, like a real NLE.
+fn stage_clip(
+    project: &mut Project,
+    file: &Path,
+    in_point: Option<&str>,
+    out_point: Option<&str>,
+) -> Result<(Segment, bool)> {
     let canonical = file
         .canonicalize()
         .with_context(|| format!("{} not found", file.display()))?;
 
-    let mut imported = false;
-    let asset_id = match project.asset_by_path(&canonical) {
-        Some(a) => a.id,
+    let (asset_id, imported) = match project.asset_by_path(&canonical) {
+        Some(a) => (a.id, false),
         None => {
             let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
             let (id, _) = project.add_asset(canonical, report);
-            println!("· auto-imported as asset #{id}");
-            imported = true;
-            id
+            (id, true)
         }
     };
 
@@ -957,12 +1000,6 @@ fn cmd_add(
             .and_then(|a| a.duration())
             .ok_or_else(|| anyhow::anyhow!("asset has unknown duration — pass --out"))?,
     };
-    let at_t: Option<Seconds> = match at {
-        Some(s) => Some(parse_time(s).with_context(|| format!("invalid --at time: {s:?}"))?),
-        None => None,
-    };
-
-    // Validate the source range against the asset.
 
     let asset = project
         .asset(asset_id)
@@ -988,15 +1025,6 @@ fn cmd_add(
         });
     }
 
-    // Ripple paste: inserts at --at (splits clips/gaps) or appends.
-    let append_at = match at_t {
-        Some(t) => t,
-        None => project
-            .timeline
-            .track(ti)
-            .map(|t| t.end())
-            .unwrap_or_else(|| Seconds::from_integer(0)),
-    };
     let scratch = Segment::Clip(Clip {
         id: 0,
         asset: asset_id,
@@ -1004,25 +1032,7 @@ fn cmd_add(
         asset_out: out_t,
         speed: Seconds::from_integer(1),
     });
-    // The pool/settings writes land first: a fresh import re-baselines the
-    // undo sidecar (an out-of-band pool write), while an add of an
-    // already-pooled file records history like any other edit. The insert
-    // itself goes through the catalog — the same `Paste` the TUI's pool
-    // insert runs — so it is undoable.
-    if imported {
-        save_and_reset_history(&project, project_path)?;
-    } else {
-        project.save(project_path)?;
-    }
-    run_cli_action(
-        project_path,
-        &Action::Paste {
-            track: ti,
-            at: secs_f64(&append_at),
-            ripple: true,
-            segment: Some(scratch),
-        },
-    )
+    Ok((scratch, imported))
 }
 
 fn secs_f64(t: &Seconds) -> f64 {
@@ -1297,6 +1307,28 @@ fn cmd_import_edl(
     maps: &[String],
     force: bool,
 ) -> Result<()> {
+    import_edl_work(
+        project_path,
+        edl_path,
+        media_dir,
+        fps_arg,
+        src_offset,
+        maps,
+        force,
+    )
+    .map(|r| r.print())
+}
+
+/// The work behind `import-edl` (and the TUI's `:edl-import`).
+fn import_edl_work(
+    project_path: &Path,
+    edl_path: &Path,
+    media_dir: &Path,
+    fps_arg: Option<&str>,
+    src_offset: &str,
+    maps: &[String],
+    force: bool,
+) -> Result<CommandReport> {
     if project_path.exists() && !force {
         bail!(
             "{} already exists (use --force to overwrite)",
@@ -1378,14 +1410,13 @@ fn cmd_import_edl(
     project.timeline = timeline;
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
-    println!(
+    Ok(CommandReport::new(format!(
         "✓ {} — {} event(s) → {} track(s), {} asset(s)",
         project_path.display(),
         doc.events.len(),
         project.timeline.tracks.len(),
         project.media.len()
-    );
-    Ok(())
+    )))
 }
 
 /// Probe every media file in `dir` into the pool; returns how many files were
@@ -1461,6 +1492,18 @@ fn cmd_import_otio(
     remaps: &[String],
     force: bool,
 ) -> Result<()> {
+    import_otio_work(project_path, otio_path, media_dir, fps_arg, remaps, force).map(|r| r.print())
+}
+
+/// The work behind `import-otio` (and the TUI's `:otio-import`).
+fn import_otio_work(
+    project_path: &Path,
+    otio_path: &Path,
+    media_dir: Option<&Path>,
+    fps_arg: Option<&str>,
+    remaps: &[String],
+    force: bool,
+) -> Result<CommandReport> {
     if project_path.exists() && !force {
         bail!(
             "{} already exists (use --force to overwrite)",
@@ -1533,8 +1576,9 @@ fn cmd_import_otio(
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
+    let mut report = CommandReport::new(String::new());
     for w in doc.warnings.iter().chain(clamp_notes.iter()) {
-        eprintln!("warning: {w}");
+        report.warn(format!("warning: {w}"));
     }
     let clips = project
         .timeline
@@ -1543,14 +1587,14 @@ fn cmd_import_otio(
         .flat_map(|t| t.segments.iter())
         .filter(|s| matches!(s, Segment::Clip(_)))
         .count();
-    println!(
+    report.summary = format!(
         "✓ {} — {} track(s), {} asset(s), {} clip(s)",
         project_path.display(),
         project.timeline.tracks.len(),
         project.media.len(),
         clips
     );
-    Ok(())
+    Ok(report)
 }
 
 /// Arguments for [`cmd_detect_edits`]. A parameter struct keeps the call
@@ -1572,6 +1616,13 @@ struct DetectArgs<'a> {
 }
 
 fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
+    detect_edits_work(args).map(|r| r.print())
+}
+
+/// The work behind `detect-edits` (and the TUI's `:detect`): warnings +
+/// summary, no printing.
+fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
+    let mut out = CommandReport::new(String::new());
     let DetectArgs {
         project: project_path,
         file,
@@ -1628,13 +1679,13 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
     };
     let snap_fps = snap_fps_for(append_project.as_ref(), fps);
     if append && snap_fps != fps {
-        eprintln!(
+        out.warn(format!(
             "note: snapping cuts to the project grid {}/{} fps (source is {}/{})",
             snap_fps.numer(),
             snap_fps.denom(),
             fps.numer(),
             fps.denom()
-        );
+        ));
     }
 
     // The reconstruction references one asset, and export reads the first
@@ -1650,12 +1701,14 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
     let extra_video = count_of("video");
     let extra_audio = count_of("audio");
     if extra_video > 0 {
-        eprintln!(
+        out.warn(format!(
             "warning: {extra_video} extra video stream(s) ignored — only the first is reconstructed"
-        );
+        ));
     }
     if extra_audio > 0 {
-        eprintln!("warning: {extra_audio} extra audio stream(s) ignored — only the first is used");
+        out.warn(format!(
+            "warning: {extra_audio} extra audio stream(s) ignored — only the first is used"
+        ));
     }
 
     let opts = DetectOptions {
@@ -1677,15 +1730,16 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         .filter(|s| matches!(s, Span::Gap { .. }))
         .count();
     if list {
-        println!(
+        let mut summary = format!(
             "{} cut(s), {gaps} gap(s), {} total",
             detection.cuts.len(),
             format_seconds(&duration)
         );
         for c in &detection.cuts {
-            println!("  cut {}", format_seconds(c));
+            summary.push_str(&format!("\n  cut {}", format_seconds(c)));
         }
-        return Ok(());
+        out.summary = summary;
+        return Ok(out);
     }
 
     let has_audio = report.has_audio();
@@ -1747,18 +1801,18 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         }
 
         for n in clamp_project_to_media(&mut project) {
-            eprintln!("warning: {n}");
+            out.warn(format!("warning: {n}"));
         }
         project.validate()?;
         save_and_reset_history(&project, project_path)?;
-        println!(
+        out.summary = format!(
             "✓ {} — appended {} clip(s), {} gap(s) @ {}",
             project_path.display(),
             clips,
             gaps,
             format_seconds(&fps),
         );
-        return Ok(());
+        return Ok(out);
     }
 
     if project_path.exists() && !force {
@@ -1795,12 +1849,12 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
     }
     project.timeline = Timeline { tracks };
     for n in clamp_project_to_media(&mut project) {
-        eprintln!("warning: {n}");
+        out.warn(format!("warning: {n}"));
     }
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 
-    println!(
+    out.summary = format!(
         "✓ {} — {} cut(s) → {} clip(s), {} gap(s) @ {}",
         project_path.display(),
         detection.cuts.len(),
@@ -1808,7 +1862,7 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         gaps,
         format_seconds(&fps),
     );
-    Ok(())
+    Ok(out)
 }
 
 /// Keep every clip inside its media and on the frame grid (see
@@ -1904,6 +1958,24 @@ fn cmd_export(
     preset: &str,
     bitrate: &str,
 ) -> Result<()> {
+    println!(
+        "{}",
+        run_export(project_path, output, encoder, crf, preset, bitrate)?
+    );
+    Ok(())
+}
+
+/// Render the timeline to `output`; returns the summary line. Split from
+/// [`cmd_export`] so the TUI's `:export` can run the same code.
+#[allow(clippy::too_many_arguments)]
+fn run_export(
+    project_path: &Path,
+    output: &Path,
+    encoder: Encoder,
+    crf: u8,
+    preset: &str,
+    bitrate: &str,
+) -> Result<String> {
     let project = Project::load(project_path)?;
     let spec = ExportSpec {
         output: output.to_path_buf(),
@@ -1926,15 +1998,43 @@ fn cmd_export(
         .and_then(parse_f64)
         .map(|d| format!("{d:.2}"))
         .unwrap_or_else(|| "?".into());
-    println!(
+    Ok(format!(
         "✓ {}  ({} s · {} frames @ {}/{})",
         output.display(),
         shown,
         plan.frames,
         plan.fps.numer(),
         plan.fps.denom()
-    );
-    Ok(())
+    ))
+}
+
+/// What a work function produced: warnings for stderr (or the log) and
+/// the summary line the caller shows. Keeps the TUI free of stray prints
+/// — a `println!` would draw over the terminal UI.
+struct CommandReport {
+    warnings: Vec<String>,
+    summary: String,
+}
+
+impl CommandReport {
+    fn new(summary: String) -> Self {
+        Self {
+            warnings: Vec::new(),
+            summary,
+        }
+    }
+
+    fn warn(&mut self, msg: String) {
+        self.warnings.push(msg);
+    }
+
+    /// The CLI's rendering: warnings on stderr, summary on stdout.
+    fn print(&self) {
+        for w in &self.warnings {
+            eprintln!("{w}");
+        }
+        println!("{}", self.summary);
+    }
 }
 
 fn asset_summary(a: &Asset) -> String {

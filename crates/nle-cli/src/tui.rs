@@ -279,6 +279,16 @@ pub(crate) enum Pending {
     Y,
 }
 
+/// A background job (an ffmpeg render, a heavy import): its label for
+/// notices, whether the project file changed underneath us (reload after),
+/// and the channel its worker reports on. One at a time — the monitor
+/// keeps playing while it runs.
+struct Job {
+    label: &'static str,
+    reload: bool,
+    rx: std::sync::mpsc::Receiver<Result<String, String>>,
+}
+
 pub struct App {
     pub project: Project,
     pub path: PathBuf,
@@ -312,6 +322,8 @@ pub struct App {
     last_pool_sel: usize,
     /// Which track edits and navigation act on. Clamped via `active()`.
     pub active_track: usize,
+    /// The background render/import, if one is running.
+    job: Option<Job>,
 }
 
 impl App {
@@ -336,6 +348,7 @@ impl App {
             exit_message: None,
             last_pool_sel: 0,
             active_track: 0,
+            job: None,
         }
     }
 
@@ -493,6 +506,10 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
                 Err(e) => app.set_message(&format!("reload failed: {e}")),
             }
         }
+
+        // A finished worker reports in (export, or an importer that just
+        // rewrote the project).
+        poll_job(&mut app, &player);
 
         // Keep the desktop's "Now playing" in sync with the clip playing.
         if st.file_loaded {
@@ -920,7 +937,7 @@ fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :track · :media · :import · :show · :purge · :w · :q";
+const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale
@@ -958,6 +975,343 @@ fn import_command(app: &mut App, cmd: &str) -> String {
         msg.push_str(&format!(" — failed: {}", failed.join("; ")));
     }
     msg
+}
+
+// ------------------------------------------------------------ io commands
+
+/// The front-end's own (non-edit) commands: queries, imports, and the two
+/// long renders. Everything the *model* can do is an [`Action`] above;
+/// these need processes (ffprobe/ffmpeg) or print state. Same flags as
+/// the CLI, via the shared tokenizer.
+fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
+    let (verb, mut f) = match action::split_args(cmd) {
+        Ok(v) => v,
+        Err(e) => return Some(e.to_string()),
+    };
+    match verb.as_str() {
+        "import" => Some(import_command(app, cmd)),
+        "show" => Some(show_command(app)),
+        "media" => Some(media_ls_command(app)),
+        "track" => Some(track_ls_command(app)),
+        "reload" => {
+            app.reload_requested = true;
+            None
+        }
+        "add" => add_command(app, player, &mut f),
+        "export" => export_command(app, &mut f),
+        "detect" => detect_command(app, &mut f),
+        "edl-import" => edl_import_command(app, &mut f),
+        "otio-import" => otio_import_command(app, &mut f),
+        other => Some(format!("unknown command: {other}  (try :help)")),
+    }
+}
+
+/// A repeatable option value, parsed: `--at T`-style flags the io
+/// commands accept. `None` = absent.
+fn flag_time(f: &mut action::Flags, name: &str) -> Result<Option<f64>, String> {
+    match f.take(name) {
+        Some(v) => nle_core::parse_signed_time(&v)
+            .map(|t| Some(secs(&t)))
+            .map_err(|e| format!("invalid --{name} {v:?} ({e})")),
+        None => Ok(None),
+    }
+}
+
+fn flag_usize(f: &mut action::Flags, name: &str) -> Result<Option<usize>, String> {
+    match f.take(name) {
+        Some(v) => v
+            .parse()
+            .map(Some)
+            .map_err(|_| format!("--{name} expects a number, got {v:?}")),
+        None => Ok(None),
+    }
+}
+
+/// `:add FILE [--at T] [--in T --out T] [--track N]` — pool the file and
+/// ripple-insert it (the CLI's `nle add`; here `--at` defaults to the
+/// playhead, like every other command).
+fn add_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option<String> {
+    let file = match f.positional() {
+        Some(p) => PathBuf::from(p),
+        None => return Some("usage: :add FILE [--at T] [--in T --out T] [--track N]".to_string()),
+    };
+    let mut track = app.active();
+    let mut at = app.playhead;
+    let mut in_point = None;
+    let mut out_point = None;
+    match (|| -> Result<(), String> {
+        if let Some(n) = flag_usize(f, "track")? {
+            track = n.saturating_sub(1);
+        }
+        at = flag_time(f, "at")?.unwrap_or(at);
+        in_point = f.take("in");
+        out_point = f.take("out");
+        f.finish(":add FILE [--at T] [--in T --out T] [--track N]")
+            .map_err(|e| e.to_string())
+    })() {
+        Ok(()) => {}
+        Err(e) => return Some(e),
+    }
+    let (scratch, imported) = match crate::stage_clip(
+        &mut app.project,
+        &file,
+        in_point.as_deref(),
+        out_point.as_deref(),
+    ) {
+        Ok(v) => v,
+        Err(e) => return Some(format!("add failed: {e}")),
+    };
+    if imported {
+        // A pool write re-baselines the undo sidecar (same rule as
+        // `:import`), and lands on disk before the edit does.
+        app.history = History::default();
+        let _ = std::fs::remove_file(History::sidecar_path(&app.path));
+        if let Err(e) = app.project.save(&app.path) {
+            return Some(format!("save failed: {e}"));
+        }
+    }
+    run_action(
+        app,
+        player,
+        &Action::Paste {
+            track,
+            at,
+            ripple: true,
+            segment: Some(scratch),
+        },
+    );
+    None
+}
+
+/// `:export -o FILE [--encoder cpu|vaapi|qsv] [--crf N] [--preset P]
+/// [--bitrate B]` — render in a worker; the monitor keeps playing and the
+/// notice lands when ffmpeg finishes.
+fn export_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
+    const USAGE: &str =
+        "usage: :export -o FILE [--encoder cpu|vaapi|qsv] [--crf N] [--preset P] [--bitrate B]";
+    let output = match f.take("out").or_else(|| f.positional()) {
+        Some(o) => PathBuf::from(o),
+        None => return Some(USAGE.to_string()),
+    };
+    let encoder = match f.take("encoder").as_deref() {
+        None | Some("cpu") => crate::Encoder::Cpu,
+        Some("vaapi") => crate::Encoder::Vaapi,
+        Some("qsv") => crate::Encoder::Qsv,
+        Some(other) => return Some(format!("--encoder expects cpu|vaapi|qsv, got {other:?}")),
+    };
+    let crf = f.take("crf").and_then(|s| s.parse().ok()).unwrap_or(18);
+    let preset = f.take("preset").unwrap_or_else(|| "fast".to_string());
+    let bitrate = f.take("bitrate").unwrap_or_else(|| "8M".to_string());
+    if let Err(e) = f.finish(USAGE) {
+        return Some(e.to_string());
+    }
+    let notice = format!("exporting to {}…", output.display());
+    let Some(job) = start_job(app, "export", false) else {
+        return Some("a job is already running — wait for it".to_string());
+    };
+    let project_path = app.path.clone();
+    std::thread::spawn(move || {
+        let result = crate::run_export(&project_path, &output, encoder, crf, &preset, &bitrate)
+            .map_err(|e| e.to_string());
+        let _ = job.send(result);
+    });
+    Some(notice)
+}
+
+/// `:detect FILE [--threshold T] [--min-shot S] [--black-min S]
+/// [--no-gaps] [--fps R] [--video-only] [--list] [--append] [--track N]
+/// [--force]` — the CLI's `detect-edits`, in a worker (it can chew
+/// through minutes of footage). The project reloads when it lands.
+fn detect_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
+    const USAGE: &str = "usage: :detect FILE [--append] [--list] [--threshold T] [--force]";
+    let file = match f.positional() {
+        Some(p) => PathBuf::from(p),
+        None => return Some(USAGE.to_string()),
+    };
+    let threshold = f
+        .take("threshold")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.4);
+    let min_shot = f.take("min-shot").unwrap_or_else(|| "0.5".to_string());
+    let black_min = f.take("black-min").unwrap_or_else(|| "0.1".to_string());
+    let no_gaps = f.take_bool("no-gaps");
+    let fps = f.take("fps");
+    let video_only = f.take_bool("video-only");
+    let list = f.take_bool("list");
+    let append = f.take_bool("append");
+    let track = flag_usize(f, "track").ok().flatten();
+    let force = f.take_bool("force");
+    if let Err(e) = f.finish(USAGE) {
+        return Some(e.to_string());
+    }
+    let reload = !list;
+    let notice = format!("detecting cuts in {}…", file.display());
+    let Some(job) = start_job(app, "detect-edits", reload) else {
+        return Some("a job is already running — wait for it".to_string());
+    };
+    let project_path = app.path.clone();
+    std::thread::spawn(move || {
+        let result = crate::detect_edits_work(crate::DetectArgs {
+            project: &project_path,
+            file: &file,
+            threshold,
+            min_shot: &min_shot,
+            black_min: &black_min,
+            no_gaps,
+            fps: fps.as_deref(),
+            video_only,
+            list,
+            append,
+            track,
+            force,
+        })
+        .map_err(|e| e.to_string())
+        .map(|r| {
+            for w in &r.warnings {
+                crate::log::line(w);
+            }
+            r.summary
+        });
+        let _ = job.send(result);
+    });
+    Some(notice)
+}
+
+/// `:edl-import FILE --media DIR [--fps R] [--src-offset TC] [--map
+/// REEL=PATH] [--force]` — build a project from a CMX3600 EDL (the CLI's
+/// `import-edl`); the open project reloads when it lands.
+fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
+    const USAGE: &str = "usage: :edl-import FILE --media DIR [--fps R] [--src-offset TC] [--map REEL=PATH] [--force]";
+    let file = match f.positional() {
+        Some(p) => PathBuf::from(p),
+        None => return Some(USAGE.to_string()),
+    };
+    let media = match f.take("media") {
+        Some(d) => PathBuf::from(d),
+        None => return Some(USAGE.to_string()),
+    };
+    let fps = f.take("fps");
+    let src_offset = f
+        .take("src-offset")
+        .unwrap_or_else(|| "00:00:00:00".to_string());
+    let map = f.take_all("map");
+    let force = f.take_bool("force");
+    if let Err(e) = f.finish(USAGE) {
+        return Some(e.to_string());
+    }
+    let notice = format!("importing {}…", file.display());
+    let Some(job) = start_job(app, "edl-import", true) else {
+        return Some("a job is already running — wait for it".to_string());
+    };
+    let project_path = app.path.clone();
+    std::thread::spawn(move || {
+        let result = crate::import_edl_work(
+            &project_path,
+            &file,
+            &media,
+            fps.as_deref(),
+            &src_offset,
+            &map,
+            force,
+        )
+        .map_err(|e| e.to_string())
+        .map(|r| {
+            for w in &r.warnings {
+                crate::log::line(w);
+            }
+            r.summary
+        });
+        let _ = job.send(result);
+    });
+    Some(notice)
+}
+
+/// `:otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW]
+/// [--force]` — build a project from an OpenTimelineIO timeline (the
+/// CLI's `import-otio`); the open project reloads when it lands.
+fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
+    const USAGE: &str =
+        "usage: :otio-import FILE [--media DIR] [--fps R] [--remap OLD=NEW] [--force]";
+    let file = match f.positional() {
+        Some(p) => PathBuf::from(p),
+        None => return Some(USAGE.to_string()),
+    };
+    let media = f.take("media").map(PathBuf::from);
+    let fps = f.take("fps");
+    let remap = f.take_all("remap");
+    let force = f.take_bool("force");
+    if let Err(e) = f.finish(USAGE) {
+        return Some(e.to_string());
+    }
+    let notice = format!("importing {}…", file.display());
+    let Some(job) = start_job(app, "otio-import", true) else {
+        return Some("a job is already running — wait for it".to_string());
+    };
+    let project_path = app.path.clone();
+    std::thread::spawn(move || {
+        let result = crate::import_otio_work(
+            &project_path,
+            &file,
+            media.as_deref(),
+            fps.as_deref(),
+            &remap,
+            force,
+        )
+        .map_err(|e| e.to_string())
+        .map(|r| {
+            for w in &r.warnings {
+                crate::log::line(w);
+            }
+            r.summary
+        });
+        let _ = job.send(result);
+    });
+    Some(notice)
+}
+
+/// Arm a background job (one at a time) and hand back its sender.
+fn start_job(
+    app: &mut App,
+    label: &'static str,
+    reload: bool,
+) -> Option<std::sync::mpsc::Sender<Result<String, String>>> {
+    if app.job.is_some() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.job = Some(Job { label, reload, rx });
+    Some(tx)
+}
+
+/// Let a finished worker report in: swap its result into the message
+/// line, and reload the project when the job rewrote it.
+fn poll_job(app: &mut App, player: &dyn Mpv) {
+    use std::sync::mpsc::TryRecvError;
+    let Some((label, reload, res)) = app
+        .job
+        .as_ref()
+        .map(|j| (j.label, j.reload, j.rx.try_recv()))
+    else {
+        return;
+    };
+    match res {
+        Ok(Ok(msg)) => {
+            app.job = None;
+            if reload && let Err(e) = reload_project(app, player) {
+                app.set_message(&format!("reload failed: {e}"));
+            }
+            app.set_message(&msg);
+        }
+        Ok(Err(e)) => {
+            app.job = None;
+            app.set_message(&format!("{label} failed: {e}"));
+        }
+        Err(TryRecvError::Disconnected) => {
+            app.job = None;
+            app.set_message(&format!("{label} failed: worker died"));
+        }
+        Err(TryRecvError::Empty) => {}
+    }
 }
 
 /// The `:` parser's defaults: the playhead, the active track, and the
@@ -1021,17 +1375,7 @@ fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
             // The verb is an edit, the arguments are not.
             Err(ParseError::Invalid(msg)) => Some(msg),
             // Not an edit action: the front-end's own (query/IO) commands.
-            Err(ParseError::Unknown(_)) => match cmd.split_whitespace().next() {
-                Some("import") => Some(import_command(app, cmd)),
-                Some("show") => Some(show_command(app)),
-                Some("media") => Some(media_ls_command(app)),
-                Some("track") => Some(track_ls_command(app)),
-                Some("reload") => {
-                    app.reload_requested = true;
-                    None
-                }
-                _ => Some(format!("unknown command: {cmd}  (try :help)")),
-            },
+            Err(ParseError::Unknown(_)) => io_command(app, player, cmd),
         },
     }
 }
@@ -2403,12 +2747,11 @@ fn render_message(f: &mut Frame, area: Rect, app: &App) {
 fn hints_for(app: &App) -> Vec<&'static str> {
     if let Mode::Command(_) = app.mode {
         return vec![
-            "type a command · enter run · esc cancel",
-            "edits   :split · :trim-in|out · :delete · :yank · :paste · :gap · :extend",
-            "        :speed RATE · :undo · :redo · flags: --at T --track N --ripple",
-            "tracks  :track add video|audio · :track mute [N] · :track rm N",
-            "media   :import PATH… · :media ls · :media rm N",
-            "more    :show · :purge · :help · :q quit",
+            "type a command · enter run · esc cancel · flags: --at T --track N --ripple",
+            "edits   :split :trim-in|out :delete :yank :paste :gap :extend :speed :undo :redo",
+            "tracks  :track add video|audio · :track mute [N] · :track rm N · :track ls",
+            "media   :import PATH… · :add FILE · :media ls · :media rm N",
+            "more    :show :purge :detect :edl-import :otio-import :export · :help · :q",
         ];
     }
     if matches!(app.mode, Mode::Extend(_)) {
@@ -3608,6 +3951,27 @@ mod tests {
             "the register sidecar is written on yank"
         );
         let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    // The io commands report usage up front and run one job at a time —
+    // a finished job lands its summary in the message line.
+    #[test]
+    fn io_commands_report_usage_and_run_one_job_at_a_time() {
+        let mut app = App::new(asset_project(), temp_project_path("io"));
+        assert!(cmd(&mut app, "export").contains("usage"));
+        assert!(cmd(&mut app, "detect").contains("usage"));
+        assert!(cmd(&mut app, "edl-import").contains("usage"));
+        assert!(cmd(&mut app, "otio-import").contains("usage"));
+
+        let tx = start_job(&mut app, "export", false).unwrap();
+        assert!(
+            cmd(&mut app, "export -o out.mp4").contains("already running"),
+            "no second job while one is running"
+        );
+        tx.send(Ok("✓ out.mp4".to_string())).unwrap();
+        poll_job(&mut app, &FakeMpv::new());
+        assert_eq!(app.message, "✓ out.mp4");
+        assert!(app.job.is_none(), "the job is done");
     }
 
     // `:track rm N` takes the track's clips with it (no "empty it first").
