@@ -63,8 +63,8 @@ enum Cmd {
     Add {
         /// Media file (auto-imported if new)
         file: PathBuf,
-        /// Track index to place on (0-based; default 0)
-        #[arg(long, default_value_t = 0)]
+        /// Track number to place on (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
         track: usize,
         /// Timeline position (default: end of track)
         #[arg(long, value_name = "TIME")]
@@ -87,8 +87,8 @@ enum Cmd {
         id: u32,
         /// New speed: 1, 2, 0.5, 0.8, 24/25 … (a rate, not a duration)
         rate: String,
-        /// Track index (0-based; default 0)
-        #[arg(long, default_value_t = 0)]
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
         track: usize,
     },
     /// Drop sub-frame stumps and snap a drifted timeline to the frame grid
@@ -178,7 +178,7 @@ enum Cmd {
         /// Append the detected clips to an existing project (at the end)
         #[arg(long)]
         append: bool,
-        /// Video track to append to (0-based; default: first video track)
+        /// Video track to append to (1-based; default: first video track)
         #[arg(long, value_name = "N")]
         track: Option<usize>,
         /// Overwrite an existing project file
@@ -209,8 +209,8 @@ enum Cmd {
 
     /// Print the mpv preview URL for the timeline (debugging)
     Edl {
-        /// Track index to preview (0-based; default 0)
-        #[arg(long, default_value_t = 0)]
+        /// Track number to preview (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
         track: usize,
     },
 
@@ -470,7 +470,11 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
 
 fn cmd_edl(project_path: &Path, track: usize) -> Result<()> {
     let project = Project::load(project_path)?;
-    println!("{}", preview::build_edl(&project, track)?);
+    let ti = track.saturating_sub(1);
+    if project.timeline.track(ti).is_none() {
+        bail!("no track #{track}");
+    }
+    println!("{}", preview::build_edl(&project, ti)?);
     Ok(())
 }
 
@@ -543,6 +547,11 @@ fn cmd_add(
     out_point: Option<&str>,
 ) -> Result<()> {
     let mut project = Project::load(project_path)?;
+    // `--track` is 1-based (matching the `v1`/`a1` labels); 0 internally.
+    let ti = track.saturating_sub(1);
+    if ti >= project.timeline.tracks.len() {
+        bail!("no track #{track}");
+    }
     let canonical = file
         .canonicalize()
         .with_context(|| format!("{} not found", file.display()))?;
@@ -604,7 +613,7 @@ fn cmd_add(
         Some(t) => t,
         None => project
             .timeline
-            .track(track)
+            .track(ti)
             .map(|t| t.end())
             .unwrap_or_else(|| Seconds::from_integer(0)),
     };
@@ -616,7 +625,7 @@ fn cmd_add(
         speed: Seconds::from_integer(1),
     });
     let mut history = edit::History::default();
-    let batch = edit::paste_ripple_on(&project, track, &scratch, secs_f64(&append_at))?;
+    let batch = edit::paste_ripple_on(&project, ti, &scratch, secs_f64(&append_at))?;
     history.apply(&mut project, batch, 0)?;
     save_and_reset_history(&project, project_path)?;
     Ok(())
@@ -647,8 +656,12 @@ fn cmd_remove(project_path: &Path, id: u32) -> Result<()> {
 
 fn cmd_speed(project_path: &Path, id: u32, rate: &str, track: usize) -> Result<()> {
     let mut project = Project::load(project_path)?;
+    let ti = track.saturating_sub(1);
+    if ti >= project.timeline.tracks.len() {
+        bail!("no track #{track}");
+    }
     let speed = parse_speed_arg(rate)?;
-    let batch = edit::set_speed_on(&project, track, id, speed)?;
+    let batch = edit::set_speed_on(&project, ti, id, speed)?;
     let mut history = edit::History::default();
     history.apply(&mut project, batch, 0)?;
     save_and_reset_history(&project, project_path)?;
@@ -1451,14 +1464,15 @@ fn cmd_detect_edits(args: DetectArgs) -> Result<()> {
         let start = project.timeline.end();
         let video_ti = match track {
             Some(n) => {
+                let i = n.saturating_sub(1);
                 let t = project
                     .timeline
-                    .track(n)
+                    .track(i)
                     .with_context(|| format!("no track #{n}"))?;
                 if t.kind != TrackKind::Video {
                     bail!("track #{n} is not a video track");
                 }
-                n
+                i
             }
             None => project
                 .timeline
