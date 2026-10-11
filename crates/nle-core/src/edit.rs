@@ -848,9 +848,10 @@ pub fn set_speed(project: &Project, clip_id: u32, speed: Seconds) -> Result<Batc
 }
 
 /// Keep one track's clips inside their media and on the frame grid. The
-/// out-point is clamped to the media's duration, then the timeline duration is
-/// snapped to whole frames (rounded, falling back to the floor when rounding
-/// would run past the media end). A clip shorter than one frame is dropped.
+/// source range is clamped to `[0, media]` (in-point ≥ 0, out-point ≤ the
+/// media's duration), then the timeline duration is snapped to whole frames
+/// (rounded, falling back to the floor when rounding would run past the media
+/// end). A clip shorter than one frame is dropped.
 /// `media` maps an asset id to its duration; `fps` is the timeline's frame
 /// rate. Returns one note per adjusted or dropped clip.
 ///
@@ -868,24 +869,41 @@ pub fn clamp_to_media(
     if fps <= Seconds::from_integer(0) {
         return notes;
     }
+    let zero = Seconds::from_integer(0);
     let frame_secs = |n: i64| Seconds::new(n, 1) / fps;
     track.segments.retain_mut(|seg| {
         let Segment::Clip(c) = seg else {
             return true;
         };
+        // A non-positive speed has no sane clamp — leave it for `validate()`
+        // to reject rather than dividing by zero here.
+        if c.speed <= zero {
+            return true;
+        }
         let Some(d) = media(c.asset) else {
             return true;
         };
+        // Keep the source range inside [0, media]: a negative in-point (an
+        // EDL source TC before its offset, say) reads before the file start.
+        let in_ = c.asset_in.max(zero);
         let out = c.asset_out.min(d);
-        let mut frames = ((out - c.asset_in) / c.speed * fps).round().to_integer();
-        let mut new_out = c.asset_in + frame_secs(frames) * c.speed;
+        let mut frames = ((out - in_) / c.speed * fps).round().to_integer();
+        let mut new_out = in_ + frame_secs(frames) * c.speed;
         if new_out > d {
             frames -= 1;
-            new_out = c.asset_in + frame_secs(frames) * c.speed;
+            new_out = in_ + frame_secs(frames) * c.speed;
         }
         if frames < 1 {
             notes.push(format!("clip #{}: holds no whole frame — dropped", c.id));
             return false;
+        }
+        if in_ != c.asset_in {
+            notes.push(format!(
+                "clip #{}: in {} → {}",
+                c.id,
+                format_seconds(&c.asset_in),
+                format_seconds(&in_)
+            ));
         }
         if new_out != c.asset_out {
             notes.push(format!(
@@ -895,6 +913,7 @@ pub fn clamp_to_media(
                 format_seconds(&new_out)
             ));
         }
+        c.asset_in = in_;
         c.asset_out = new_out;
         true
     });
@@ -4573,6 +4592,75 @@ mod tests {
         };
         assert_eq!(c.asset_out - c.asset_in, Seconds::new(44, 30));
         assert!(c.asset_out <= Seconds::new(349, 100));
+    }
+
+    #[test]
+    fn clamp_to_media_clamps_a_negative_in_point() {
+        let fps = Seconds::from_integer(30);
+        let mut t = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::new(-1, 2), // -0.5s: before the file start
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+            })],
+        };
+        let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(3)), fps);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let Segment::Clip(c) = &t.segments[0] else {
+            panic!("expected clip")
+        };
+        assert_eq!(c.asset_in, Seconds::from_integer(0));
+        assert_eq!(c.asset_out, Seconds::from_integer(2));
+    }
+
+    #[test]
+    fn clamp_to_media_scales_by_speed() {
+        let fps = Seconds::from_integer(30);
+        // A 2× clip: 4s of source occupies 2s of timeline. Media is 3.44s.
+        let mut t = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(4),
+                speed: Seconds::from_integer(2),
+            })],
+        };
+        clamp_to_media(&mut t, &|_| Some(Seconds::new(344, 100)), fps);
+        let Segment::Clip(c) = &t.segments[0] else {
+            panic!("expected clip")
+        };
+        // The timeline duration must land on whole frames (51), and the
+        // clamped out-point must stay inside the media.
+        assert_eq!(c.duration(), Seconds::new(51, 30));
+        assert_eq!(c.asset_out, Seconds::new(34, 10));
+        assert!(c.asset_out <= Seconds::new(344, 100));
+    }
+
+    #[test]
+    fn clamp_to_media_ignores_nonpositive_speed() {
+        let fps = Seconds::from_integer(30);
+        let mut t = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(Clip {
+                id: 1,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(3),
+                speed: Seconds::from_integer(0),
+            })],
+        };
+        // No panic, no change — `validate()` is the authority on bad speed.
+        let notes = clamp_to_media(&mut t, &|_| Some(Seconds::from_integer(2)), fps);
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(t.segments.len(), 1);
     }
 
     #[test]
