@@ -76,6 +76,29 @@ fn parse_component(part: &str) -> Result<Seconds, TimeError> {
     }
 }
 
+/// Exact seconds → f64 for position math (playhead, boundaries, spans).
+/// The float boundary every caller was open-coding as
+/// `*t.numer() as f64 / *t.denom() as f64`.
+pub fn secs_f64(t: &Seconds) -> f64 {
+    *t.numer() as f64 / *t.denom() as f64
+}
+
+/// Timeline frame index for a position (the grid `snap`/history use).
+pub fn frame_of(fps: Option<&Seconds>, t: f64) -> i64 {
+    match fps {
+        Some(f) => (t * secs_f64(f)).round() as i64,
+        None => t.round() as i64,
+    }
+}
+
+/// A history frame index back to timeline seconds.
+pub fn frame_to_secs(fps: Option<&Seconds>, frame: i64) -> f64 {
+    match fps {
+        Some(f) => frame as f64 / secs_f64(f),
+        None => frame as f64,
+    }
+}
+
 /// Format for display and for ffmpeg arguments (25/2 → "12.5").
 /// Math stays rational; we only touch f64 at this boundary.
 pub fn format_seconds(t: &Seconds) -> String {

@@ -17,7 +17,10 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use nle_core::edit;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind};
-use nle_core::{Batch, Clip, EditError, History, Project, Seconds};
+use nle_core::{
+    Armed, Batch, Clip, CommitKind, EditError, History, Project, Seconds, clip_span, commit_batch,
+    frame_of, frame_to_secs, gap_span, plan_commit, resolve_armed,
+};
 
 use crate::mpv::{Mpv, PlaybackState};
 use crate::preview;
@@ -234,20 +237,6 @@ pub enum Mode {
     Command(String),
     Extend(ExtendState),
     Pool(PoolState),
-}
-
-/// Which boundary is armed in extend mode: a clip edge, or a gap edge.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Armed {
-    /// Head (`head == true`) or tail of the clip with this id.
-    Clip { id: u32, head: bool },
-    /// A gap armed at its tail (right edge) — extend it outward and
-    /// followers shift/are overwritten. `index` is the gap's segment
-    /// index, stable while the mode is active. Unbounded.
-    GapTail { index: usize },
-    /// A gap armed at its head (left edge) — extending it left inserts
-    /// space (or overwrites the preceding segment); unbounded below.
-    GapHead { index: usize },
 }
 
 /// Extend-mode session state. All bounds are timeline seconds; `hi` is
@@ -1331,118 +1320,6 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 
 // ------------------------------------------------------------ extend mode
 
-/// What committing at the current playhead means. Maps 1:1 to edit ops
-/// in `run_commit` below; kept separate so the routing table is unit
-/// testable without mpv.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CommitKind {
-    TrimHead,
-    TrimTail,
-    GrowHeadIntoGap,
-    GrowTailIntoGap,
-    GrowTailPastEnd,
-    AbsorbTail,
-    AbsorbHead,
-    /// Move a gap's tail to the playhead (grow or shrink).
-    GapTail,
-    /// Move a gap's head leftward (insert space / overwrite the left).
-    GapHead,
-    Delete,
-    Noop,
-}
-
-/// Resolve the armed boundary at timeline position `t`: clip starts win
-/// (head-of-right at shared cuts, consistent with `clip_under`), then
-/// clip ends, then virtual timeline edges with gaps. Anything else is
-/// not a boundary.
-fn resolve_armed(project: &Project, t: f64, ti: usize) -> Result<(Armed, f64), String> {
-    let track = project
-        .timeline
-        .track(ti)
-        .ok_or_else(|| "empty timeline — add clips first".to_string())?;
-    if track.segments.is_empty() {
-        return Err("empty timeline — add clips first".to_string());
-    }
-    let eps = 1e-6;
-    // Pass 1: the segment STARTING at t wins — a clip's head (shared cuts
-    // arm the right head), or, when the right segment is a gap, the gap's
-    // head. So `e` at a clip|gap boundary arms the gap, and at the very
-    // start it arms the leading gap's head (extendable past time 0).
-    let mut acc = 0.0;
-    for (i, seg) in track.segments.iter().enumerate() {
-        if (acc - t).abs() < eps {
-            match seg {
-                TimelineSegment::Clip(c) => {
-                    return Ok((
-                        Armed::Clip {
-                            id: c.id,
-                            head: true,
-                        },
-                        acc,
-                    ));
-                }
-                TimelineSegment::Gap(_) => {
-                    return Ok((Armed::GapHead { index: i }, acc));
-                }
-            }
-        }
-        acc += secs(&seg.duration());
-    }
-    // Pass 2: clip ends — only bites at the timeline end, where nothing
-    // starts.
-    let mut acc = 0.0;
-    for seg in &track.segments {
-        acc += secs(&seg.duration());
-        if let TimelineSegment::Clip(c) = seg
-            && (acc - t).abs() < eps
-        {
-            return Ok((
-                Armed::Clip {
-                    id: c.id,
-                    head: false,
-                },
-                acc,
-            ));
-        }
-    }
-    // Pass 3: gap ends (the trailing gap at the timeline end).
-    let mut acc = 0.0;
-    for (i, seg) in track.segments.iter().enumerate() {
-        acc += secs(&seg.duration());
-        if matches!(seg, TimelineSegment::Gap(_)) && (acc - t).abs() < eps {
-            return Ok((Armed::GapTail { index: i }, acc));
-        }
-    }
-    Err("extend starts at a boundary — j/k to a cut".to_string())
-}
-
-/// The timeline span of a gap by segment index.
-fn gap_span(project: &Project, index: usize, ti: usize) -> Option<(f64, f64)> {
-    let track = project.timeline.track(ti)?;
-    let g = match track.segments.get(index) {
-        Some(TimelineSegment::Gap(g)) => g,
-        _ => return None,
-    };
-    let s = secs(&track.start_of(index));
-    Some((s, s + secs(&g.duration)))
-}
-
-/// The timeline span of a clip by id.
-fn clip_span(project: &Project, id: u32, ti: usize) -> Option<(f64, f64)> {
-    let track = project.timeline.track(ti)?;
-    let mut acc = 0.0;
-    for seg in &track.segments {
-        let dur = secs(&seg.duration());
-        if let TimelineSegment::Clip(c) = seg
-            && c.id == id
-        {
-            return Some((acc, acc + dur));
-        }
-        acc += dur;
-    }
-    None
-}
-
 /// Plan an extend-mode session: armed boundary, committable range,
 /// material span for display, and preview parameters. Pure — the caller
 /// realizes it with mpv IPC. Positions below are timeline seconds;
@@ -1602,94 +1479,6 @@ fn plan_for_armed(
                 mat: None,
                 preview: ExtendPreviewSpec::Black { origin: 0.0 },
             })
-        }
-    }
-}
-
-fn approx(a: f64, b: f64) -> bool {
-    (a - b).abs() < 1e-9
-}
-
-/// Route a commit from the armed edge and playhead. Positions use the
-/// live track layout (unchanged while the mode is active).
-fn plan_commit(
-    project: &Project,
-    armed: &Armed,
-    edge_pos: f64,
-    ph: f64,
-    ti: usize,
-) -> Result<CommitKind, String> {
-    if approx(ph, edge_pos) {
-        return Ok(CommitKind::Noop);
-    }
-    match armed {
-        Armed::Clip { id, head } => {
-            let (s, e) = clip_span(project, *id, ti).ok_or_else(|| "clip vanished".to_string())?;
-            let track = project
-                .timeline
-                .track(ti)
-                .ok_or_else(|| "clip vanished".to_string())?;
-            let si = track
-                .segments
-                .iter()
-                .position(|seg| matches!(seg, TimelineSegment::Clip(c) if c.id == *id))
-                .ok_or_else(|| "clip vanished".to_string())?;
-            if *head {
-                if ph > edge_pos && ph < e - 1e-9 {
-                    Ok(CommitKind::TrimHead)
-                } else if ph < edge_pos {
-                    // Strictly inside the adjacent gap: plain grow. At or
-                    // past its far edge there's no gap left to donate, so
-                    // absorb (which removes the covered span).
-                    let in_gap = si > 0
-                        && matches!(track.segments[si - 1], TimelineSegment::Gap(_))
-                        && ph > s - secs(&track.segments[si - 1].duration()) + 1e-9;
-                    if in_gap {
-                        Ok(CommitKind::GrowHeadIntoGap)
-                    } else {
-                        Ok(CommitKind::AbsorbHead)
-                    }
-                } else {
-                    Ok(CommitKind::Delete)
-                }
-            } else if ph < edge_pos && ph > s + 1e-9 {
-                Ok(CommitKind::TrimTail)
-            } else if ph > edge_pos {
-                // Strictly inside the adjacent gap: plain grow. At or past
-                // its far edge the gap is fully spanned, so absorb (which
-                // removes it and trims/removes any clip the span reaches).
-                let in_gap = si + 1 < track.segments.len()
-                    && matches!(track.segments[si + 1], TimelineSegment::Gap(_))
-                    && ph < e + secs(&track.segments[si + 1].duration()) - 1e-9;
-                if in_gap {
-                    Ok(CommitKind::GrowTailIntoGap)
-                } else if si + 1 >= track.segments.len() {
-                    // Nothing beyond: past the timeline end.
-                    Ok(CommitKind::GrowTailPastEnd)
-                } else {
-                    Ok(CommitKind::AbsorbTail)
-                }
-            } else {
-                Ok(CommitKind::Delete)
-            }
-        }
-        Armed::GapTail { index } => {
-            if let Some((s, _)) = gap_span(project, *index, ti)
-                && ph <= s + 1e-9
-            {
-                // At the gap's far end (its start): fully consumed — delete
-                // it, rippling shut.
-                return Ok(CommitKind::Delete);
-            }
-            Ok(CommitKind::GapTail)
-        }
-        Armed::GapHead { index } => {
-            if let Some((_, e)) = gap_span(project, *index, ti)
-                && ph >= e - 1e-9
-            {
-                return Ok(CommitKind::Delete);
-            }
-            Ok(CommitKind::GapHead)
         }
     }
 }
@@ -2064,22 +1853,6 @@ fn clamp_extend(st: &ExtendState, t: f64) -> f64 {
 /// commit actually creates (red indicator, "no clip ends here"). Snapping
 /// can step just outside the range, so pull back to the nearest in-range
 /// frame.
-/// Timeline frame index for a position (the grid `snap`/history use).
-fn frame_of(fps: Option<&Seconds>, t: f64) -> i64 {
-    match fps {
-        Some(f) => (t * secs(f)).round() as i64,
-        None => t.round() as i64,
-    }
-}
-
-/// A history frame index back to timeline seconds.
-fn frame_to_secs(fps: Option<&Seconds>, frame: i64) -> f64 {
-    match fps {
-        Some(f) => frame as f64 / secs(f),
-        None => frame as f64,
-    }
-}
-
 fn snap_extend_target(fps: Option<&Seconds>, st: &ExtendState, t: f64) -> f64 {
     // No floor at 0: a timeline-start segment can extend left of it
     // (material prepended), so `st.lo` may be negative.
@@ -2344,91 +2117,6 @@ fn run_commit_action(
         ripple,
         app.active(),
     )
-}
-
-/// Pure form of `run_commit_action` (no `App`), so a projection can run
-/// the same op on a scratch copy of the project.
-fn commit_batch(
-    project: &Project,
-    ph: f64,
-    armed: &Armed,
-    kind: CommitKind,
-    ripple: bool,
-    ti: usize,
-) -> Result<Batch, EditError> {
-    let (id, head) = match armed {
-        Armed::Clip { id, head } => (*id, *head),
-        Armed::GapTail { .. } | Armed::GapHead { .. } => (0, false),
-    };
-    match kind {
-        CommitKind::TrimHead => {
-            if ripple {
-                edit::trim_in_ripple_on(project, ti, ph)
-            } else {
-                edit::trim_in_on(project, ti, ph)
-            }
-        }
-        CommitKind::TrimTail => {
-            if ripple {
-                edit::trim_out_ripple_on(project, ti, ph)
-            } else {
-                edit::trim_out_on(project, ti, ph)
-            }
-        }
-        CommitKind::GrowHeadIntoGap => {
-            // Preserve: the existing gap op extends the head while the
-            // neighboring gap shrinks (length unchanged). Ripple: extend
-            // without touching the gap (followers shift).
-            if ripple {
-                edit::extend_edge_on(project, ti, id, true, ph)
-            } else {
-                edit::trim_out_on(project, ti, ph)
-            }
-        }
-        CommitKind::GrowTailIntoGap => {
-            if ripple {
-                edit::extend_edge_on(project, ti, id, false, ph)
-            } else {
-                edit::trim_in_on(project, ti, ph)
-            }
-        }
-        CommitKind::GrowTailPastEnd => edit::extend_edge_on(project, ti, id, head, ph),
-        // Absorb: e replaces everything covered (gaps removed, clips
-        // trimmed/removed); E pushes everything aside via plain extend.
-        CommitKind::AbsorbTail | CommitKind::AbsorbHead => {
-            if ripple {
-                edit::extend_edge_on(project, ti, id, head, ph)
-            } else {
-                edit::absorb_outward_on(project, ti, id, head, ph)
-            }
-        }
-        CommitKind::GapTail => {
-            let Armed::GapTail { index } = armed else {
-                return Err(EditError::NoGap);
-            };
-            edit::extend_gap_tail_on(project, ti, *index, ph, ripple)
-        }
-        CommitKind::GapHead => {
-            let Armed::GapHead { index } = armed else {
-                return Err(EditError::NoGap);
-            };
-            edit::extend_gap_head_on(project, ti, *index, ph, ripple)
-        }
-        CommitKind::Delete => {
-            // The playhead reached the armed segment's opposite end, so it
-            // is fully consumed: delete IT (rippling), not whatever segment
-            // the boundary resolves to. Gaps have no clip id — delete by
-            // index.
-            match armed {
-                Armed::GapTail { index } | Armed::GapHead { index } => {
-                    edit::delete_segment_on(project, ti, *index, true)
-                }
-                _ if ripple => edit::delete_clip_ripple_by_id_on(project, ti, id),
-                _ => edit::delete_clip_by_id_on(project, ti, id),
-            }
-        }
-        CommitKind::Noop => Err(EditError::NothingToTrim(format!("edge already at {}", ph))),
-    }
 }
 
 /// The timeline length if the current extend position were committed.

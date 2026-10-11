@@ -8,6 +8,7 @@
 pub mod detect;
 pub mod edit;
 pub mod edl;
+pub mod extend;
 pub mod media;
 pub mod otio;
 pub mod project;
@@ -22,11 +23,14 @@ pub use edit::{
     trim_out_ripple,
 };
 pub use edl::{EdlDoc, EdlError, EdlEvent};
+pub use extend::{
+    Armed, CommitKind, armed_edge, clip_span, commit_batch, gap_span, plan_commit, resolve_armed,
+};
 pub use media::{RawFormat, RawProbe, RawStream};
 pub use otio::{OtioClip, OtioDoc, OtioError, OtioItem, OtioTrack};
 pub use project::{Asset, Project, ProjectError, VideoSettings};
 pub use time::{
-    Seconds, Timecode, format_seconds, frames_to_seconds, nominal_fps, parse_rate, parse_time,
-    parse_timecode, timecode_to_frames,
+    Seconds, Timecode, format_seconds, frame_of, frame_to_secs, frames_to_seconds, nominal_fps,
+    parse_rate, parse_time, parse_timecode, secs_f64, timecode_to_frames,
 };
 pub use timeline::{Clip, Timeline, TimelineError, Track, TrackKind};
