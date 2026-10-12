@@ -512,6 +512,23 @@ mod tests {
     }
 
     #[test]
+    fn the_project_file_is_byte_stable() {
+        // Probe tags were a HashMap: its per-process iteration order made
+        // two identical projects differ byte-for-byte (noisy diffs, and
+        // anything comparing files saw changes that weren't there).
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert("encoder".to_string(), "Lavf".to_string());
+        tags.insert("major_brand".to_string(), "isom".to_string());
+        let mut p = sample_project();
+        p.media[0].probe.format.tags = Some(tags);
+
+        let first = serde_json::to_string_pretty(&p).unwrap();
+        let back: Project = serde_json::from_str(&first).unwrap();
+        let second = serde_json::to_string_pretty(&back).unwrap();
+        assert_eq!(first, second, "a round trip must not reorder the file");
+    }
+
+    #[test]
     fn rejects_other_versions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.json");

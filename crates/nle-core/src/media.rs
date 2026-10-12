@@ -4,7 +4,7 @@
 //! project file embeds them — that way re-importing is free and the
 //! media pool never needs to re-probe old files.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -28,8 +28,11 @@ pub struct RawFormat {
     pub size: Option<String>,
     /// Overall bit rate (bits/second), as a string.
     pub bit_rate: Option<String>,
-    /// Container tags: major_brand, encoder, ...
-    pub tags: Option<HashMap<String, String>>,
+    /// Container tags: major_brand, encoder, ... A `BTreeMap` so the
+    /// project file is *byte-stable*: a `HashMap`'s iteration order varies
+    /// per process, which made identical projects diff against each other
+    /// (noisy for humans, and for anything comparing files).
+    pub tags: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
