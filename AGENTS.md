@@ -111,11 +111,11 @@ plainly.
   the fix is "rebuild it" (`./demo.sh`). Bump the format version; don't
   write migration code.
 - **Undo sidecar rule (revised).** Writes that go through `History`
-  (`run_action`, `history.remove_asset`, `history.edit_tracks`) **record**;
-  writes that don't (pool *imports*, `init`, `import-*`, `detect-edits`)
-  re-baseline it via `save_and_reset_history`, or the next undo refuses with
-  "history entry does not apply". `nle add` resets only when it auto-imports a
-  new file. Both stacks persist (`HISTORY_VERSION` 10) — a redo stack that
+  (`run_action`, `history.remove_asset`, `history.add_asset`,
+  `history.edit_tracks`) **record**; only whole-project rebuilds (`init`,
+  `import-edl`, `import-otio`, `detect-edits`) re-baseline it via
+  `save_and_reset_history`, or the next undo refuses with "history entry does
+  not apply". Both stacks persist (`HISTORY_VERSION` 10) — a redo stack that
   died with the session made `nle redo` permanently empty.
 - **Track edits are whole-list changes.** `Change::Tracks` snapshots the track
   list before/after for add/mute/rm/purge (segment snapshots can't express

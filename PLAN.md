@@ -239,9 +239,10 @@ below.)
 - **Shared-session concurrency:** the TUI adopts shell writes within a tick
   (project, history, register, playhead) and never writes over an unseen
   change; reloads wait for Normal mode.
-- **Undo covers track edits too:** `Change::Tracks` makes add/mute/rm and
-  `purge-stumps` undoable (`HISTORY_VERSION` 10); only whole-project rebuilds
-  (imports, `init`, EDL/OTIO/detect) re-baseline.
+- **Undo covers track and pool edits:** `Change::Tracks` makes add/mute/rm and
+  `purge-stumps` undoable, `History::add_asset` makes imports (and an `add`
+  that auto-imports) undoable (`HISTORY_VERSION` 10); only whole-project
+  rebuilds (`init`, EDL/OTIO/detect) re-baseline.
 
 **Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
 
