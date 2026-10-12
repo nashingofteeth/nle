@@ -26,7 +26,8 @@ pub const MAX_HISTORY: usize = 100;
 /// v7 stored clip speed as raw `speed_num`/`speed_den` integers; v8 stores
 /// it as a `rational_ser` fraction like every other time in the Atom.
 /// v9 persists the redo stack too, so `nle redo` works across processes.
-pub const HISTORY_VERSION: u32 = 9;
+/// v10 adds `Change::Tracks` (track add/mute/rm are undoable).
+pub const HISTORY_VERSION: u32 = 10;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -270,6 +271,40 @@ impl History {
         Ok(desc)
     }
 
+    /// Record a whole-track-list edit (add / mute / remove): `edit` mutates
+    /// the project and returns the description, and the track lists before
+    /// and after are snapshotted — so undo restores the track *set*, not
+    /// just its segments. A refused edit (the last video track, a bad
+    /// index) leaves the project untouched.
+    pub fn edit_tracks<F>(
+        &mut self,
+        project: &mut Project,
+        playhead: i64,
+        edit: F,
+    ) -> Result<String, EditError>
+    where
+        F: FnOnce(&mut Project) -> Result<String, EditError>,
+    {
+        let before = project.timeline.tracks.clone();
+        let desc = match edit(project).and_then(|desc| {
+            project.validate().map_err(EditError::from)?;
+            Ok(desc)
+        }) {
+            Ok(desc) => desc,
+            Err(e) => {
+                project.timeline.tracks = before;
+                return Err(e);
+            }
+        };
+        self.push_change(Change::Tracks(TracksChange {
+            before,
+            after: project.timeline.tracks.clone(),
+            desc: desc.clone(),
+            playhead,
+        }));
+        Ok(desc)
+    }
+
     /// Push onto `done`, clear redo, and enforce the depth cap.
     fn push_change(&mut self, change: Change) {
         self.done.push(change);
@@ -436,6 +471,7 @@ pub enum Atom {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Change {
     Track(TrackChange),
+    Tracks(TracksChange),
     Assets(AssetChange),
 }
 
@@ -443,6 +479,7 @@ impl Change {
     pub fn desc(&self) -> &str {
         match self {
             Change::Track(c) => &c.desc,
+            Change::Tracks(c) => &c.desc,
             Change::Assets(c) => &c.desc,
         }
     }
@@ -450,6 +487,7 @@ impl Change {
     pub fn playhead(&self) -> i64 {
         match self {
             Change::Track(c) => c.playhead,
+            Change::Tracks(c) => c.playhead,
             Change::Assets(c) => c.playhead,
         }
     }
@@ -466,6 +504,18 @@ pub struct TrackChange {
     pub start_frame: i64,
     pub before: Vec<Atom>,
     pub after: Vec<Atom>,
+    pub desc: String,
+    pub playhead: i64,
+}
+
+/// A whole-track-list edit — adding, muting, or removing a track. Segment
+/// edits carry a `TrackChange` (one track's topology); this is for the
+/// operations that change the track *set*, which segment snapshots can't
+/// express.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TracksChange {
+    pub before: Vec<Track>,
+    pub after: Vec<Track>,
     pub desc: String,
     pub playhead: i64,
 }
@@ -545,9 +595,29 @@ fn batch_track(batch: &Batch, project: &Project) -> Result<usize, EditError> {
 fn substitute(project: &mut Project, change: &Change, forward: bool) -> Result<(), EditError> {
     match change {
         Change::Track(c) => substitute_topology(project, c, forward)?,
+        Change::Tracks(c) => substitute_tracks(project, c, forward)?,
         Change::Assets(c) => substitute_assets(project, c, forward)?,
     }
     project.validate().map_err(EditError::from)
+}
+
+fn substitute_tracks(
+    project: &mut Project,
+    change: &TracksChange,
+    forward: bool,
+) -> Result<(), EditError> {
+    let (expected, write) = if forward {
+        (&change.before, &change.after)
+    } else {
+        (&change.after, &change.before)
+    };
+    if project.timeline.tracks != *expected {
+        return Err(EditError::History(
+            "track list changed outside the undo stack".to_string(),
+        ));
+    }
+    project.timeline.tracks = write.clone();
+    Ok(())
 }
 
 /// Verify the live track matches one side of `change` (by segment id and

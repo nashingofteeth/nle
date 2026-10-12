@@ -300,30 +300,41 @@ pub fn run_action(
             // made from the edge it moved — undo returns there.
             apply(project, history, batch, edge_pos)
         }
-        Action::PurgeStumps { track } => purge_stumps(project, history, *track),
+        Action::PurgeStumps { track } => purge_stumps(project, history, *track, from),
         Action::TrackAdd { kind } => {
-            let idx = project.timeline.add_track(*kind);
+            let playhead = frame_of(project.fps.as_ref(), from);
+            let desc = history.edit_tracks(project, playhead, |p| {
+                let idx = p.timeline.add_track(*kind);
+                Ok(format!("added track {}", track_label(p, idx)))
+            })?;
             Ok(Outcome {
-                desc: format!("added track {}", track_label(project, idx)),
+                desc,
                 changed: true,
                 playhead: None,
             })
         }
         Action::TrackMute { track } => {
-            let t = project
-                .timeline
-                .track_mut(*track)
-                .ok_or(EditError::TrackNotFound(*track))?;
-            t.muted = !t.muted;
-            let muted = t.muted;
-            let label = track_label(project, *track);
+            let playhead = frame_of(project.fps.as_ref(), from);
+            let desc = history.edit_tracks(project, playhead, |p| {
+                let label = track_label(p, *track);
+                let t = p
+                    .timeline
+                    .track_mut(*track)
+                    .ok_or(EditError::TrackNotFound(*track))?;
+                t.muted = !t.muted;
+                let muted = t.muted;
+                Ok(format!(
+                    "{label} {}",
+                    if muted { "muted" } else { "unmuted" }
+                ))
+            })?;
             Ok(Outcome {
-                desc: format!("{label} {}", if muted { "muted" } else { "unmuted" }),
+                desc,
                 changed: true,
                 playhead: None,
             })
         }
-        Action::TrackRm { track } => track_rm(project, history, *track),
+        Action::TrackRm { track } => track_rm(project, history, *track, from),
         Action::AssetRm { id } => {
             let playhead = frame_of(project.fps.as_ref(), from);
             let desc = history.remove_asset(project, *id, playhead)?;
@@ -469,12 +480,13 @@ fn arm(project: &Project, track: usize, target: Target, edge: Edge) -> Result<Ar
 }
 
 /// Drop sub-frame stumps, clamp every clip to its media, and snap the
-/// tracks onto the frame grid. Topology changes wholesale, so the undo
-/// stack is re-baselined (nothing recorded against the old indices).
+/// tracks onto the frame grid. Recorded as a whole-track-list change, so
+/// undo restores exactly what the repair changed.
 fn purge_stumps(
     project: &mut Project,
     history: &mut History,
     track: Option<usize>,
+    from: f64,
 ) -> Result<Outcome, EditError> {
     let fps = project.fps.ok_or(EditError::NoFps)?;
     let indices: Vec<usize> = match track {
@@ -491,59 +503,65 @@ fn purge_stumps(
         .iter()
         .filter_map(|a| a.duration().map(|d| (a.id, d)))
         .collect();
-    let mut adjusted = 0usize;
-    let mut dropped = 0usize;
-    for ti in indices {
-        let t = project
-            .timeline
-            .track_mut(ti)
-            .ok_or(EditError::TrackNotFound(ti))?;
-        let media = |id: u32| durations.get(&id).copied();
-        adjusted += edit::clamp_to_media(t, &media, fps).len();
-        let (cleaned, n) = edit::purge_stumps(t, fps);
-        t.segments = cleaned;
-        dropped += n;
-    }
-    project.validate()?;
-    *history = History::default();
+    let playhead = frame_of(project.fps.as_ref(), from);
+    let desc = history.edit_tracks(project, playhead, |p| {
+        let mut adjusted = 0usize;
+        let mut dropped = 0usize;
+        for ti in &indices {
+            let t = p
+                .timeline
+                .track_mut(*ti)
+                .ok_or(EditError::TrackNotFound(*ti))?;
+            let media = |id: u32| durations.get(&id).copied();
+            adjusted += edit::clamp_to_media(t, &media, fps).len();
+            let (cleaned, n) = edit::purge_stumps(t, fps);
+            t.segments = cleaned;
+            dropped += n;
+        }
+        Ok(format!(
+            "purged {dropped} sub-frame segment(s), adjusted {adjusted} clip(s)"
+        ))
+    })?;
     Ok(Outcome {
-        desc: format!("purged {dropped} sub-frame segment(s), adjusted {adjusted} clip(s)"),
+        desc,
         changed: true,
         playhead: None,
     })
 }
 
-/// Remove a track and its clips. Track indices shift under the undo
-/// stack, so this re-baselines history (not undoable) — same rule as the
-/// CLI's structural writes.
+/// Remove a track and its clips. The whole track list is recorded, so the
+/// shifted indices are what undo restores — `nle undo` brings the track
+/// (and its clips) back.
 fn track_rm(
     project: &mut Project,
     history: &mut History,
     track: usize,
+    from: f64,
 ) -> Result<Outcome, EditError> {
-    let n = project.timeline.tracks.len();
-    if track >= n {
-        return Err(EditError::TrackNotFound(track));
-    }
-    let label = track_label(project, track);
-    if project.timeline.tracks[track].kind == TrackKind::Video
-        && project.timeline.video_tracks().count() <= 1
-    {
-        return Err(EditError::LastVideoTrack);
-    }
-    let removed = project.timeline.tracks.remove(track);
-    let clips = removed
-        .segments
-        .iter()
-        .filter(|s| matches!(s, Segment::Clip(_)))
-        .count();
-    project.validate()?;
-    *history = History::default();
-    let desc = if clips > 0 {
-        format!("removed track {label} ({clips} clip(s) deleted)")
-    } else {
-        format!("removed track {label}")
-    };
+    let playhead = frame_of(project.fps.as_ref(), from);
+    let desc = history.edit_tracks(project, playhead, |p| {
+        let n = p.timeline.tracks.len();
+        if track >= n {
+            return Err(EditError::TrackNotFound(track));
+        }
+        let label = track_label(p, track);
+        if p.timeline.tracks[track].kind == TrackKind::Video
+            && p.timeline.video_tracks().count() <= 1
+        {
+            return Err(EditError::LastVideoTrack);
+        }
+        let removed = p.timeline.tracks.remove(track);
+        let clips = removed
+            .segments
+            .iter()
+            .filter(|s| matches!(s, Segment::Clip(_)))
+            .count();
+        Ok(if clips > 0 {
+            format!("removed track {label} ({clips} clip(s) deleted)")
+        } else {
+            format!("removed track {label}")
+        })
+    })?;
     Ok(Outcome {
         desc,
         changed: true,
@@ -1098,7 +1116,7 @@ fn parse_rate(s: &str) -> Result<Seconds, ParseError> {
 mod tests {
     use super::*;
     use crate::media::{RawFormat, RawProbe, RawStream};
-    use crate::timeline::{Clip, Gap};
+    use crate::timeline::{Clip, Gap, TrackKind};
 
     fn defaults() -> ParseDefaults {
         ParseDefaults {
@@ -1330,6 +1348,143 @@ mod tests {
         .unwrap();
         // Pasting inside clip #2 splits it: gap, #1, gap, #2a, pasted, #2b.
         assert_eq!(p.timeline.video_track().unwrap().segments.len(), 6);
+    }
+
+    #[test]
+    fn track_edits_are_undoable() {
+        let mut p = fixture();
+        let mut reg = None;
+        let mut h = History::default();
+
+        // Add → undo → redo.
+        run_action(
+            &mut p,
+            &mut h,
+            &mut reg,
+            &Action::TrackAdd {
+                kind: TrackKind::Audio,
+            },
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(p.timeline.tracks.len(), 2);
+        run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
+        assert_eq!(p.timeline.tracks.len(), 1, "the add undoes");
+        run_action(&mut p, &mut h, &mut reg, &Action::Redo, 0.0).unwrap();
+        assert_eq!(p.timeline.tracks.len(), 2, "and redoes");
+
+        // Mute → undo restores the flag.
+        run_action(
+            &mut p,
+            &mut h,
+            &mut reg,
+            &Action::TrackMute { track: 1 },
+            0.0,
+        )
+        .unwrap();
+        assert!(p.timeline.track(1).unwrap().muted);
+        run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
+        assert!(!p.timeline.track(1).unwrap().muted, "the mute undoes");
+
+        // Put a clip on the new track through the catalog (so the stack
+        // stays in step), then remove the track: undo brings it back with
+        // its clip.
+        let a = p.media[0].id;
+        let clip = Segment::Clip(Clip {
+            id: 0,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(2),
+            speed: Seconds::from_integer(1),
+        });
+        run_action(
+            &mut p,
+            &mut h,
+            &mut reg,
+            &Action::Paste {
+                track: 1,
+                at: 0.0,
+                ripple: true,
+                segment: Some(clip),
+            },
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(p.timeline.track(1).unwrap().segments.len(), 1);
+        run_action(&mut p, &mut h, &mut reg, &Action::TrackRm { track: 1 }, 0.0).unwrap();
+        assert_eq!(p.timeline.tracks.len(), 1);
+        run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
+        assert_eq!(p.timeline.tracks.len(), 2, "the track is back");
+        assert_eq!(
+            p.timeline.track(1).unwrap().segments.len(),
+            1,
+            "with its clip"
+        );
+    }
+
+    #[test]
+    fn a_refused_track_edit_leaves_the_project_alone() {
+        let mut p = fixture();
+        let mut h = History::default();
+        // Removing the only video track fails validation — and the snapshot
+        // is rolled back, not left half-applied.
+        let err = h.edit_tracks(&mut p, 0, |p| {
+            p.timeline.tracks.remove(0);
+            Ok("removed the only video track".to_string())
+        });
+        assert!(err.is_err(), "a project needs a video track");
+        assert_eq!(p.timeline.tracks.len(), 1, "the edit rolled back");
+        assert!(!h.can_undo(), "nothing was recorded");
+    }
+
+    #[test]
+    fn a_track_list_changed_outside_the_stack_refuses_to_undo() {
+        let mut p = fixture();
+        let mut reg = None;
+        let mut h = History::default();
+        run_action(
+            &mut p,
+            &mut h,
+            &mut reg,
+            &Action::TrackAdd {
+                kind: TrackKind::Audio,
+            },
+            0.0,
+        )
+        .unwrap();
+        // Something (a stale sidecar, an out-of-band write) moved the tracks.
+        p.timeline.add_track(TrackKind::Video);
+        assert!(matches!(
+            run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0),
+            Err(EditError::History(_))
+        ));
+    }
+
+    #[test]
+    fn purge_is_undoable() {
+        let mut p = fixture();
+        // Drift clip #1 to 60.4 frames at 30 fps: purge snaps it to 60.
+        if let Segment::Clip(c) = &mut p.timeline.tracks[0].segments[1] {
+            c.asset_out = c.asset_in + Seconds::new(604, 300);
+        }
+        let mut reg = None;
+        let mut h = History::default();
+        let out = run_action(
+            &mut p,
+            &mut h,
+            &mut reg,
+            &Action::PurgeStumps { track: None },
+            0.0,
+        )
+        .unwrap();
+        assert!(out.desc.contains("purged"), "{}", out.desc);
+        let span = |p: &Project| match &p.timeline.tracks[0].segments[1] {
+            Segment::Clip(c) => c.asset_out - c.asset_in,
+            other => panic!("expected a clip, got {other:?}"),
+        };
+        assert_eq!(span(&p), Seconds::from_integer(2), "snapped to 60 frames");
+        run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
+        assert_eq!(span(&p), Seconds::new(604, 300), "the drift is back");
     }
 
     #[test]

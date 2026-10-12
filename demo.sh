@@ -227,6 +227,20 @@ else
   echo "  ✗ unexpected pool listing"; exit 1
 fi
 
+echo "== live hand-off playground =="
+# A small project for the shell↔TUI experiment: open the TUI on it in one
+# terminal, run nle commands in another. Each write is adopted within a tick
+# ("adopted changes from the shell") — no keypress needed.
+rm -f live.json live.history.json live.clipboard.json
+$N --project live.json init --force >/dev/null
+$N --project live.json import red.mp4 blue.mp4 green.mp4 >/dev/null
+$N --project live.json add red.mp4  --in 0 --out 3 >/dev/null    # red 0–3
+$N --project live.json add blue.mp4 --at 4 --in 0 --out 3 >/dev/null  # gap 3–4, blue 4–7
+$N --project live.json seek 1.5 >/dev/null
+$N --project live.json show
+echo "  → in one terminal:  ./target/release/nle --project demo-sandbox/live.json edit"
+echo "    in another:       ./target/release/nle --project demo-sandbox/live.json split --at 5"
+
 echo "== log check (NLE_LOG end-to-end) =="
 LOG="$(pwd)/nle-log-check.txt"
 rm -f "$LOG" log-check.json
