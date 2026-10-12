@@ -163,7 +163,9 @@ a TUI edit and vice versa (`nle.history.json`, both stacks). The yank
 register is shared too (`nle.clipboard.json`): `nle yank` then `p` in the
 TUI, or `yy` in the TUI then `nle paste` from a script. The **playhead** is
 the third shared slot (`nle.json`'s `playhead`): `nle seek T` / `:seek T`
-move it, the TUI opens there and re-saves its position after every edit.
+move it; the TUI opens there, re-saves it after every edit, and writes it
+about a second after the transport stops moving (so a pause or a seek is
+visible to the next shell command).
 
 Commands that need processes (probe, export, detect, EDL/OTIO import) are
 CLI-only in the model sense, but the TUI spells them too (`:export`,

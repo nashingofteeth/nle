@@ -6,7 +6,7 @@
 //! the reader thread and is rendered on the next tick (~20fps redraw).
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -20,11 +20,11 @@ use nle_core::action::{self, Action, Edge, GapLen, ParseDefaults, ParseError, Ta
 use nle_core::edit;
 use nle_core::timeline::{Segment as TimelineSegment, Track};
 use nle_core::{
-    Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_to_secs,
-    gap_span, load_register, plan_commit, resolve_armed, save_register, track_label,
+    Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_of,
+    frame_to_secs, gap_span, load_register, plan_commit, resolve_armed, save_register, track_label,
 };
 #[cfg(test)]
-use nle_core::{Batch, EditError, frame_of};
+use nle_core::{Batch, EditError};
 
 use crate::mpv::{Mpv, PlaybackState};
 use crate::preview;
@@ -478,6 +478,12 @@ impl App {
 
 // ------------------------------------------------------------ event loop
 
+/// How long the transport must be still before the session playhead is
+/// written to the project. Long enough that holding `l` or playing back
+/// doesn't write a project file per frame; short enough that a shell sees
+/// where the cursor is shortly after it stops moving.
+const PLAYHEAD_FLUSH_IDLE: Duration = Duration::from_millis(1000);
+
 pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
     let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
@@ -492,6 +498,8 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     }
     // Media title (MPRIS "Now playing") follows the clip under the playhead.
     let mut last_media_title: Option<String> = None;
+    // When the playhead was last seen moving, for the idle flush below.
+    let mut playhead_moving: Option<Instant> = None;
 
     loop {
         let st = player.state();
@@ -512,6 +520,25 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         // A finished worker reports in (export, or an importer that just
         // rewrote the project).
         poll_job(&mut app, &player);
+
+        // The stored playhead follows the transport: after a moment of
+        // stillness, write where the cursor landed (`nle seek` reads it).
+        // Diffing here catches every mover — keys, mpv playback, undo —
+        // without instrumenting each handler.
+        if playhead_moved(&app) {
+            playhead_moving = Some(Instant::now());
+        } else if let Some(since) = playhead_moving
+            && since.elapsed() >= PLAYHEAD_FLUSH_IDLE
+        {
+            match persist_playhead(&mut app) {
+                Ok(()) => playhead_moving = None,
+                Err(e) => {
+                    // Don't retry every tick; the next move tries again.
+                    app.set_message(&format!("save failed: {e}"));
+                    playhead_moving = None;
+                }
+            }
+        }
 
         // Keep the desktop's "Now playing" in sync with the clip playing.
         if st.file_loaded {
@@ -549,10 +576,35 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         }
     }
 
+    // Quitting right after a move keeps the cursor where it was left.
+    if playhead_moving.is_some()
+        && let Err(e) = persist_playhead(&mut app)
+    {
+        crate::log::line(&format!("playhead save failed on exit: {e}"));
+    }
+
     ratatui::restore();
     if let Some(msg) = app.exit_message {
         println!("{msg}");
     }
+    Ok(())
+}
+
+/// Whether the live playhead has moved off the stored one — compared in
+/// **frames**, because the two floats are computed by different paths and
+/// can differ in the last ulp (a float compare would re-trigger the flush
+/// forever).
+fn playhead_moved(app: &App) -> bool {
+    let fps = app.project.fps.as_ref();
+    frame_of(fps, app.playhead) != frame_of(fps, secs(&app.project.playhead))
+}
+
+/// Write the session playhead into the project and save it — the stored
+/// cursor `nle seek` reads. Called after edits, by `:seek`, and by the
+/// transport's idle flush.
+fn persist_playhead(app: &mut App) -> anyhow::Result<()> {
+    app.project.set_playhead(app.playhead);
+    app.project.save(&app.path)?;
     Ok(())
 }
 
@@ -1105,8 +1157,7 @@ fn seek_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Optio
     };
     // Same clamp as every other seek: into the timeline.
     app.seek_to(player, t.clamp(0.0, app.total()));
-    app.project.set_playhead(app.playhead);
-    if let Err(e) = app.project.save(&app.path) {
+    if let Err(e) = persist_playhead(app) {
         return Some(format!("save failed: {e}"));
     }
     Some(format!(
@@ -2095,8 +2146,7 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
 fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
     // The stored playhead follows the session — it is what `nle seek`
     // reads and where the next TUI session opens.
-    app.project.set_playhead(app.playhead);
-    if let Err(e) = app.project.save(&app.path) {
+    if let Err(e) = persist_playhead(app) {
         app.set_message(&format!("save failed: {e}"));
         return;
     }
@@ -3985,6 +4035,39 @@ mod tests {
             nle_core::register_path(&path).exists(),
             "the register sidecar is written on yank"
         );
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    // The transport flush: a move is detected in frames (the two float
+    // paths can differ in the last ulp, which must not retrigger it), and
+    // flushing writes the cursor `nle seek` reads.
+    #[test]
+    fn transport_moves_flush_the_stored_playhead() {
+        let path = temp_project_path("transport-flush");
+        asset_project().save(&path).unwrap();
+        let mut app = App::new(asset_project(), path.clone());
+        app.loaded = true;
+        assert!(
+            !playhead_moved(&app),
+            "the session starts on the stored frame"
+        );
+
+        // A transport key moves the playhead; the diff notices it.
+        handle_key(&mut app, &FakeMpv::new(), key('l'));
+        assert_eq!(app.playhead, 1.0);
+        assert!(playhead_moved(&app));
+        persist_playhead(&mut app).unwrap();
+        assert_eq!(
+            Project::load(&path).unwrap().playhead,
+            Seconds::from_integer(1)
+        );
+        assert!(!playhead_moved(&app), "flushing clears the diff");
+
+        // Sub-frame noise must not look like a move.
+        app.playhead = secs(&app.project.playhead) + 1e-9;
+        assert!(!playhead_moved(&app), "frame-granular, not float-granular");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
         let _ = std::fs::remove_file(nle_core::register_path(&path));
     }
 
