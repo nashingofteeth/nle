@@ -759,9 +759,13 @@ fn stamp(project: &Project, t: &Seconds) -> String {
 }
 
 /// Result of a trim must leave at least one frame.
+/// Every duration-changing op refuses a span that can't be represented on
+/// the frame grid: a *sub-frame* span (0.9 frames is not one frame —
+/// rounding it up to pass was a bug that let `speed` leave a 0.03 s clip
+/// in a 30 fps timeline).
 fn at_least_a_frame(project: &Project, dur: &Seconds) -> Result<(), EditError> {
     let fps = project.fps.ok_or(EditError::NoFps)?;
-    if (*dur * fps).round().to_integer() >= 1 {
+    if (*dur * fps).floor().to_integer() >= 1 {
         Ok(())
     } else {
         Err(EditError::TooShort)
@@ -5186,5 +5190,22 @@ mod tests {
             Seconds::new(1, 30),
             "2 frames at 2x = 1 frame"
         );
+
+        // The case rounding used to hide: 0.9 frames is *not* a frame.
+        // 3 s of source at 100× is 0.03 s = 0.9 frames at 30 fps.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(3),
+            speed: Seconds::from_integer(1),
+        })];
+        assert!(matches!(
+            set_speed(&p, 1, Seconds::from_integer(100)),
+            Err(EditError::TooShort)
+        ));
     }
 }
