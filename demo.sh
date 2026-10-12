@@ -21,6 +21,16 @@ gen() { # gen NAME COLOR SIZE RATE DUR FREQ
   fi
 }
 
+# Does a command's combined output contain PATTERN? Captured first, because
+# `cmd | grep -q` under `set -o pipefail` can kill the producer with SIGPIPE
+# (grep exits on the first match) and report failure on a match.
+output_has() { # output_has PATTERN CMD...
+  local pat=$1 out
+  shift
+  out=$("$@" 2>&1 || true)
+  [[ "$out" == *"$pat"* ]]
+}
+
 gen red.mp4   red    320x240   30           5 440
 gen blue.mp4  blue   640x360   60000/1001   6 880
 gen green.mp4 green  1280x720  24           4 1320
@@ -63,7 +73,7 @@ for t in 1.5 3.5 4.5 7; do
   printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
 done
 rm -f pixel.raw
-if ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 demo-multi.mp4 | grep -q audio; then
+if output_has audio ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 demo-multi.mp4; then
   echo "  ✓ multi-track export has an audio stream"
 else
   echo "  ✗ multi-track export has no audio"; exit 1
@@ -118,7 +128,7 @@ if [ "$detect_gaps" -eq 2 ]; then
 else
   echo "  ✗ expected 2 gap rows (v1+a1), got $detect_gaps"; exit 1
 fi
-if ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 detect-out.mp4 | grep -q audio; then
+if output_has audio ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 detect-out.mp4; then
   echo "  ✓ reconstructed audio track exported"
 else
   echo "  ✗ reconstructed project has no audio"; exit 1
@@ -146,6 +156,8 @@ $N --project agent.json add blue.mp4 --at 4 --in 0 --out 4 >/dev/null  # #2 4–
 $N --project agent.json split --at 2                             # #1 0–2, #3 2–4
 $N --project agent.json delete --clip 1 --ripple
 $N --project agent.json undo                                     # the delete undoes
+$N --project agent.json redo                                     # and redo reapplies it
+$N --project agent.json undo                                     # undo again: back to the split
 $N --project agent.json gap --at 4 --frames 30                   # gap 4–5
 $N --project agent.json yank --clip 3
 $N --project agent.json paste --at 5 --ripple                    # red 5–7
@@ -159,7 +171,7 @@ for t in 1 4.5 6 9; do
   printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
 done
 rm -f pixel.raw
-if $N --project agent.json show | grep -q "at 2.5 s"; then
+if output_has "at 2.5 s" $N --project agent.json show; then
   echo "  ✓ shared playhead stored (nle seek → nle show)"
 else
   echo "  ✗ playhead not stored"; exit 1
@@ -168,6 +180,51 @@ if [ -f agent.clipboard.json ]; then
   echo "  ✓ shared register written (nle yank → nle paste)"
 else
   echo "  ✗ no register sidecar"; exit 1
+fi
+
+echo "== shell editing: trim · extend · split · gap · speed =="
+rm -f edit.json edit.history.json edit.clipboard.json
+$N --project edit.json init --force >/dev/null
+$N --project edit.json import red.mp4 blue.mp4 >/dev/null
+$N --project edit.json add red.mp4  --in 0 --out 4               # #1 red 0–4
+$N --project edit.json add blue.mp4 --at 4 --in 0 --out 4        # #2 blue 4–8
+$N --project edit.json trim-out --at 3                           # #1 0–3, gap 3–4
+$N --project edit.json extend --clip 1 --edge out --to 4         # #1 grows back over the gap
+$N --project edit.json split --at 5                              # #2 4–5, #3 5–8
+$N --project edit.json gap --dur 0.5 --at 5                      # 15-frame gap 5–5.5
+$N --project edit.json speed 3 2                                 # #3 at 2×: 5.5–7
+$N --project edit.json show
+$N --project edit.json export -o edit.mp4 >/dev/null
+echo "  expect: red 0–4 · blue 4–5 · black 5–5.5 · blue 5.5–7"
+for t in 1 4.5 5.25 6.5; do
+  ffmpeg -v error -y -ss "$t" -i edit.mp4 -frames:v 1 -f rawvideo -pix_fmt rgb24 pixel.raw
+  printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
+done
+rm -f pixel.raw
+
+echo "== shell housekeeping: tracks · pool · purge =="
+$N --project edit.json track add audio
+$N --project edit.json add green.mp4 --track 2 --in 0 --out 2
+$N --project edit.json track mute 2
+$N --project edit.json track ls
+$N --project edit.json purge-stumps
+$N --project edit.json show --json | head -3
+
+rm -f pool.json pool.history.json
+$N --project pool.json init --force >/dev/null
+$N --project pool.json import red.mp4 blue.mp4 >/dev/null
+$N --project pool.json add red.mp4 --in 0 --out 1 >/dev/null
+$N --project pool.json media rm 2                                # blue is unused
+$N --project pool.json media ls
+if output_has "used by" $N --project pool.json media rm 1; then
+  echo "  ✓ media rm refuses an asset in use"
+else
+  echo "  ✗ media rm removed an in-use asset"; exit 1
+fi
+if output_has "asset(s)" $N --project pool.json media ls; then
+  echo "  ✓ pool down to the one asset still in use"
+else
+  echo "  ✗ unexpected pool listing"; exit 1
 fi
 
 echo "== log check (NLE_LOG end-to-end) =="
