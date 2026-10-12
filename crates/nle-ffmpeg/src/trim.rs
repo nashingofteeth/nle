@@ -59,8 +59,14 @@ pub enum Encoder {
 pub enum FfmpegError {
     #[error("could not run ffmpeg: {0}")]
     Spawn(#[from] std::io::Error),
-    #[error("ffmpeg failed with {0}")]
-    Failed(std::process::ExitStatus),
+    #[error("ffmpeg failed ({status}): {tail}")]
+    Failed {
+        status: std::process::ExitStatus,
+        /// The tail of ffmpeg's stderr — where the actual reason lives
+        /// ("Error opening output file …", "Invalid data found …"). The
+        /// exit status alone tells the user nothing.
+        tail: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -143,13 +149,67 @@ pub fn video_encode_args(encoder: Encoder, crf: u8, preset: &str, bitrate: &str)
     a
 }
 
-/// Run ffmpeg, inheriting stdio (its live progress goes to our stderr).
+/// Run ffmpeg, streaming its stderr live (progress belongs on our stderr)
+/// while keeping the last few lines: when it fails, the error must name
+/// the cause — a bare exit status tells the user nothing.
 pub fn run_ffmpeg(args: &[String]) -> Result<(), FfmpegError> {
-    let status = Command::new("ffmpeg").args(args).status()?;
+    use std::io::{BufRead, BufReader, Write as _};
+    use std::process::Stdio;
+
+    const TAIL: usize = 8;
+    let mut child = Command::new("ffmpeg")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let reader = std::thread::spawn(move || {
+        let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            // Live, like the old inherited stderr; a closed pipe is not a
+            // reason to panic.
+            let _ = writeln!(std::io::stderr(), "{line}");
+            if tail.len() == TAIL {
+                tail.pop_front();
+            }
+            tail.push_back(line);
+        }
+        error_lines(&tail.into_iter().collect::<Vec<_>>())
+    });
+    let status = child.wait()?;
+    let tail = reader.join().unwrap_or_default();
     if !status.success() {
-        return Err(FfmpegError::Failed(status));
+        return Err(FfmpegError::Failed { status, tail });
     }
     Ok(())
+}
+
+/// The reason a failed run failed, out of the last lines of its stderr:
+/// ffmpeg buries the cause among progress and stream metadata, so prefer
+/// the lines that actually name a problem.
+fn error_lines(lines: &[String]) -> String {
+    const KEYS: &[&str] = &["error", "invalid", "no such", "not found", "failed"];
+    let hits: Vec<&String> = lines
+        .iter()
+        .filter(|l| {
+            let lower = l.to_ascii_lowercase();
+            KEYS.iter().any(|k| lower.contains(k))
+        })
+        .collect();
+    let picked = if hits.is_empty() {
+        lines.iter().collect()
+    } else {
+        hits
+    };
+    picked
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(|l| l.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Build the argument list for a trim. Exposed so tests (and later the
@@ -306,5 +366,25 @@ mod tests {
         s.start = Seconds::from_integer(10);
         s.end = Seconds::from_integer(10);
         assert!(matches!(build_args(&s), Err(TrimError::Range { .. })));
+    }
+
+    #[test]
+    fn a_failed_run_reports_the_reason_not_the_noise() {
+        let lines: Vec<String> = [
+            "  Duration: 00:00:06.00, start: 0.000000",
+            "      handler_name    : SoundHandler",
+            "[out#0/mp4 @ 0x1] Error opening output /nope/x.mp4: No such file or directory",
+            "Error opening output file /nope/x.mp4.",
+            "Error opening output files: No such file or directory",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let msg = error_lines(&lines);
+        assert!(msg.contains("No such file or directory"), "{msg}");
+        assert!(!msg.contains("SoundHandler"), "noise filtered: {msg}");
+        // Nothing error-ish in the tail: report it rather than nothing.
+        let quiet: Vec<String> = ["progress", "more"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(error_lines(&quiet), "progress\nmore");
     }
 }
