@@ -99,10 +99,62 @@ pub struct Gap {
     pub duration: Seconds,
 }
 
+/// Where one side of a transition comes from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum TransitionSource {
+    /// A trimmed span of a pooled asset, in source seconds. Rendered into
+    /// `dur` of timeline, so the side's rate is implied by the span.
+    Clip {
+        asset: u32,
+        #[serde(with = "rational_ser")]
+        src_in: Seconds,
+        #[serde(with = "rational_ser")]
+        src_out: Seconds,
+    },
+    /// Generated black — toward a gap or the timeline edge.
+    Black,
+}
+
+impl TransitionSource {
+    /// The pooled asset this side reads, if it is a clip side.
+    pub fn asset(&self) -> Option<u32> {
+        match self {
+            TransitionSource::Clip { asset, .. } => Some(*asset),
+            TransitionSource::Black => None,
+        }
+    }
+}
+
+/// The crossfade shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionKind {
+    /// `xfade=transition=fade` — blend the outgoing side into the incoming.
+    Dissolve,
+    /// `xfade=transition=fadeblack` — fade through black.
+    FadeBlack,
+}
+
+/// A transition between two source sides, occupying `dur` of timeline. It
+/// *owns* both source spans (as a clip owns its own), so it never dangles
+/// when neighbours change. A transition needs at least one clip side —
+/// black↔black is meaningless.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Transition {
+    pub id: u32,
+    #[serde(with = "rational_ser")]
+    pub dur: Seconds,
+    pub kind: TransitionKind,
+    /// Outgoing (left) side.
+    pub a: TransitionSource,
+    /// Incoming (right) side.
+    pub b: TransitionSource,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Segment {
     Clip(Clip),
     Gap(Gap),
+    Transition(Transition),
 }
 
 impl Segment {
@@ -110,6 +162,7 @@ impl Segment {
         match self {
             Segment::Clip(c) => c.duration(),
             Segment::Gap(g) => g.duration,
+            Segment::Transition(t) => t.dur,
         }
     }
 }
@@ -167,7 +220,7 @@ impl Track {
         let i = self.index_at(t)?;
         match &self.segments[i] {
             Segment::Clip(c) => Some(c),
-            Segment::Gap(_) => None,
+            Segment::Gap(_) | Segment::Transition(_) => None,
         }
     }
 
@@ -288,6 +341,23 @@ impl Timeline {
                     Segment::Gap(g) => {
                         if g.duration <= Seconds::from_integer(0) {
                             return Err(bad("gap has a non-positive duration"));
+                        }
+                    }
+                    Segment::Transition(t) => {
+                        if t.dur <= Seconds::from_integer(0) {
+                            return Err(bad("transition has a non-positive duration"));
+                        }
+                        if t.a.asset().is_none() && t.b.asset().is_none() {
+                            return Err(bad("transition has no clip side"));
+                        }
+                        for side in [&t.a, &t.b] {
+                            if let TransitionSource::Clip {
+                                src_in, src_out, ..
+                            } = side
+                                && src_out <= src_in
+                            {
+                                return Err(bad("transition side has a non-positive source span"));
+                            }
                         }
                     }
                 }
@@ -446,5 +516,37 @@ mod tests {
         let mut ok = Timeline::new();
         ok.add_track(TrackKind::Audio);
         assert!(ok.validate().is_ok());
+    }
+
+    fn trans(dur: i64, a: TransitionSource) -> Segment {
+        Segment::Transition(Transition {
+            id: 1,
+            dur: Seconds::from_integer(dur),
+            kind: TransitionKind::Dissolve,
+            a,
+            b: TransitionSource::Black,
+        })
+    }
+
+    #[test]
+    fn validate_rejects_bad_transitions() {
+        let clip = |in_: i64, out: i64| TransitionSource::Clip {
+            asset: 1,
+            src_in: Seconds::from_integer(in_),
+            src_out: Seconds::from_integer(out),
+        };
+        let mut t = Timeline::new();
+
+        t.tracks[0].segments = vec![trans(1, TransitionSource::Black)];
+        assert!(t.validate().is_err(), "needs a clip side");
+
+        t.tracks[0].segments = vec![trans(0, clip(0, 1))];
+        assert!(t.validate().is_err(), "non-positive duration");
+
+        t.tracks[0].segments = vec![trans(1, clip(2, 2))];
+        assert!(t.validate().is_err(), "non-positive source span");
+
+        t.tracks[0].segments = vec![trans(1, clip(0, 1))];
+        assert!(t.validate().is_ok());
     }
 }

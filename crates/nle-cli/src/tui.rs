@@ -2154,6 +2154,8 @@ fn edit_anchor(project: &Project, playhead: f64, ti: usize) -> Option<Anchor> {
         TimelineSegment::Gap(_) => Some(Anchor::Gap(GapAnchor {
             start: secs(&track.start_of(idx)),
         })),
+        // Edits on a transition are refused, so there's nothing to anchor.
+        TimelineSegment::Transition(_) => None,
     }
 }
 
@@ -2500,6 +2502,8 @@ fn armed_on_side(project: &Project, t: f64, side: Side, ti: usize) -> Option<(Ar
         acc += secs(&seg.duration());
         let end = acc;
         match seg {
+            // A transition isn't material to arm; skip past it.
+            TimelineSegment::Transition(_) => {}
             TimelineSegment::Clip(c) => match side {
                 Side::Left if (end - t).abs() < eps => {
                     return Some((
@@ -3371,6 +3375,13 @@ fn track_parts(project: &Project, track: &Track, total: f64) -> Vec<(f64, String
                     Style::default().bg(Color::Cyan).fg(Color::Black),
                 )
             }
+            // A transition gets its own band; the real dissolve is a
+            // proxy-render thing (M5), so it's labelled, not blended.
+            TimelineSegment::Transition(t) => (
+                secs(&t.dur),
+                "trans".to_string(),
+                Style::default().bg(Color::Magenta).fg(Color::Black),
+            ),
             TimelineSegment::Gap(g) => (secs(&g.duration), "gap".to_string(), gap_style),
         })
         .collect();
@@ -5714,7 +5725,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 TimelineSegment::Clip(c) => Some(c),
-                TimelineSegment::Gap(_) => None,
+                TimelineSegment::Gap(_) | TimelineSegment::Transition(_) => None,
             })
             .find(|c| c.id == id)
             .unwrap()
@@ -5933,7 +5944,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 TimelineSegment::Clip(c) => Some(c.id),
-                TimelineSegment::Gap(_) => None,
+                TimelineSegment::Gap(_) | TimelineSegment::Transition(_) => None,
             })
             .collect();
         assert_eq!(ids, vec![1, 3], "armed #2 removed, follower #3 kept");

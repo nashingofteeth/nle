@@ -1219,6 +1219,16 @@ pub(crate) fn show_report(project: &Project) -> String {
         let mut cursor = Seconds::from_integer(0);
         for (si, seg) in track.segments.iter().enumerate() {
             match seg {
+                Segment::Transition(t) => {
+                    let end = cursor + t.dur;
+                    out += &format!(
+                        "      [{si}] ⟶ transition #{} {}–{}\n",
+                        t.id,
+                        format_seconds(&cursor),
+                        format_seconds(&end)
+                    );
+                    cursor = end;
+                }
                 Segment::Gap(g) => {
                     let end = cursor + g.duration;
                     out += &format!(
@@ -2100,6 +2110,7 @@ fn next_clip_id(project: &Project) -> u32 {
         .flat_map(|t| &t.segments)
         .filter_map(|s| match s {
             Segment::Clip(c) => Some(c.id),
+            Segment::Transition(t) => Some(t.id),
             Segment::Gap(_) => None,
         })
         .max()

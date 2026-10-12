@@ -110,6 +110,10 @@ pub fn resolve_armed(project: &Project, t: f64, ti: usize) -> Result<(Armed, f64
                     ));
                 }
                 Segment::Gap(_) => return Ok((Armed::GapHead { index: i }, acc)),
+                // A transition isn't material to extend; phase 1 refuses it.
+                Segment::Transition(_) => {
+                    return Err("a transition can't be armed — remove it (dd) instead".to_string());
+                }
             }
         }
         acc += secs_f64(&seg.duration());

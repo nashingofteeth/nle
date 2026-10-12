@@ -39,4 +39,6 @@ pub use time::{
     nominal_fps, parse_rate, parse_signed_time, parse_time, parse_timecode, secs_f64,
     timecode_to_frames,
 };
-pub use timeline::{Clip, Timeline, TimelineError, Track, TrackKind};
+pub use timeline::{
+    Clip, Timeline, TimelineError, Track, TrackKind, Transition, TransitionKind, TransitionSource,
+};

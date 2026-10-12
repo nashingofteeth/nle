@@ -229,6 +229,12 @@ impl Project {
             .flat_map(|t| t.segments.iter())
             .filter_map(|s| match s {
                 Segment::Clip(c) if c.asset == id => Some(c.id),
+                // A transition owns its source spans, so it uses the asset
+                // too — otherwise `remove_asset` would drop it out from
+                // under the transition.
+                Segment::Transition(t) if t.a.asset() == Some(id) || t.b.asset() == Some(id) => {
+                    Some(t.id)
+                }
                 _ => None,
             })
             .collect()
@@ -260,6 +266,7 @@ impl Project {
             .flat_map(|t| {
                 t.segments.iter().filter_map(|s| match s {
                     Segment::Clip(c) => Some(c.id),
+                    Segment::Transition(t) => Some(t.id),
                     Segment::Gap(_) => None,
                 })
             })
@@ -276,7 +283,7 @@ mod tests {
     use crate::edit::{self, History};
     use crate::media::{RawFormat, RawStream};
     use crate::time::Seconds;
-    use crate::timeline::Segment;
+    use crate::timeline::{Segment, Transition, TransitionKind, TransitionSource};
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -396,7 +403,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 Segment::Clip(c) => Some(c.id),
-                Segment::Gap(_) => None,
+                Segment::Gap(_) | Segment::Transition(_) => None,
             })
             .collect();
         assert_eq!(ids, vec![1, 2]);
@@ -546,5 +553,36 @@ mod tests {
         // not a stale hardcoded one.
         assert!(msg.contains(&format!("v{PROJECT_VERSION}")), "{msg}");
         assert!(msg.contains("version 1"), "{msg}");
+    }
+
+    #[test]
+    fn asset_usage_counts_transition_sources() {
+        // A transition owns its source spans, so an asset used only by a
+        // transition is still in use — `remove_asset` must refuse it. (The
+        // integration trap: `asset_usage` used to walk only clips.)
+        let mut p = sample_project();
+        let (spare, _) = p.add_asset(
+            "/x/spare.mp4".into(),
+            probe_report("5", 320, 240, "30/1", false),
+        );
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(Segment::Transition(Transition {
+                id: 99,
+                dur: Seconds::from_integer(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: spare,
+                    src_in: Seconds::from_integer(0),
+                    src_out: Seconds::from_integer(1),
+                },
+                b: TransitionSource::Black,
+            }));
+        assert_eq!(p.asset_usage(spare), vec![99]);
+        assert!(
+            matches!(p.remove_asset(spare), Err(ProjectError::AssetInUse(id, ref v)) if id == spare && v == &vec![99])
+        );
     }
 }

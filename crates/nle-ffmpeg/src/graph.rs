@@ -40,6 +40,8 @@ pub enum CompileError {
     AllMuted,
     #[error("asset #{0} is referenced by the timeline but missing from the media pool")]
     MissingAsset(u32),
+    #[error("transitions aren't exported yet (M5)")]
+    Transition,
 }
 
 #[derive(Debug, Error)]
@@ -143,7 +145,14 @@ pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
     }
     let video_count = project.timeline.video_tracks().count();
     let audio_count = project.timeline.audio_tracks().count();
-    if video_count <= 1 && audio_count == 0 {
+    // The classic path is byte-identical only for the simple case — and it
+    // can't express a transition at all, so those fall through.
+    let has_transition = project.timeline.tracks.iter().any(|t| {
+        t.segments
+            .iter()
+            .any(|s| matches!(s, Segment::Transition(_)))
+    });
+    if video_count <= 1 && audio_count == 0 && !has_transition {
         return compile_single_video(project);
     }
     compile_multi_track(project)
@@ -169,6 +178,7 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
 
     for seg in &track.segments {
         match seg {
+            Segment::Transition(_) => return Err(CompileError::Transition),
             Segment::Clip(c) => {
                 let asset = project
                     .asset(c.asset)
@@ -318,6 +328,7 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
 
         for seg in &track.segments {
             match seg {
+                Segment::Transition(_) => return Err(CompileError::Transition),
                 Segment::Clip(c) => {
                     let asset = project
                         .asset(c.asset)

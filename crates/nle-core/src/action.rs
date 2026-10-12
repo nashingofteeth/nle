@@ -485,6 +485,8 @@ fn arm(project: &Project, track: usize, target: Target, edge: Edge) -> Result<Ar
         } else {
             Armed::GapTail { index }
         }),
+        // A transition isn't material to extend; phase 1 refuses it.
+        Segment::Transition(_) => Err(EditError::Transition),
     }
 }
 
@@ -608,6 +610,7 @@ fn yank_desc(project: &Project, seg: &Segment) -> String {
             ),
             None => "yanked gap".to_string(),
         },
+        Segment::Transition(t) => format!("yanked transition #{}", t.id),
     }
 }
 
@@ -637,6 +640,9 @@ impl Register {
         let path = match &segment {
             Segment::Clip(c) => project.asset(c.asset).map(|a| a.path.clone()),
             Segment::Gap(_) => None,
+            // A transition carries its own asset ids; resolving those across
+            // projects is out of scope (register paste of a transition).
+            Segment::Transition(_) => None,
         };
         Self { segment, path }
     }

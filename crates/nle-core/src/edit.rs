@@ -18,7 +18,10 @@ use thiserror::Error;
 use crate::media::RawProbe;
 use crate::project::{Asset, Project, ProjectError};
 use crate::time::{Seconds, format_seconds};
-use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind};
+use crate::timeline::{
+    Clip, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind, Transition,
+    TransitionKind, TransitionSource,
+};
 
 /// Deepest undo stack we keep (changes).
 pub const MAX_HISTORY: usize = 100;
@@ -28,7 +31,7 @@ pub const MAX_HISTORY: usize = 100;
 /// it as a `rational_ser` fraction like every other time in the Atom.
 /// v9 persists the redo stack too, so `nle redo` works across processes.
 /// v10 adds `Change::Tracks` (track add/mute/rm are undoable).
-pub const HISTORY_VERSION: u32 = 10;
+pub const HISTORY_VERSION: u32 = 11;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -38,6 +41,8 @@ pub enum EditError {
     TrackNotFound(usize),
     #[error("no segment at index {0}")]
     SegmentNotFound(usize),
+    #[error("a transition can't be split or trimmed — remove it (dd) instead")]
+    Transition,
     #[error("playhead is not in a gap")]
     NoGap,
     #[error("no clip at that position — it is in a gap")]
@@ -491,6 +496,16 @@ pub enum Atom {
         #[serde(with = "crate::time::rational_ser")]
         duration: Seconds,
     },
+    /// A transition, with both of its source sides (as stored on the model
+    /// segment), so undo/redo restores it bit-for-bit.
+    Transition {
+        id: u32,
+        #[serde(with = "crate::time::rational_ser")]
+        dur: Seconds,
+        kind: TransitionKind,
+        a: TransitionSource,
+        b: TransitionSource,
+    },
 }
 
 /// One undoable user action. A timeline edit carries the affected track's
@@ -580,6 +595,13 @@ fn atom_from_segment(seg: &Segment) -> Atom {
         Segment::Gap(g) => Atom::Gap {
             duration: g.duration,
         },
+        Segment::Transition(t) => Atom::Transition {
+            id: t.id,
+            dur: t.dur,
+            kind: t.kind,
+            a: t.a.clone(),
+            b: t.b.clone(),
+        },
     }
 }
 
@@ -600,6 +622,19 @@ fn segment_from_atom(atom: &Atom) -> Segment {
         }),
         Atom::Gap { duration } => Segment::Gap(Gap {
             duration: *duration,
+        }),
+        Atom::Transition {
+            id,
+            dur,
+            kind,
+            a,
+            b,
+        } => Segment::Transition(Transition {
+            id: *id,
+            dur: *dur,
+            kind: *kind,
+            a: a.clone(),
+            b: b.clone(),
         }),
     }
 }
@@ -808,7 +843,7 @@ fn clip_at(
     let si = track.index_at(*t).ok_or(EditError::NoSegment)?;
     match &track.segments[si] {
         Segment::Clip(c) => Ok((ti, si, c.clone())),
-        Segment::Gap(_) => Err(EditError::NoClip),
+        Segment::Gap(_) | Segment::Transition(_) => Err(EditError::NoClip),
     }
 }
 
@@ -945,7 +980,7 @@ pub fn set_speed_on(
         .ok_or(EditError::ClipNotFound(clip_id))?;
     let c = match &tr.segments[si] {
         Segment::Clip(c) => c.clone(),
-        Segment::Gap(_) => return Err(EditError::ClipNotFound(clip_id)),
+        Segment::Gap(_) | Segment::Transition(_) => return Err(EditError::ClipNotFound(clip_id)),
     };
     // A fast retime can shrink the timeline span below a frame (a 1-frame
     // clip at 2×): every other duration-changing op refuses sub-frame
@@ -998,51 +1033,104 @@ pub fn clamp_to_media(
     }
     let zero = Seconds::from_integer(0);
     let frame_secs = |n: i64| Seconds::new(n, 1) / fps;
-    track.segments.retain_mut(|seg| {
-        let Segment::Clip(c) = seg else {
-            return true;
-        };
+    track.segments.retain_mut(|seg| match seg {
         // A non-positive speed has no sane clamp — leave it for `validate()`
         // to reject rather than dividing by zero here.
-        if c.speed <= zero {
-            return true;
+        Segment::Clip(c) if c.speed <= zero => true,
+        Segment::Clip(c) => {
+            let Some(d) = media(c.asset) else {
+                return true;
+            };
+            // Keep the source range inside [0, media]: a negative in-point (an
+            // EDL source TC before its offset, say) reads before the file start.
+            let in_ = c.asset_in.max(zero);
+            let out = c.asset_out.min(d);
+            let mut frames = ((out - in_) / c.speed * fps).round().to_integer();
+            let mut new_out = in_ + frame_secs(frames) * c.speed;
+            if new_out > d {
+                frames -= 1;
+                new_out = in_ + frame_secs(frames) * c.speed;
+            }
+            if frames < 1 {
+                notes.push(format!("clip #{}: holds no whole frame — dropped", c.id));
+                return false;
+            }
+            if in_ != c.asset_in {
+                notes.push(format!(
+                    "clip #{}: in {} → {}",
+                    c.id,
+                    format_seconds(&c.asset_in),
+                    format_seconds(&in_)
+                ));
+            }
+            if new_out != c.asset_out {
+                notes.push(format!(
+                    "clip #{}: out {} → {}",
+                    c.id,
+                    format_seconds(&c.asset_out),
+                    format_seconds(&new_out)
+                ));
+            }
+            c.asset_in = in_;
+            c.asset_out = new_out;
+            true
         }
-        let Some(d) = media(c.asset) else {
-            return true;
-        };
-        // Keep the source range inside [0, media]: a negative in-point (an
-        // EDL source TC before its offset, say) reads before the file start.
-        let in_ = c.asset_in.max(zero);
-        let out = c.asset_out.min(d);
-        let mut frames = ((out - in_) / c.speed * fps).round().to_integer();
-        let mut new_out = in_ + frame_secs(frames) * c.speed;
-        if new_out > d {
-            frames -= 1;
-            new_out = in_ + frame_secs(frames) * c.speed;
+        Segment::Transition(t) => {
+            let id = t.id;
+            // The duration lands on the frame grid; each source span stays
+            // inside its media.
+            let frames = (t.dur * fps).round().to_integer();
+            if frames < 1 {
+                notes.push(format!("transition #{id}: holds no whole frame — dropped"));
+                return false;
+            }
+            let dur = frame_secs(frames);
+            if dur != t.dur {
+                notes.push(format!(
+                    "transition #{id}: dur {} → {}",
+                    format_seconds(&t.dur),
+                    format_seconds(&dur)
+                ));
+            }
+            t.dur = dur;
+            let mut outside = false;
+            let mut clamped = false;
+            for side in [&mut t.a, &mut t.b] {
+                let TransitionSource::Clip {
+                    asset,
+                    src_in,
+                    src_out,
+                } = side
+                else {
+                    continue;
+                };
+                let Some(d) = media(*asset) else {
+                    continue;
+                };
+                let in_ = (*src_in).max(zero);
+                let out = (*src_out).min(d);
+                if out <= in_ {
+                    outside = true;
+                    break;
+                }
+                clamped |= in_ != *src_in || out != *src_out;
+                *src_in = in_;
+                *src_out = out;
+            }
+            if outside {
+                notes.push(format!(
+                    "transition #{id}: source span outside the media — dropped"
+                ));
+                return false;
+            }
+            if clamped {
+                notes.push(format!(
+                    "transition #{id}: source span clamped inside the media"
+                ));
+            }
+            true
         }
-        if frames < 1 {
-            notes.push(format!("clip #{}: holds no whole frame — dropped", c.id));
-            return false;
-        }
-        if in_ != c.asset_in {
-            notes.push(format!(
-                "clip #{}: in {} → {}",
-                c.id,
-                format_seconds(&c.asset_in),
-                format_seconds(&in_)
-            ));
-        }
-        if new_out != c.asset_out {
-            notes.push(format!(
-                "clip #{}: out {} → {}",
-                c.id,
-                format_seconds(&c.asset_out),
-                format_seconds(&new_out)
-            ));
-        }
-        c.asset_in = in_;
-        c.asset_out = new_out;
-        true
+        Segment::Gap(_) => true,
     });
     notes
 }
@@ -1082,6 +1170,11 @@ pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
                 speed: c.speed,
             }),
             Segment::Gap(_) => Segment::Gap(Gap { duration: dur }),
+            Segment::Transition(t) => {
+                let mut t = t.clone();
+                t.dur = dur;
+                Segment::Transition(t)
+            }
         };
         // Dropping a stump can leave two gaps adjacent; fold them.
         if let (Segment::Gap(g), Some(Segment::Gap(prev))) = (&cleaned, out.last_mut()) {
@@ -1340,12 +1433,13 @@ pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batc
     }
     let mut ops = Vec::new();
 
-    // The previous clip's tail extends into the region (if one exists).
-    if first > 0 {
-        let (pi, prev) = match &track.segments[first - 1] {
-            Segment::Clip(c) => (first - 1, c.clone()),
-            Segment::Gap(_) => unreachable!("region merges adjacent gaps"),
-        };
+    // The previous clip's tail extends into the region (if one exists). A
+    // transition has no material to stretch in, so the region just shrinks.
+    if first > 0
+        && let Segment::Clip(prev) = &track.segments[first - 1]
+    {
+        let pi = first - 1;
+        let prev = prev.clone();
         let mut after = prev.clone();
         after.asset_out = prev.asset_out + source_span(&prev, delta);
         let asset = project
@@ -1454,12 +1548,13 @@ pub fn trim_out_on(project: &Project, track: usize, playhead: f64) -> Result<Bat
     }
     let mut ops = Vec::new();
 
-    // The next clip's head extends back into the region (if one exists).
-    if last + 1 < track.segments.len() {
-        let (ni, next) = match &track.segments[last + 1] {
-            Segment::Clip(c) => (last + 1, c.clone()),
-            Segment::Gap(_) => unreachable!("region merges adjacent gaps"),
-        };
+    // The next clip's head extends back into the region (if one exists). A
+    // transition has no material to stretch in, so the region just shrinks.
+    if last + 1 < track.segments.len()
+        && let Segment::Clip(next) = &track.segments[last + 1]
+    {
+        let ni = last + 1;
+        let next = next.clone();
         let mut after = next.clone();
         after.asset_in = next.asset_in - source_span(&next, delta);
         if after.asset_in < Seconds::from_integer(0) {
@@ -1510,7 +1605,7 @@ fn shrink_gap_region(
         for seg in &segs[first..=last] {
             let g_dur = match seg {
                 Segment::Gap(g) => g.duration,
-                Segment::Clip(_) => unreachable!("region is gaps"),
+                Segment::Clip(_) | Segment::Transition(_) => unreachable!("region is gaps"),
             };
             if g_dur > remaining {
                 ops.push(EditOp::Replace {
@@ -1535,7 +1630,7 @@ fn shrink_gap_region(
         for k in (first..=last).rev() {
             let g = match &segs[k] {
                 Segment::Gap(g) => g.clone(),
-                Segment::Clip(_) => unreachable!("region is gaps"),
+                Segment::Clip(_) | Segment::Transition(_) => unreachable!("region is gaps"),
             };
             let dur = g.duration;
             if dur > remaining {
@@ -1732,6 +1827,8 @@ pub fn delete_under_on(project: &Project, track: usize, playhead: f64) -> Result
     };
     let seg = track_at(project, ti)?.segments[si].clone();
     match seg {
+        // A transition isn't media: removing it ripples, like a gap.
+        Segment::Transition(_) => delete_segment_ripple(project, ti, si),
         Segment::Clip(c) => {
             let dur = c.duration();
             let mut ops = replace_with_many(
@@ -1874,6 +1971,7 @@ fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batc
     let mut desc = match seg {
         Segment::Clip(_) => "ripple delete".to_string(),
         Segment::Gap(_) => "delete gap (ripple)".to_string(),
+        Segment::Transition(_) => "delete transition".to_string(),
     };
     // The removal joins si-1 and si+1: merge them when seamless.
     let segs = &track_at(project, ti)?.segments;
@@ -1910,6 +2008,10 @@ fn pasted_piece(snapshot: &Segment, new_id: u32) -> Segment {
         }),
         Segment::Gap(g) => Segment::Gap(Gap {
             duration: g.duration,
+        }),
+        Segment::Transition(t) => Segment::Transition(Transition {
+            id: new_id,
+            ..t.clone()
         }),
     }
 }
@@ -2028,6 +2130,8 @@ pub fn paste_on(
             let rem = track.segments[ei].duration() - off;
             if rem > Seconds::from_integer(0) && at_least_a_frame(project, &rem).is_ok() {
                 match &track.segments[ei] {
+                    // A transition is opaque: the paste consumes it whole.
+                    Segment::Transition(_) => None,
                     Segment::Gap(_) => Some(Segment::Gap(Gap { duration: rem })),
                     Segment::Clip(c) => {
                         // A split keeps the head's id on the left, so the
@@ -2062,6 +2166,8 @@ pub fn paste_on(
     let mut pieces: Vec<Segment> = Vec::new();
     if left_ok {
         match &seg {
+            // A transition is opaque: the paste consumes it whole.
+            Segment::Transition(_) => {}
             Segment::Gap(_) => pieces.push(Segment::Gap(Gap { duration: left_len })),
             Segment::Clip(c) => pieces.push(Segment::Clip(Clip {
                 asset_out: c.asset_in + source_span(c, left_len),
@@ -2180,6 +2286,8 @@ pub fn insert_gap_on(
     let off = t - seg_start;
 
     match &seg {
+        // `_` on a transition would split it; refuse (phase 1).
+        Segment::Transition(_) => Err(EditError::Transition),
         // Over a gap: add to it.
         Segment::Gap(g) => Ok(Batch {
             ops: replace_with_many(
@@ -2251,6 +2359,7 @@ pub fn paste_ripple_on(
     let what = match snapshot {
         Segment::Clip(_) => format!("clip #{}", project.next_clip_id()),
         Segment::Gap(_) => "gap".to_string(),
+        Segment::Transition(_) => "transition".to_string(),
     };
 
     // At or past the track end: the void becomes a gap segment (when
@@ -2299,6 +2408,8 @@ pub fn paste_ripple_on(
     // The containing segment splits at t; the paste rides between the
     // pieces. Inserting shifts every follower automatically.
     let pieces: Vec<Segment> = match &seg {
+        // A transition is opaque: the paste consumes it whole.
+        Segment::Transition(_) => Vec::new(),
         Segment::Clip(c) => {
             let head_len = t - seg_start;
             let (head_ok, tail_ok) = split_sides(project, c.duration(), head_len);
@@ -2362,6 +2473,8 @@ pub fn delete_segment_on(
         }
         Some(Segment::Clip(c)) => delete_clip_by_id_on(project, ti, c.id),
         Some(Segment::Gap(_)) => delete_segment_ripple(project, ti, index),
+        // A transition isn't media: removing it ripples, like a gap.
+        Some(Segment::Transition(_)) => delete_segment_ripple(project, ti, index),
         None => Err(EditError::SegmentNotFound(index)),
     }
 }
@@ -2406,6 +2519,8 @@ pub fn delete_clip_by_id_on(
         .ok_or(EditError::ClipNotFound(clip_id))?;
     let seg = track.segments[si].clone();
     match seg {
+        // Found by clip id, so a transition here is impossible.
+        Segment::Transition(_) => Err(EditError::ClipNotFound(clip_id)),
         Segment::Clip(c) => {
             let dur = c.duration();
             let mut ops = replace_with_many(
@@ -2501,7 +2616,7 @@ pub fn extend_edge_on(
         .ok_or(EditError::ClipNotFound(clip_id))?;
     let c = match &track.segments[si] {
         Segment::Clip(c) => c.clone(),
-        Segment::Gap(_) => return Err(EditError::ClipNotFound(clip_id)),
+        Segment::Gap(_) | Segment::Transition(_) => return Err(EditError::ClipNotFound(clip_id)),
     };
     let edge = track.start_of(si)
         + if head {
@@ -2571,7 +2686,7 @@ pub fn extend_gap_end_on(
         .ok_or(EditError::NoSegment)?;
     let g = match &track.segments[last] {
         Segment::Gap(g) => g.clone(),
-        Segment::Clip(_) => return Err(EditError::NoGap),
+        Segment::Clip(_) | Segment::Transition(_) => return Err(EditError::NoGap),
     };
     let gap_start = track.start_of(last);
     if t <= gap_start {
@@ -2823,7 +2938,7 @@ pub fn absorb_outward_on(
         .ok_or(EditError::ClipNotFound(clip_id))?;
     let c = match &track.segments[si] {
         Segment::Clip(c) => c.clone(),
-        Segment::Gap(_) => return Err(EditError::ClipNotFound(clip_id)),
+        Segment::Gap(_) | Segment::Transition(_) => return Err(EditError::ClipNotFound(clip_id)),
     };
     let start = track.start_of(si);
     let edge = start
@@ -2980,6 +3095,7 @@ fn segment_note(seg: &Segment) -> String {
     match seg {
         Segment::Gap(_) => "gap".to_string(),
         Segment::Clip(c) => format!("clip #{}", c.id),
+        Segment::Transition(t) => format!("transition #{}", t.id),
     }
 }
 
@@ -3014,6 +3130,20 @@ fn trim_or_absorb_head(
                 before: Segment::Gap(g.clone()),
                 after: Segment::Gap(Gap {
                     duration: start + g.duration - t,
+                }),
+            });
+            Ok(())
+        }
+        // A straddled transition shrinks to its uncovered tail (like a gap);
+        // its sources stay, so a shorter `dur` just means a faster crossfade.
+        Segment::Transition(tr) => {
+            ops.push(EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Transition(tr.clone()),
+                after: Segment::Transition(Transition {
+                    dur: start + tr.dur - t,
+                    ..tr.clone()
                 }),
             });
             Ok(())
@@ -3065,6 +3195,20 @@ fn trim_or_absorb_tail(
                 before: Segment::Gap(g.clone()),
                 after: Segment::Gap(Gap {
                     duration: g.duration - (t - start),
+                }),
+            });
+            Ok(())
+        }
+        // A straddled transition shrinks to its uncovered head (like a gap);
+        // its sources stay, so a shorter `dur` just means a faster crossfade.
+        Segment::Transition(tr) => {
+            ops.push(EditOp::Replace {
+                track: ti,
+                index,
+                before: Segment::Transition(tr.clone()),
+                after: Segment::Transition(Transition {
+                    dur: tr.dur - (t - start),
+                    ..tr.clone()
                 }),
             });
             Ok(())
@@ -3172,7 +3316,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 Segment::Clip(c) => Some(c),
-                Segment::Gap(_) => None,
+                Segment::Gap(_) | Segment::Transition(_) => None,
             })
             .find(|c| c.id == id)
             .unwrap()
@@ -3187,7 +3331,7 @@ mod tests {
             .iter()
             .filter_map(|s| match s {
                 Segment::Clip(c) => Some(c.id),
-                Segment::Gap(_) => None,
+                Segment::Gap(_) | Segment::Transition(_) => None,
             })
             .collect()
     }
@@ -4974,7 +5118,7 @@ mod tests {
                 speed: Seconds::from_integer(1),
                 ..c
             }),
-            Segment::Gap(_) => unreachable!(),
+            Segment::Gap(_) | Segment::Transition(_) => unreachable!(),
         };
         let batch = Batch {
             ops: vec![EditOp::Replace {
@@ -5052,7 +5196,7 @@ mod tests {
         );
         let c = match &audio[1] {
             Segment::Clip(c) => c.clone(),
-            Segment::Gap(_) => panic!("expected the trimmed clip"),
+            Segment::Gap(_) | Segment::Transition(_) => panic!("expected the trimmed clip"),
         };
         assert_eq!((c.id, c.asset_in, c.asset_out), (10, 1.into(), 4.into()));
 
@@ -5305,5 +5449,80 @@ mod tests {
             set_speed(&p, 1, Seconds::from_integer(100)),
             Err(EditError::TooShort)
         ));
+    }
+
+    fn transition_seg(id: u32, dur: Seconds, a_out: Seconds) -> Segment {
+        Segment::Transition(Transition {
+            id,
+            dur,
+            kind: TransitionKind::Dissolve,
+            a: TransitionSource::Clip {
+                asset: 1,
+                src_in: Seconds::from_integer(0),
+                src_out: a_out,
+            },
+            b: TransitionSource::Black,
+        })
+    }
+
+    #[test]
+    fn undo_restores_a_transition_bit_for_bit() {
+        let mut p = fixture();
+        let track = p.timeline.video_track_mut().unwrap();
+        let idx = track.segments.len();
+        track.segments.push(transition_seg(
+            50,
+            Seconds::from_integer(1),
+            Seconds::from_integer(1),
+        ));
+        let mut h = History::default();
+        let before = p.clone();
+        let batch = Batch {
+            ops: vec![EditOp::Remove {
+                track: 0,
+                index: idx,
+                segment: p.timeline.video_track().unwrap().segments[idx].clone(),
+            }],
+            desc: "remove transition".into(),
+        };
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(
+            p.timeline.video_track().unwrap().segments.len(),
+            3,
+            "fixture's 3 segments (the transition was removed)"
+        );
+        h.undo(&mut p).unwrap();
+        assert_eq!(p, before, "the transition came back exactly");
+    }
+
+    #[test]
+    fn clamp_to_media_snaps_transition_dur_and_clamps_sources() {
+        let mut t = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            // 0.35 s isn't a whole frame at 30 fps; the `a` source runs
+            // past a 3 s asset.
+            segments: vec![transition_seg(
+                1,
+                Seconds::new(35, 100),
+                Seconds::from_integer(5),
+            )],
+        };
+        let notes = clamp_to_media(
+            &mut t,
+            &|_| Some(Seconds::from_integer(3)),
+            Seconds::from_integer(30),
+        );
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let Segment::Transition(tr) = &t.segments[0] else {
+            panic!("expected a transition")
+        };
+        assert_eq!(tr.dur, Seconds::new(11, 30), "snapped to a whole frame");
+        match &tr.a {
+            TransitionSource::Clip { src_out, .. } => {
+                assert_eq!(*src_out, Seconds::from_integer(3), "clamped to the media")
+            }
+            TransitionSource::Black => panic!("expected a clip side"),
+        }
     }
 }

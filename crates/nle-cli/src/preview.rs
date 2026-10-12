@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nle_core::timeline::{Segment as TimelineSegment, Track};
+use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionSource};
 use nle_core::{Project, Seconds, format_seconds};
 use thiserror::Error;
 
@@ -77,6 +77,21 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
     let mut segs = Vec::new();
     for seg in &track.segments {
         match seg {
+            // A transition isn't media: the monitor shows its outgoing side
+            // until the proxy cache lands (M5).
+            TimelineSegment::Transition(tr) => match &tr.a {
+                TransitionSource::Clip { asset, src_in, .. } => {
+                    let asset = project
+                        .asset(*asset)
+                        .ok_or(PreviewError::MissingAsset(*asset))?;
+                    segs.push(Segment::Clip {
+                        path: asset.path.clone(),
+                        start: *src_in,
+                        length: tr.dur,
+                    });
+                }
+                TransitionSource::Black => segs.push(Segment::Gap { length: tr.dur }),
+            },
             TimelineSegment::Clip(c) => {
                 let asset = project
                     .asset(c.asset)
@@ -155,7 +170,7 @@ pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewErro
             let si = t.index_at(a)?;
             match &t.segments[si] {
                 TimelineSegment::Clip(c) => Some((c, t.start_of(si))),
-                TimelineSegment::Gap(_) => None,
+                TimelineSegment::Gap(_) | TimelineSegment::Transition(_) => None,
             }
         });
         match picked {
