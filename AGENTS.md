@@ -152,6 +152,12 @@ plainly.
   the playhead/cut indicator uses (`marker_col`), or drawn edges drift from
   real cuts. A `.max(1)` on a rounded width desyncs everything after it.
 - **Gap trims always ripple**; gaps have no material.
+- **`trim_in_on`/`trim_out_on` have a dual role — don't "simplify" their gap
+  branch away.** For a clip they trim; for a gap they *extend the neighbour
+  into it*, which is what extend mode's non-ripple grow calls
+  (`commit_batch` → `GrowHead/TailIntoGap`). The trim keys and the CLI ripple
+  gaps instead, via `trim_at_on`'s own gap check. The unit test
+  `extend_moves_an_edge_under_the_same_rules_as_the_tui` is the guard.
 - **Opposite-end extend commit = delete** (ripple), by **id** for a clip
   (not by playhead position, which resolves to the follower) and by
   **index** for a gap.
