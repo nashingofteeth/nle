@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::media::RawProbe;
 use crate::time::{Seconds, grid_time, rational_ser, secs_f64};
-use crate::timeline::{Segment, Timeline, TimelineError};
+use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
@@ -59,6 +59,24 @@ pub struct Asset {
     pub probe: RawProbe,
 }
 
+/// Why a file with this probe can't go on a `kind` track, if it can't —
+/// the one rule, used by [`Project::validate`] and by the import paths
+/// (which check before pooling, so a refusal leaves no half-done import).
+/// A probe with no streams at all is "unknown", not "absent".
+pub fn wrong_kind(path: &Path, probe: &RawProbe, kind: TrackKind) -> Option<String> {
+    let (need, other, ok) = match kind {
+        TrackKind::Video => ("video", "an audio", probe.has_video()),
+        TrackKind::Audio => ("audio", "a video", probe.has_audio()),
+    };
+    if (probe.has_video() || probe.has_audio()) && !ok {
+        return Some(format!(
+            "{} has no {need} stream — put it on {other} track instead",
+            path.display()
+        ));
+    }
+    None
+}
+
 impl Asset {
     pub fn duration(&self) -> Option<Seconds> {
         self.probe.duration()
@@ -70,6 +88,11 @@ impl Asset {
 
     pub fn video_size(&self) -> Option<(u32, u32)> {
         self.probe.size()
+    }
+
+    /// See [`wrong_kind`].
+    pub fn wrong_kind(&self, kind: TrackKind) -> Option<String> {
+        wrong_kind(&self.path, &self.probe, kind)
     }
 }
 
@@ -161,13 +184,19 @@ impl Project {
         self.timeline.validate()?;
         for track in &self.timeline.tracks {
             for seg in &track.segments {
-                if let Segment::Clip(clip) = seg
-                    && !self.media.iter().any(|a| a.id == clip.asset)
-                {
+                let Segment::Clip(clip) = seg else { continue };
+                let Some(asset) = self.media.iter().find(|a| a.id == clip.asset) else {
                     return Err(ProjectError::Asset(
                         clip.asset,
                         "not in the media pool".into(),
                     ));
+                };
+                // A clip must carry the track's kind of stream, or export
+                // can't build the graph (an audio-only asset on a video
+                // track failed deep inside ffmpeg; a video-only asset on an
+                // audio track exported silence).
+                if let Some(reason) = asset.wrong_kind(track.kind) {
+                    return Err(ProjectError::Asset(clip.asset, reason));
                 }
             }
         }
@@ -418,6 +447,68 @@ mod tests {
             "{landed} s is not on the {fps} fps grid"
         );
         assert_eq!(secs_f64(&p.playhead), landed, "the stored value agrees");
+    }
+
+    #[test]
+    fn a_clip_must_carry_the_tracks_kind_of_stream() {
+        let audio_only = || RawProbe {
+            streams: vec![RawStream {
+                index: 0,
+                codec_type: Some("audio".into()),
+                codec_name: Some("aac".into()),
+                ..Default::default()
+            }],
+            format: RawFormat {
+                format_name: "m4a".into(),
+                duration: Some("10".into()),
+                ..Default::default()
+            },
+        };
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/music.m4a".into(), audio_only());
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            a,
+            Seconds::from_integer(0),
+            Seconds::from_integer(1),
+        ))];
+        // An audio-only file on a video track can't be exported at all.
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Asset(1, msg)) if msg.contains("no video stream")),
+            "{:?}",
+            p.validate()
+        );
+
+        // And the reverse: a video-only file on an audio track.
+        let video_only = probe_report("10", 320, 240, "30/1", false);
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/silent.mp4".into(), video_only);
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.track_mut(ai).unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            a,
+            Seconds::from_integer(0),
+            Seconds::from_integer(1),
+        ))];
+        assert!(
+            matches!(p.validate(), Err(ProjectError::Asset(1, msg)) if msg.contains("no audio stream")),
+            "{:?}",
+            p.validate()
+        );
+
+        // A probe with no stream info is "unknown", not "absent".
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/unknown.mp4".into(), RawProbe::default());
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip::new(
+            1,
+            a,
+            Seconds::from_integer(0),
+            Seconds::from_integer(1),
+        ))];
+        assert!(p.validate().is_ok(), "{:?}", p.validate());
     }
 
     #[test]

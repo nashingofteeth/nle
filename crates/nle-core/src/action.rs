@@ -1290,17 +1290,29 @@ mod tests {
 
     // ------------------------------------------------------------ run
 
+    /// A file with both streams (like the demo's red.mp4) — clips can go
+    /// on a video *or* an audio track, which is what most fixtures need.
     fn probe_report(duration: &str) -> RawProbe {
         RawProbe {
-            streams: vec![RawStream {
-                index: 0,
-                codec_type: Some("video".into()),
-                codec_name: Some("h264".into()),
-                width: Some(320),
-                height: Some(240),
-                r_frame_rate: Some("30/1".into()),
-                ..Default::default()
-            }],
+            streams: vec![
+                RawStream {
+                    index: 0,
+                    codec_type: Some("video".into()),
+                    codec_name: Some("h264".into()),
+                    width: Some(320),
+                    height: Some(240),
+                    r_frame_rate: Some("30/1".into()),
+                    ..Default::default()
+                },
+                RawStream {
+                    index: 1,
+                    codec_type: Some("audio".into()),
+                    codec_name: Some("aac".into()),
+                    sample_rate: Some("48000".into()),
+                    channels: Some(2),
+                    ..Default::default()
+                },
+            ],
             format: RawFormat {
                 format_name: "mp4".into(),
                 duration: Some(duration.into()),

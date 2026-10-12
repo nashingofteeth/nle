@@ -1216,6 +1216,9 @@ fn add_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option
         Err(e) => return Some(e),
     }
     let playhead = frame_of(app.project.fps.as_ref(), app.playhead);
+    let Some(kind) = app.project.timeline.track(track).map(|t| t.kind) else {
+        return Some(format!("no track #{}", track + 1));
+    };
     let (scratch, imported) = match crate::stage_clip(
         &mut app.project,
         &mut app.history,
@@ -1223,6 +1226,7 @@ fn add_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option
         in_point.as_deref(),
         out_point.as_deref(),
         playhead,
+        kind,
     ) {
         Ok(v) => v,
         Err(e) => return Some(format!("add failed: {e}")),

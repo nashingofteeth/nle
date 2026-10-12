@@ -45,6 +45,7 @@ use nle_core::detect::{Span, reconstruct};
 use nle_core::edit;
 use nle_core::edl::{self, EdlEvent};
 use nle_core::otio::{self, OtioItem};
+use nle_core::project::wrong_kind;
 use nle_core::time::{parse_signed_time, parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 use nle_core::{
@@ -971,6 +972,11 @@ fn cmd_add(
     let mut history =
         edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
     let playhead = frame_of(project.fps.as_ref(), secs_f64(&project.playhead));
+    let kind = project
+        .timeline
+        .track(ti)
+        .map(|t| t.kind)
+        .with_context(|| format!("no track #{track}"))?;
     let (scratch, imported) = stage_clip(
         &mut project,
         &mut history,
@@ -978,6 +984,7 @@ fn cmd_add(
         in_point,
         out_point,
         playhead,
+        kind,
     )?;
     if imported && let Segment::Clip(c) = &scratch {
         say!("· auto-imported as asset #{}", c.asset);
@@ -1023,6 +1030,7 @@ fn stage_clip(
     in_point: Option<&str>,
     out_point: Option<&str>,
     playhead: i64,
+    kind: TrackKind,
 ) -> Result<(Segment, bool)> {
     let canonical = file
         .canonicalize()
@@ -1030,9 +1038,21 @@ fn stage_clip(
 
     let existing = project.asset_by_path(&canonical).map(|a| a.id);
     let (asset_id, imported) = match existing {
-        Some(id) => (id, false),
+        Some(id) => {
+            // Refuse a kind mismatch *before* touching the pool, so the
+            // error isn't preceded by a successful import.
+            if let Some(asset) = project.asset(id)
+                && let Some(reason) = asset.wrong_kind(kind)
+            {
+                bail!("{reason}");
+            }
+            (id, false)
+        }
         None => {
             let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
+            if let Some(reason) = wrong_kind(&canonical, &report, kind) {
+                bail!("{reason}");
+            }
             let (id, _) = history.add_asset(project, canonical, report, playhead);
             (id, true)
         }
