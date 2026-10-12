@@ -279,18 +279,42 @@ pub(crate) enum Pending {
     Y,
 }
 
-/// The files a session shares with the shell — `nle.json`, its undo
-/// sidecar, and the yank register — and the mtimes we last read or wrote
-/// them at. A foreign mtime means a shell command got there first.
-#[derive(Debug, Default)]
-struct Seen {
-    project: Option<SystemTime>,
-    history: Option<SystemTime>,
-    register: Option<SystemTime>,
+/// A session file's identity as we last saw it: modification time, length,
+/// and (on Unix) the inode. Atomic saves rename a fresh temp file into
+/// place, so the inode changes even when the filesystem's mtime
+/// granularity is coarser than the write — an mtime-only watch can miss a
+/// foreign write that lands in the same tick.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Stamp {
+    mtime: Option<SystemTime>,
+    len: u64,
+    ino: u64,
 }
 
-fn mtime(path: &std::path::Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+fn stamp(path: &std::path::Path) -> Option<Stamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    };
+    #[cfg(not(unix))]
+    let ino = 0;
+    Some(Stamp {
+        mtime: meta.modified().ok(),
+        len: meta.len(),
+        ino,
+    })
+}
+
+/// The files a session shares with the shell — `nle.json`, its undo
+/// sidecar, and the yank register — and how we last saw them. A foreign
+/// stamp means a shell command got there first.
+#[derive(Debug, Default)]
+struct Seen {
+    project: Option<Stamp>,
+    history: Option<Stamp>,
+    register: Option<Stamp>,
 }
 
 /// A background job (an ffmpeg render, a heavy import): its label for
@@ -398,30 +422,30 @@ impl App {
     /// after a save we made (so our own writes don't read as foreign).
     fn note_seen(&mut self) {
         self.seen = Seen {
-            project: mtime(&self.path),
-            history: mtime(&History::sidecar_path(&self.path)),
-            register: mtime(&action::register_path(&self.path)),
+            project: stamp(&self.path),
+            history: stamp(&History::sidecar_path(&self.path)),
+            register: stamp(&action::register_path(&self.path)),
         };
     }
 
     fn note_project(&mut self) {
-        self.seen.project = mtime(&self.path);
+        self.seen.project = stamp(&self.path);
     }
 
     fn note_history(&mut self) {
-        self.seen.history = mtime(&History::sidecar_path(&self.path));
+        self.seen.history = stamp(&History::sidecar_path(&self.path));
     }
 
     fn note_register(&mut self) {
-        self.seen.register = mtime(&action::register_path(&self.path));
+        self.seen.register = stamp(&action::register_path(&self.path));
     }
 
     /// Whether a shell wrote one of the shared files since we last read or
     /// wrote it.
     fn external_change(&self) -> bool {
-        mtime(&self.path) != self.seen.project
-            || mtime(&History::sidecar_path(&self.path)) != self.seen.history
-            || mtime(&action::register_path(&self.path)) != self.seen.register
+        stamp(&self.path) != self.seen.project
+            || stamp(&History::sidecar_path(&self.path)) != self.seen.history
+            || stamp(&action::register_path(&self.path)) != self.seen.register
     }
 
     pub fn sync(&mut self, st: &PlaybackState) {
