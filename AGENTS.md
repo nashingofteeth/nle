@@ -63,6 +63,8 @@ cargo test                                   # full workspace, must be green
 cargo build --release
 cargo install --path crates/nle-cli
 ./demo.sh                                    # end-to-end pixel checks
+./scripts/expect.sh                          # expected behaviours, asserted
+./scripts/fuzz.sh                            # hostile input: no panic, no corruption
 ```
 
 Commit one logical change at a time (`feat:`/`fix:`/`refactor:`/`docs:`),
@@ -71,6 +73,15 @@ plainly.
 
 ## Testing procedures learned here
 
+- **Two behaviour scripts back the unit tests.** `scripts/expect.sh` asserts
+  *results* — export pixels, durations, structure — for normal workflows
+  (overwrite-vs-ripple lengths, the speed↔source math, audio retiming,
+  multi-track overlay/mute, undo/redo byte-identity, EDL/OTIO round trips);
+  `scripts/fuzz.sh` holds hostile input to *invariants* — never panic, exit
+  0/1/2 only, and leave a project that loads with a finite non-negative
+  length — rather than exact messages. A new end-to-end behaviour belongs in
+  `expect.sh`; a new "garbage in" case belongs in `fuzz.sh`. Both are in
+  `scripts/check.sh` (~30 s).
 - **Split "decide" from "apply" so logic is testable without mpv/ffmpeg.**
   Functions that need a live `MpvPlayer` can't be unit-tested, so extract
   the pure decision and test that: `plan_for_armed`/`apply_extend_plan`,

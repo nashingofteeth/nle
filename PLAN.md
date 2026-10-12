@@ -243,6 +243,13 @@ below.)
   `purge-stumps` undoable, `History::add_asset` makes imports (and an `add`
   that auto-imports) undoable (`HISTORY_VERSION` 10); only whole-project
   rebuilds (`init`, EDL/OTIO/detect) re-baseline.
+- **Hardening pass:** an edge-case sweep and then an expected-behaviour sweep
+  (hostile input first, then normal workflows asserted on *results*) found 18
+  bugs — the CLI's SIGPIPE panic on `| head`, a register that pasted the wrong
+  media, a timeline that wrapped negative on absurd input, sub-frame clips
+  from `speed`, kind-mismatched exports, a byte-unstable project file, and a
+  handful of misleading errors. Both sweeps are in the repo
+  (`scripts/expect.sh`, `scripts/fuzz.sh`) and run in `scripts/check.sh`.
 
 **Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
 
