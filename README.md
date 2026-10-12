@@ -5,7 +5,8 @@ FFmpeg underneath. Built for this machine only.
 
 ## Status
 
-**M4 + EDL/OTIO import + clip speed + edit-detect complete — M5 next.** The
+**M4 + EDL/OTIO import + clip speed + edit-detect + M5 (transitions,
+per-clip effects, proxy preview cache) complete — M6 next.** The
 TUI drives the model directly: trim in/out, split, delete, yank/paste, insert
 gap, **extend mode**, a **media pool** with file preview, **multi-track
 editing** (track rows, active track, overlay video + mixed audio), and
@@ -41,12 +42,17 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :track add video|audio · :track mute [N] · :track rm N ·
 #              navigation, edits, and the monitor all follow the active
 #              track (the timeline draws one row per track)
+#   fx:        x cross-dissolve at the boundary (count = frames) ·
+#              :transition [dissolve|fade] [--dur T|--frames N] ·
+#              :effect [--clip N] crop|scale|eq|lut … · rendered at export;
+#              the monitor plays a rendered proxy for effects/transitions
 #   commands:  the :cmd line is the CLI grammar, flag for flag — every
 #              action has both spellings:
 #              :trim-in|out [--ripple] · :split · :gap [--frames N|--dur T] ·
 #              :delete|--yank [--at T|--clip N|--seg N] · :paste [--ripple] ·
 #              :extend --edge in|out --to T [--ripple] · :speed RATE (or R) ·
-#              :undo · :redo · :purge · :track … · :media ls|rm · :import ·
+#              :transition · :effect · :undo · :redo · :purge · :track … ·
+#              :media ls|rm · :import ·
 #              :add · :show · :seek T · :export -o FILE · :detect FILE ·
 #              :edl-import · :otio-import · :help · :q quit
 #              (--at defaults to the playhead, --track to the active track)

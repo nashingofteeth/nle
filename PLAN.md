@@ -1,9 +1,9 @@
 # nle — plan of record
 
-Status: **M4 + EDL/OTIO import + clip speed + edit-detect + CLI/TUI action parity
-complete, M5 next.** This file is the
-design/roadmap; the README is the user-facing how-to. Keep it in sync as
-milestones land.
+Status: **Everything through M5 is shipped** — multi-track (M4), EDL/OTIO
+import, clip speed, edit-detect, CLI/TUI action parity, and M5 (transitions,
+effects, proxy cache). **M6 next.** This file is the design/roadmap; the
+README is the user-facing how-to. Keep it in sync as milestones land.
 
 ## Vision
 
@@ -71,7 +71,7 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **M2** | TUI + mpv monitor + vim nav + instant preview + `r` + `:cmd` + `nle edl` | ✅ `344291a` |
 | **M3** | Editing for real | ✅ done |
 | **M4** | Multi-track + separate audio tracks | ✅ done |
-| **M5** | Transitions (`xfade`/`acrossfade`) + effects + proxy cache + thumbnails/waveforms | ⏳ next |
+| **M5** | Transitions (`xfade`/`acrossfade`) + per-clip effects + proxy cache | ✅ done |
 | **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending |
 | **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
@@ -253,37 +253,32 @@ below.)
 
 **Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
 
-## M5 — transitions, effects, proxies (planned)
+## M5 — transitions, effects, proxy cache (shipped)
 
-**Goal:** richer edits beyond cuts — transitions between clips, per-clip
-effect filters, and a **proxy render cache** so the instant preview can show
-things mpv `edl://` can't (effects, composited multi-track, transitions);
-plus optional **thumbnails / waveforms** in the TUI.
+- **Transitions:** a real `Segment::Transition { id, dur, kind, a, b }` that
+  **owns** both source sides (`TransitionSource::Clip | Black`), so it never
+  dangles when neighbours change and positions stay a prefix sum. Each clip
+  side gives up `dur` — clip↔clip shortens the timeline by `dur` (matches
+  `xfade`: 10+10−1 = 19), clip↔black leaves it. Export blends with
+  `xfade`/`acrossfade`; creation via `x` / `:transition`. Cuts only:
+  `Dissolve` + `FadeBlack`. `dd`/`D` remove one; `i`/`o`/`s`/`_` refuse.
+- **Effects:** a typed `Effect` enum (`Crop`/`Scale`/`Eq`/`Lut`) on
+  `Clip.effects`, applied in the export chain after the retime and before
+  the geometry normalize (so layers stay uniform for `overlay`); `:effect`
+  creates them. Undoable (`Atom::Clip`). `merge_pair` only joins clips with
+  matching effects; a paste carries them over.
+- **Proxy cache:** segments `edl://` can't express (effects, transitions)
+  are rendered once into `~/.cache/nle/proxy/<hash>.mp4` and the monitor
+  plays the proxy; the hash covers the segment + geometry + each asset's
+  path **and mtime**. The render puts the segment on its own track and
+  reuses the export graph compiler, so there's no second filter-graph to
+  drift.
+- **Verified:** unit tests + real ffmpeg runs — a dissolve reads a ≈50%
+  blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
+  and `nle edl` renders and references the proxies.
 
-Scope:
-- **Transitions:** `xfade` (video) + `acrossfade` (audio) between adjacent
-  clips, with overlap semantics in the segment model (a transition consumes
-  time from both sides). Small set first (cross-dissolve, fade, wipe).
-- **Effects:** per-clip filter chains (color/scale/crop/speed, LUT, maybe
-  `eq`/`curves`) stored on the clip; applied in export and, where possible,
-  previewed. Speed change interacts with audio (`atempo`) and frame grid.
-- **Proxy cache:** for segments the EDL can't express (effects, >1 video
-  track, transitions), render a **proxy clip** once, cache by graph hash,
-  and feed the preview an EDL of proxies. Reuses the M6 hashing idea.
-- **TUI:** thumbnails on the timeline row and/or a waveform strip for audio
-  tracks; a bin/`fx` UI for the clip's effect list.
-
-**Depends on:** M4 (tracks/compositing must exist before composited
-previews make sense).
-
-**Decisions to settle when it starts:** transition model in the segment
-sequence (does a transition replace a gap, or sit between clips?); proxy
-format (all-intra, project geometry, `-crf` preset); effect storage shape
-and whether it's undoable (it should be — extend `Change`).
-
-**Risks:** transition timing/overlap math is exact-rational-hostile (frame
-snapping); proxy invalidation correctness (hash must cover everything the
-graph reads); speed + audio sync.
+**Deferred:** thumbnails / waveforms and a bin/`fx` panel (effects are
+created by command); retiming a transition with `i`/`o`; OTIO transitions.
 
 ## M6 — export presets (planned)
 
