@@ -987,6 +987,19 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                 (None, Some(s)) => GapLen::Seconds(s),
                 (None, None) => GapLen::Frames(1),
             };
+            match len {
+                GapLen::Frames(n) if n < 1 => {
+                    return Err(ParseError::Invalid(
+                        "a gap needs at least one frame".to_string(),
+                    ));
+                }
+                GapLen::Seconds(s) if s <= 0.0 => {
+                    return Err(ParseError::Invalid(
+                        "a gap needs a positive length".to_string(),
+                    ));
+                }
+                _ => {}
+            }
             f.finish(":gap [--at T] [--frames N | --dur T] [--track N]")?;
             Ok(Action::InsertGap {
                 track: t,
@@ -1266,6 +1279,20 @@ mod tests {
         // guessing a position.
         let bare = ParseDefaults::default();
         assert!(matches!(parse("split", &bare), Err(ParseError::Invalid(_)),));
+    }
+
+    #[test]
+    fn a_gap_needs_a_positive_length() {
+        let d = ParseDefaults::default();
+        assert!(matches!(
+            parse("gap --at 1 --frames 0", &d),
+            Err(ParseError::Invalid(msg)) if msg.contains("at least one frame")
+        ));
+        assert!(matches!(
+            parse("gap --at 1 --dur -2", &d),
+            Err(ParseError::Invalid(msg)) if msg.contains("positive length")
+        ));
+        assert!(parse("gap --at 1 --frames 3", &d).is_ok());
     }
 
     /// An explicit `--at` works with no playhead default (the parser used

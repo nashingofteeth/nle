@@ -56,7 +56,15 @@ use nle_ffmpeg::detect::{DetectOptions, detect};
 use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
 
 #[derive(Parser)]
-#[command(name = "nle", version, about = "Terminal-native video editor")]
+#[command(
+    name = "nle",
+    version,
+    about = "Terminal-native video editor",
+    // `--to -1.5` is a real thing (an edge reaching back past time 0), and
+    // for the rest a negative is our own clear error, not clap's
+    // "unexpected argument '-1'".
+    allow_negative_numbers = true
+)]
 struct Cli {
     /// Project file
     #[arg(
@@ -93,13 +101,13 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         track: usize,
         /// Timeline position (default: end of track)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: Option<String>,
         /// Source in-point (default: 0)
-        #[arg(long = "in", value_name = "TIME")]
+        #[arg(long = "in", value_name = "TIME", allow_negative_numbers = true)]
         in_point: Option<String>,
         /// Source out-point (default: end of file)
-        #[arg(long = "out", value_name = "TIME")]
+        #[arg(long = "out", value_name = "TIME", allow_negative_numbers = true)]
         out_point: Option<String>,
     },
     /// Remove a clip by id (see `nle show`); `--ripple` closes the gap
@@ -115,6 +123,7 @@ enum Cmd {
         /// Clip id (from `nle show`)
         id: u32,
         /// New speed: 1, 2, 0.5, 0.8, 24/25 … (a rate, not a duration)
+        #[arg(allow_negative_numbers = true)]
         rate: String,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
@@ -123,7 +132,7 @@ enum Cmd {
     /// Move a segment's in-edge to a position (TUI `i`; `--ripple` = `I`)
     TrimIn {
         /// Where the new edge lands (seconds or timecode)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: String,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
@@ -135,7 +144,7 @@ enum Cmd {
     /// Move a segment's out-edge to a position (TUI `o` / `O`)
     TrimOut {
         /// Where the new edge lands (seconds or timecode)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: String,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
@@ -147,7 +156,7 @@ enum Cmd {
     /// Split the segment under a position (TUI `s`)
     Split {
         /// Where to cut (seconds or timecode)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: String,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
@@ -156,13 +165,13 @@ enum Cmd {
     /// Insert a gap at a position (TUI `_`)
     Gap {
         /// Where to insert (seconds or timecode)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: String,
         /// Gap length in frames (default 1)
-        #[arg(long)]
+        #[arg(long, allow_negative_numbers = true)]
         frames: Option<i64>,
         /// Gap length as a time (alternative to --frames)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         dur: Option<String>,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
@@ -175,7 +184,7 @@ enum Cmd {
             long,
             value_name = "TIME",
             required_unless_present_any = ["clip", "seg"]
-        )]
+        , allow_negative_numbers = true)]
         at: Option<String>,
         /// Delete this clip by id (finds its track)
         #[arg(long)]
@@ -197,7 +206,7 @@ enum Cmd {
             long,
             value_name = "TIME",
             required_unless_present_any = ["clip", "seg"]
-        )]
+        , allow_negative_numbers = true)]
         at: Option<String>,
         /// Yank this clip by id (finds its track)
         #[arg(long)]
@@ -212,7 +221,7 @@ enum Cmd {
     /// Paste the register at a position (TUI `p`; `--ripple` = `P`)
     Paste {
         /// Where to insert (seconds or timecode)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: String,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
@@ -230,13 +239,13 @@ enum Cmd {
         #[arg(long)]
         seg: Option<usize>,
         /// The segment under this position (alternative to --clip/--seg)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         at: Option<String>,
         /// Which edge: in (head/left) or out (tail/right)
         #[arg(long, value_name = "EDGE")]
         edge: String,
         /// Where the edge lands (seconds or timecode; may be negative)
-        #[arg(long, value_name = "TIME")]
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         to: String,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
@@ -264,7 +273,7 @@ enum Cmd {
     /// Show or move the stored playhead (shared with the TUI)
     Seek {
         /// Where to move it (seconds or timecode); omit to print it
-        #[arg(value_name = "TIME")]
+        #[arg(value_name = "TIME", allow_negative_numbers = true)]
         at: Option<String>,
     },
     /// Media pool: list assets and their usage
@@ -322,10 +331,20 @@ enum Cmd {
         #[arg(long, default_value_t = 0.4)]
         threshold: f32,
         /// Ignore shots shorter than this (suppresses flashes)
-        #[arg(long, value_name = "TIME", default_value = "0.5")]
+        #[arg(
+            long,
+            value_name = "TIME",
+            default_value = "0.5",
+            allow_negative_numbers = true
+        )]
         min_shot: String,
         /// Shortest black interval to treat as a gap
-        #[arg(long, value_name = "TIME", default_value = "0.1")]
+        #[arg(
+            long,
+            value_name = "TIME",
+            default_value = "0.1",
+            allow_negative_numbers = true
+        )]
         black_min: String,
         /// Do not recover black intervals as gaps
         #[arg(long)]
@@ -391,10 +410,10 @@ enum Cmd {
         /// Source file
         input: PathBuf,
         /// Start: seconds ("12.5") or timecode ("0:01:23.500")
-        #[arg(long = "in", value_name = "TIME")]
+        #[arg(long = "in", value_name = "TIME", allow_negative_numbers = true)]
         in_point: String,
         /// End (same formats, exclusive)
-        #[arg(long = "out", value_name = "TIME")]
+        #[arg(long = "out", value_name = "TIME", allow_negative_numbers = true)]
         out_point: String,
         /// Where to write the result
         #[arg(short, long, value_name = "FILE")]
@@ -574,6 +593,15 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 (None, Some(d)) => cli_time(d).map(GapLen::Seconds)?,
                 (None, None) => GapLen::Frames(1),
             };
+            match len {
+                GapLen::Frames(n) if n < 1 => {
+                    return Err("a gap needs at least one frame".to_string());
+                }
+                GapLen::Seconds(s) if s <= 0.0 => {
+                    return Err("a gap needs a positive length".to_string());
+                }
+                _ => {}
+            }
             Ok(Action::InsertGap { track, at, len })
         })),
         Cmd::Delete {
@@ -2457,6 +2485,63 @@ mod tests {
 
     /// A CLI edit records history — `nle undo` undoes it, and the
     /// playhead attribution comes back with the entry.
+    /// Gap lengths are validated with our own message (a negative or zero
+    /// length used to fall through to "shorter than one frame").
+    #[test]
+    fn gap_lengths_are_validated_with_a_clear_message() {
+        let gap = |frames: Option<i64>, dur: Option<&str>| {
+            to_action(&Cmd::Gap {
+                at: "1".into(),
+                frames,
+                dur: dur.map(String::from),
+                track: 1,
+            })
+            .unwrap()
+        };
+        assert!(
+            gap(Some(0), None)
+                .unwrap_err()
+                .contains("at least one frame")
+        );
+        assert!(
+            gap(Some(-5), None)
+                .unwrap_err()
+                .contains("at least one frame")
+        );
+        assert!(
+            gap(None, Some("-2"))
+                .unwrap_err()
+                .contains("positive length")
+        );
+        assert!(gap(Some(3), None).is_ok());
+    }
+
+    /// A negative `--to` is real (an edge reaching back past time 0) and
+    /// must survive clap into the action; other negatives get our own
+    /// error, not clap's "unexpected argument '-1'".
+    #[test]
+    fn negative_times_reach_the_action() {
+        let cmd = Cmd::Extend {
+            clip: None,
+            seg: Some(1),
+            at: None,
+            edge: "in".into(),
+            to: "-2".into(),
+            track: 1,
+            ripple: false,
+        };
+        assert_eq!(
+            to_action(&cmd).unwrap().unwrap(),
+            Action::Extend {
+                track: 0,
+                target: Target::Segment(1),
+                edge: Edge::In,
+                to: -2.0,
+                ripple: false,
+            }
+        );
+    }
+
     /// The model counts tracks from 0; the message must speak the number
     /// you typed (1-based, like `v1`/`a1`).
     #[test]
