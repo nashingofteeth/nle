@@ -573,7 +573,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     app.register = load_register(&app.path);
     // Open where `nle seek` (or the last session) left the playhead.
     app.playhead = secs(&app.project.playhead);
-    if let Some(notice) = preview::speed_notice(&app.project) {
+    if let Some(notice) = preview::monitor_notices(&app.project) {
         app.set_message(&notice);
     }
     // Media title (MPRIS "Now playing") follows the clip under the playhead.
@@ -600,7 +600,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
             app.reload_requested = false;
             match reload_project(&mut app, &player) {
                 Ok(()) => {
-                    let msg = preview::speed_notice(&app.project)
+                    let msg = preview::monitor_notices(&app.project)
                         .unwrap_or_else(|| "timeline reloaded".to_string());
                     app.set_message(&msg);
                 }

@@ -126,6 +126,32 @@ pub fn speed_notice(project: &Project) -> Option<String> {
     (n > 0).then(|| format!("monitor is 1x: {n} speed clip(s) play at normal speed"))
 }
 
+/// The monitor can't blend a transition — it previews one as a cut (the
+/// outgoing side) until the proxy cache lands (M5). Surface that honestly.
+pub fn transition_notice(project: &Project) -> Option<String> {
+    let n = project
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|t| t.segments.iter())
+        .filter(|s| matches!(s, TimelineSegment::Transition(_)))
+        .count();
+    (n > 0).then(|| format!("{n} transition(s) preview as a cut"))
+}
+
+/// Everything the monitor can't show faithfully, joined. Until the proxy
+/// cache (M5), that's un-retimed speed and un-blended transitions.
+pub fn monitor_notices(project: &Project) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(s) = speed_notice(project) {
+        parts.push(s);
+    }
+    if let Some(t) = transition_notice(project) {
+        parts.push(t);
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 /// Flatten the video tracks into one preview sequence, topmost first: at
 /// each instant the highest unmuted video track with a clip wins, and only
 /// where every track is a gap does the preview show black. This is what the
@@ -403,7 +429,8 @@ mod tests {
     use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
     use nle_core::timeline::{
-        Clip as TimelineClip, Gap as TimelineGap, Segment as TimelineSegment,
+        Clip as TimelineClip, Gap as TimelineGap, Segment as TimelineSegment, Transition,
+        TransitionKind,
     };
 
     fn seg_clip(id: u32, ain: i64, aout: i64) -> TimelineSegment {
@@ -425,6 +452,26 @@ mod tests {
         }
         let notice = speed_notice(&p).expect("notice");
         assert!(notice.contains("1 speed clip"), "{notice}");
+    }
+
+    #[test]
+    fn transition_notice_flags_transitions() {
+        let mut p = project_with_gap();
+        assert!(transition_notice(&p).is_none());
+        p.timeline.video_track_mut().unwrap().segments.insert(
+            1,
+            TimelineSegment::Transition(Transition {
+                id: 9,
+                dur: Seconds::from_integer(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Black,
+                b: TransitionSource::Black,
+            }),
+        );
+        let notice = transition_notice(&p).expect("notice");
+        assert!(notice.contains("1 transition"), "{notice}");
+        let all = monitor_notices(&p).expect("notices");
+        assert!(all.contains("transition"), "{all}");
     }
 
     fn project_with_gap() -> Project {
