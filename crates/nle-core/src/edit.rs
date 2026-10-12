@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::media::RawProbe;
 use crate::project::{Asset, Project, ProjectError};
-use crate::time::{Seconds, format_seconds};
+use crate::time::{Seconds, format_seconds, frames_to_seconds};
 use crate::timeline::{
     Clip, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind, Transition,
     TransitionKind, TransitionSource,
@@ -1007,6 +1007,134 @@ pub fn set_speed_on(
 
 pub fn set_speed(project: &Project, clip_id: u32, speed: Seconds) -> Result<Batch, EditError> {
     set_speed_on(project, video_track_index(project)?, clip_id, speed)
+}
+
+/// Add a transition at a boundary (the playhead, snapped to the frame
+/// grid). Each **clip** side gives up `dur` of timeline span — the left's
+/// tail, the right's head — and the transition occupies `dur`, so a
+/// clip↔clip seam shortens the timeline by `dur` while a clip↔black seam
+/// leaves it unchanged (the fade sits inside the clip). A side that is a
+/// gap or the timeline edge contributes black; at least one side must be a
+/// clip. The transition owns the two trimmed-away source spans.
+pub fn add_transition(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+    kind: TransitionKind,
+    dur: Seconds,
+) -> Result<Batch, EditError> {
+    let fps = project.fps.ok_or(EditError::NoFps)?;
+    let t = snap(project, playhead)?;
+    let tr = track_at(project, track)?;
+
+    // Whole frames, at least one.
+    let frames = (dur * fps).round().to_integer();
+    if frames < 1 {
+        return Err(EditError::TooShort);
+    }
+    let dur = frames_to_seconds(frames, fps);
+
+    // The seam must be a boundary: the segment starting at `t` (or the
+    // timeline end) and the one ending at `t` (or the start).
+    let right = tr.index_at(t);
+    match right {
+        Some(si) if tr.start_of(si) != t => {
+            return Err(EditError::NothingToTrim(stamp(project, &t)));
+        }
+        None if t != tr.end() => return Err(EditError::NoSegment),
+        _ => {}
+    }
+    let (left_i, right_i) = match right {
+        Some(si) => (si.checked_sub(1), Some(si)),
+        None => (tr.segments.len().checked_sub(1), None),
+    };
+
+    let mut a = TransitionSource::Black;
+    let mut b = TransitionSource::Black;
+    let mut ops: Vec<EditOp> = Vec::new();
+    let mut clip_sides = 0usize;
+
+    // The left side: a clip's tail is trimmed into the transition.
+    if let Some(li) = left_i {
+        match &tr.segments[li] {
+            Segment::Transition(_) => return Err(EditError::Transition),
+            Segment::Gap(_) => {}
+            Segment::Clip(c) => {
+                let rem = c.duration() - dur;
+                at_least_a_frame(project, &rem)?;
+                let tail = source_span(c, dur);
+                let new_out = c.asset_out - tail;
+                a = TransitionSource::Clip {
+                    asset: c.asset,
+                    src_in: new_out,
+                    src_out: c.asset_out,
+                };
+                ops.push(EditOp::Replace {
+                    track,
+                    index: li,
+                    before: tr.segments[li].clone(),
+                    after: Segment::Clip(Clip {
+                        asset_out: new_out,
+                        ..c.clone()
+                    }),
+                });
+                clip_sides += 1;
+            }
+        }
+    }
+
+    // The right side: a clip's head is trimmed into the transition.
+    if let Some(ri) = right_i {
+        match &tr.segments[ri] {
+            Segment::Transition(_) => return Err(EditError::Transition),
+            Segment::Gap(_) => {}
+            Segment::Clip(c) => {
+                let rem = c.duration() - dur;
+                at_least_a_frame(project, &rem)?;
+                let head = source_span(c, dur);
+                let new_in = c.asset_in + head;
+                b = TransitionSource::Clip {
+                    asset: c.asset,
+                    src_in: c.asset_in,
+                    src_out: new_in,
+                };
+                ops.push(EditOp::Replace {
+                    track,
+                    index: ri,
+                    before: tr.segments[ri].clone(),
+                    after: Segment::Clip(Clip {
+                        asset_in: new_in,
+                        ..c.clone()
+                    }),
+                });
+                clip_sides += 1;
+            }
+        }
+    }
+
+    if clip_sides == 0 {
+        return Err(EditError::NoClip); // black↔black is meaningless
+    }
+
+    ops.push(EditOp::Insert {
+        track,
+        index: left_i.map(|i| i + 1).unwrap_or(0),
+        segment: Segment::Transition(Transition {
+            id: project.next_clip_id(),
+            dur,
+            kind,
+            a,
+            b,
+        }),
+    });
+    let what = match kind {
+        TransitionKind::Dissolve => "dissolve",
+        TransitionKind::FadeBlack => "fade black",
+    };
+    Ok(Batch {
+        ops,
+        desc: format!("transition ({what}) at {}", stamp(project, &t)),
+    })
 }
 
 /// Keep one track's clips inside their media and on the frame grid. The
@@ -5524,5 +5652,156 @@ mod tests {
             }
             TransitionSource::Black => panic!("expected a clip side"),
         }
+    }
+
+    #[test]
+    fn add_transition_at_a_clip_clip_seam() {
+        // [A src 0..3] [B src 0..3]: a 1 s dissolve at the 3.0 cut.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let clip = |id, in_, out| {
+            Segment::Clip(Clip {
+                id,
+                asset: a,
+                asset_in: Seconds::from_integer(in_),
+                asset_out: Seconds::from_integer(out),
+                speed: Seconds::from_integer(1),
+            })
+        };
+        p.timeline.video_track_mut().unwrap().segments = vec![clip(1, 0, 3), clip(2, 0, 3)];
+
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        let segs = &p.timeline.video_track().unwrap().segments;
+        assert_eq!(segs.len(), 3, "A', transition, B'");
+        // Each clip gave up its 1 s at the seam.
+        match &segs[0] {
+            Segment::Clip(c) => assert_eq!(c.asset_out, Seconds::from_integer(2)),
+            s => panic!("expected a clip, got {s:?}"),
+        }
+        match &segs[2] {
+            Segment::Clip(c) => assert_eq!(c.asset_in, Seconds::from_integer(1)),
+            s => panic!("expected a clip, got {s:?}"),
+        }
+        match &segs[1] {
+            Segment::Transition(t) => {
+                assert_eq!(t.dur, Seconds::from_integer(1));
+                assert_eq!(
+                    t.a,
+                    TransitionSource::Clip {
+                        asset: a,
+                        src_in: Seconds::from_integer(2),
+                        src_out: Seconds::from_integer(3),
+                    }
+                );
+                assert_eq!(
+                    t.b,
+                    TransitionSource::Clip {
+                        asset: a,
+                        src_in: Seconds::from_integer(0),
+                        src_out: Seconds::from_integer(1),
+                    }
+                );
+            }
+            s => panic!("expected a transition, got {s:?}"),
+        }
+        // clip↔clip shortens the timeline by `d`.
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+    }
+
+    #[test]
+    fn add_transition_at_a_clip_gap_seam() {
+        // fixture(): [C1 src 1..3] [gap 1] [C2 src 0..2]; a 1 s fade at the
+        // 2.0 clip|gap cut.
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            2.0,
+            TransitionKind::FadeBlack,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        let segs = &p.timeline.video_track().unwrap().segments;
+        assert_eq!(segs.len(), 4, "C1', transition, gap, C2");
+        // The clip gives up 1 s; the gap (and the timeline length) do not.
+        match &segs[0] {
+            Segment::Clip(c) => assert_eq!(c.asset_out, Seconds::from_integer(2)),
+            s => panic!("expected a clip, got {s:?}"),
+        }
+        match &segs[1] {
+            Segment::Transition(t) => {
+                assert_eq!(t.b, TransitionSource::Black, "the gap side is black");
+                assert!(
+                    matches!(t.a, TransitionSource::Clip { .. }),
+                    "the clip side"
+                );
+            }
+            s => panic!("expected a transition, got {s:?}"),
+        }
+        assert_eq!(
+            p.timeline.end(),
+            Seconds::from_integer(5),
+            "length unchanged"
+        );
+    }
+
+    #[test]
+    fn add_transition_refuses_bad_seams() {
+        let p = fixture();
+        // Mid-clip isn't a boundary.
+        assert!(matches!(
+            add_transition(
+                &p,
+                0,
+                1.5,
+                TransitionKind::Dissolve,
+                Seconds::from_integer(1)
+            ),
+            Err(EditError::NothingToTrim(_))
+        ));
+        // Longer than the neighbours.
+        assert!(matches!(
+            add_transition(
+                &p,
+                0,
+                2.0,
+                TransitionKind::Dissolve,
+                Seconds::from_integer(5)
+            ),
+            Err(EditError::TooShort)
+        ));
+        // Both sides black (leading gap): at 0 the left is the edge and the
+        // right is a gap.
+        let mut q = fixture();
+        q.timeline.video_track_mut().unwrap().segments.insert(
+            0,
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+        );
+        assert!(matches!(
+            add_transition(
+                &q,
+                0,
+                0.0,
+                TransitionKind::Dissolve,
+                Seconds::from_integer(1)
+            ),
+            Err(EditError::NoClip)
+        ));
     }
 }
