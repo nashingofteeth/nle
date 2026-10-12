@@ -242,6 +242,7 @@ pub fn build(
                     asset_in: frames_to_seconds(src_in, fps),
                     asset_out: frames_to_seconds(src_out, fps),
                     speed,
+                    effects: Vec::new(),
                 }));
                 next_id += 1;
                 cursor = rec_out;

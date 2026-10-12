@@ -1086,6 +1086,7 @@ fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
         asset_in: Seconds::from_integer(0),
         asset_out: whole,
         speed: Seconds::from_integer(1),
+        effects: Vec::new(),
     });
     run_action(
         app,
@@ -1112,7 +1113,7 @@ fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale
@@ -3789,6 +3790,7 @@ mod tests {
                         asset_in: Seconds::from_integer(1),
                         asset_out: Seconds::from_integer(4),
                         speed: Seconds::from_integer(1),
+                        effects: Vec::new(),
                     }),
                     TimelineSegment::Gap(TimelineGap {
                         duration: Seconds::from_integer(2),
@@ -3799,6 +3801,7 @@ mod tests {
                         asset_in: Seconds::from_integer(0),
                         asset_out: Seconds::from_integer(2),
                         speed: Seconds::from_integer(1),
+                        effects: Vec::new(),
                     }),
                 ],
             }],
@@ -4062,6 +4065,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })];
         // The 2 s track is padded to the 7 s timeline with a 5 s gap.
         let parts = track_parts(&p, &p.timeline.tracks[ti], 7.0);
@@ -4665,6 +4669,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(3),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
             TimelineSegment::Clip(nle_core::Clip {
                 id: 2,
@@ -4672,6 +4677,7 @@ mod tests {
                 asset_in: Seconds::new(1, 2),
                 asset_out: Seconds::new(7, 2),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
         ];
         let (armed, edge) = resolve_armed(&p, 6.0, 0).unwrap();
@@ -5154,6 +5160,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })];
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.active_track = ti;
@@ -5245,6 +5252,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
             TimelineSegment::Clip(nle_core::Clip {
                 id: 2,
@@ -5252,6 +5260,7 @@ mod tests {
                 asset_in: Seconds::from_integer(4),
                 asset_out: Seconds::from_integer(6),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
             TimelineSegment::Clip(nle_core::Clip {
                 id: 3,
@@ -5259,6 +5268,7 @@ mod tests {
                 asset_in: Seconds::from_integer(8),
                 asset_out: Seconds::from_integer(10),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
         ];
         let mut app = App::new(p, PathBuf::from("t.json"));
@@ -5304,6 +5314,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(4),
                 speed: Seconds::from_integer(2),
+                effects: Vec::new(),
             })];
         let mut app = App::new(p, PathBuf::from("t.json"));
         app.playhead = 1.0;
@@ -5337,6 +5348,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(1),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
             TimelineSegment::Clip(nle_core::Clip {
                 id: 2,
@@ -5344,6 +5356,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
                 speed: Seconds::new(1, 2),
+                effects: Vec::new(),
             }),
         ];
         let mut app = App::new(p, PathBuf::from("t.json"));
@@ -5434,6 +5447,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(5),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         });
         let batch = edit::paste_ripple(&p, &snapshot, 0.0).unwrap();
         p.timeline = {
@@ -5477,6 +5491,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: app.project.media[0].duration().unwrap(),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         });
         let batch = edit::paste_ripple(&app.project, &snapshot, app.playhead).unwrap();
         let frame = frame_of(app.project.fps.as_ref(), 0.0);
@@ -5514,6 +5529,7 @@ mod tests {
                     asset_in: Seconds::from_integer(0),
                     asset_out: Seconds::from_integer(3),
                     speed: Seconds::from_integer(1),
+                    effects: Vec::new(),
                 })
             })
             .collect();
@@ -5598,6 +5614,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: whole,
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         });
         let batch = edit::paste_ripple(&app.project, &snapshot, 0.0).unwrap();
         app.history.apply(&mut app.project, batch, 0).unwrap();
@@ -5801,6 +5818,7 @@ mod tests {
                 asset_in: Seconds::from_integer(1),
                 asset_out: Seconds::from_integer(3),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             });
         }
         let (head2, edge) = resolve_armed(&p, 4.0, 0).unwrap();
@@ -5943,6 +5961,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }));
         let mut app = App::new(p, PathBuf::from("t.json"));
         let head2 = Armed::Clip { id: 2, head: true };
@@ -5986,6 +6005,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(dur),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })
     }
 
@@ -6658,6 +6678,36 @@ mod tests {
             ),
             "a fade was added: {:?}",
             track.segments
+        );
+    }
+
+    // `:effect crop` appends an effect to a clip.
+    #[test]
+    fn effect_command_adds_an_effect() {
+        let mut app = App::new(asset_project(), temp_project_path("effect-cmd"));
+        app.loaded = true;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key(':'));
+        for c in "effect crop --clip 1 --w 10 --h 10".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let track = app.project.timeline.video_track().unwrap();
+        let TimelineSegment::Clip(c) = &track.segments[0] else {
+            panic!("expected a clip")
+        };
+        assert_eq!(
+            c.effects,
+            vec![nle_core::timeline::Effect::Crop {
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10
+            }]
         );
     }
 }

@@ -139,8 +139,25 @@ pub fn transition_notice(project: &Project) -> Option<String> {
     (n > 0).then(|| format!("{n} transition(s) preview as a cut"))
 }
 
+/// The monitor shows raw clips: effects aren't applied in preview until the
+/// proxy cache lands (M5). Surface that honestly.
+pub fn effects_notice(project: &Project) -> Option<String> {
+    let n = project
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|t| t.segments.iter())
+        .filter_map(|s| match s {
+            TimelineSegment::Clip(c) if !c.effects.is_empty() => Some(()),
+            _ => None,
+        })
+        .count();
+    (n > 0).then(|| format!("{n} effect clip(s) preview unstyled"))
+}
+
 /// Everything the monitor can't show faithfully, joined. Until the proxy
-/// cache (M5), that's un-retimed speed and un-blended transitions.
+/// cache (M5), that's un-retimed speed, un-blended transitions, and
+/// unapplied effects.
 pub fn monitor_notices(project: &Project) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = speed_notice(project) {
@@ -148,6 +165,9 @@ pub fn monitor_notices(project: &Project) -> Option<String> {
     }
     if let Some(t) = transition_notice(project) {
         parts.push(t);
+    }
+    if let Some(e) = effects_notice(project) {
+        parts.push(e);
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -440,6 +460,7 @@ mod tests {
             asset_in: Seconds::from_integer(ain),
             asset_out: Seconds::from_integer(aout),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })
     }
 
@@ -582,6 +603,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(4),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })];
         let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
         p.timeline.tracks[ti].segments = vec![
@@ -594,6 +616,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(1),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
             TimelineSegment::Gap(TimelineGap {
                 duration: Seconds::from_integer(2),
@@ -645,6 +668,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })];
         let segs = composite_segments(&p).unwrap();
         assert_eq!(

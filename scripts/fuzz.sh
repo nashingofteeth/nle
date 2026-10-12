@@ -29,14 +29,14 @@ gen blue.mp4 blue 60000/1001 5
 : > empty.mp4
 printf 'not media' > notmedia.txt
 
-# base: red 0–3, gap 3–4, blue 4–7, pool of three
-if [ ! -f base.json ]; then
-  $N --project base.json init --force >/dev/null
-  $N --project base.json import red.mp4 blue.mp4 >/dev/null
-  $N --project base.json add red.mp4  --in 0 --out 3 >/dev/null
-  $N --project base.json add blue.mp4 --at 4 --in 0 --out 3 >/dev/null
-  $N --project base.json seek 1.5 >/dev/null
-fi
+# base: red 0–3, gap 3–4, blue 4–7, pool of three. Always rebuilt: a stale
+# base (from before a format-version bump) would fail to load and poison
+# every case with "project version … is not supported".
+$N --project base.json init --force >/dev/null
+$N --project base.json import red.mp4 blue.mp4 >/dev/null
+$N --project base.json add red.mp4  --in 0 --out 3 >/dev/null
+$N --project base.json add blue.mp4 --at 4 --in 0 --out 3 >/dev/null
+$N --project base.json seek 1.5 >/dev/null
 
 # The invariant: run a command on a fresh copy of base.json and check the
 # three rules above.

@@ -365,6 +365,7 @@ mod tests {
             asset_in: Seconds::from_integer(in_s),
             asset_out: Seconds::from_integer(out_s),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })
     }
 

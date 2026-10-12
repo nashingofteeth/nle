@@ -1141,6 +1141,7 @@ fn stage_clip(
         asset_in: in_t,
         asset_out: out_t,
         speed: Seconds::from_integer(1),
+        effects: Vec::new(),
     });
     Ok((scratch, imported))
 }

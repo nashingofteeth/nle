@@ -380,6 +380,7 @@ pub fn build(
                         asset_in: c.asset_in,
                         asset_out: c.asset_out,
                         speed: c.speed,
+                        effects: Vec::new(),
                     }));
                     next_id += 1;
                 }

@@ -18,7 +18,7 @@ use crate::edit::{self, EditError, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
 use crate::time::{Seconds, frame_of, frames_to_seconds, grid_time, parse_signed_time, secs_f64};
-use crate::timeline::{Segment, TrackKind, TransitionKind};
+use crate::timeline::{Effect, Segment, TrackKind, TransitionKind};
 
 /// What an action addresses: the segment under a timeline position, a
 /// clip by id (stable across edits), or a segment by index (as printed
@@ -115,6 +115,12 @@ pub enum Action {
         kind: TransitionKind,
         len: GapLen,
     },
+    /// Append an effect to a clip (`:effect`).
+    AddEffect {
+        track: usize,
+        clip: u32,
+        effect: Effect,
+    },
     /// Drop sub-frame stumps and snap to the frame grid (`:purge`).
     /// Re-baselines the undo stack.
     PurgeStumps {
@@ -167,6 +173,7 @@ impl Action {
             Action::Undo => 14,
             Action::Redo => 15,
             Action::Transition { .. } => 16,
+            Action::AddEffect { .. } => 17,
         }
     }
 }
@@ -262,6 +269,14 @@ pub fn run_action(
                 GapLen::Seconds(s) => frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps),
             };
             let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
+            apply(project, history, batch, from)
+        }
+        Action::AddEffect {
+            track,
+            clip,
+            effect,
+        } => {
+            let batch = edit::add_effect_on(project, *track, *clip, effect.clone())?;
             apply(project, history, batch, from)
         }
         Action::Delete {
@@ -1068,6 +1083,48 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                 len,
             })
         }
+        "effect" => {
+            let usage = ":effect [--clip N] [--track N] crop --w --h [--x --y] | scale --w --h | \
+                 eq [--brightness --contrast --saturation] | lut --path P";
+            let track = parse_track(&mut f, d)?;
+            let clip = opt_u32(&mut f, "clip")?
+                .ok_or_else(|| ParseError::Invalid("effect needs --clip N".to_string()))?;
+            let kind = f
+                .positional()
+                .ok_or_else(|| ParseError::Invalid(usage.to_string()))?;
+            let need = |f: &mut Flags, n: &str| -> Result<u32, ParseError> {
+                opt_u32(f, n)?.ok_or_else(|| ParseError::Invalid(format!("effect needs --{n}")))
+            };
+            let effect = match kind.as_str() {
+                "crop" => Effect::Crop {
+                    x: opt_u32(&mut f, "x")?.unwrap_or(0),
+                    y: opt_u32(&mut f, "y")?.unwrap_or(0),
+                    w: need(&mut f, "w")?,
+                    h: need(&mut f, "h")?,
+                },
+                "scale" => Effect::Scale {
+                    w: need(&mut f, "w")?,
+                    h: need(&mut f, "h")?,
+                },
+                "eq" => Effect::Eq {
+                    brightness: opt_time(&mut f, "brightness")?.unwrap_or(0.0),
+                    contrast: opt_time(&mut f, "contrast")?.unwrap_or(0.0),
+                    saturation: opt_time(&mut f, "saturation")?.unwrap_or(0.0),
+                },
+                "lut" => Effect::Lut {
+                    path: f
+                        .take("path")
+                        .ok_or_else(|| ParseError::Invalid("effect needs --path".to_string()))?,
+                },
+                _ => return Err(ParseError::Invalid(usage.to_string())),
+            };
+            f.finish(usage)?;
+            Ok(Action::AddEffect {
+                track,
+                clip,
+                effect,
+            })
+        }
         "delete" | "del" => {
             let target = parse_target(&mut f, d, "what to delete")?;
             let (t, r) = (parse_track(&mut f, d)?, f.take_bool("ripple"));
@@ -1444,6 +1501,7 @@ mod tests {
                 asset_in: Seconds::from_integer(in_s),
                 asset_out: Seconds::from_integer(out_s),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             })
         };
         p.timeline.video_track_mut().unwrap().segments = vec![
@@ -1582,6 +1640,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         });
         run_action(
             &mut p,
@@ -1688,6 +1747,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
         );
         assert_eq!(reg.path.as_deref(), Some(Path::new("/media/spare.mp4")));
@@ -1707,6 +1767,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(2),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
             path: Some(PathBuf::from("/media/other/red.mp4")),
         };
@@ -1731,6 +1792,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(2),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         });
         let mut h = History::default();
         let mut reg = None;

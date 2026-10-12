@@ -37,6 +37,41 @@ pub enum TrackKind {
     Audio,
 }
 
+/// A per-clip video effect, applied in export after the retime and before
+/// the geometry normalize. Typed (not raw ffmpeg fragments) so it stays
+/// serializable and safe to hand to the graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Effect {
+    /// `crop=w:h:x:y`.
+    Crop { x: u32, y: u32, w: u32, h: u32 },
+    /// `scale=w:h`.
+    Scale { w: u32, h: u32 },
+    /// `eq=brightness=…:contrast=…:saturation=…`.
+    Eq {
+        brightness: f64,
+        contrast: f64,
+        saturation: f64,
+    },
+    /// `lut3d=file=…`.
+    Lut { path: String },
+}
+
+impl Effect {
+    /// The ffmpeg filter fragment for this effect.
+    pub fn filter(&self) -> String {
+        match self {
+            Effect::Crop { x, y, w, h } => format!("crop={w}:{h}:{x}:{y}"),
+            Effect::Scale { w, h } => format!("scale={w}:{h}"),
+            Effect::Eq {
+                brightness,
+                contrast,
+                saturation,
+            } => format!("eq=brightness={brightness}:contrast={contrast}:saturation={saturation}"),
+            Effect::Lut { path } => format!("lut3d=file={path}"),
+        }
+    }
+}
+
 /// One piece of media on a track. Its timeline position is derived from
 /// the segments before it — a clip only owns its source range.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,10 +88,13 @@ pub struct Clip {
     /// `project_rate / media_rate`. Never zero or negative.
     #[serde(with = "rational_ser")]
     pub speed: Seconds,
+    /// Per-clip video effects, applied in order at export.
+    #[serde(default)]
+    pub effects: Vec<Effect>,
 }
 
 impl Clip {
-    /// A normal-speed clip (`speed = 1`).
+    /// A normal-speed clip (`speed = 1`) with no effects.
     pub fn new(id: u32, asset: u32, asset_in: Seconds, asset_out: Seconds) -> Self {
         Self {
             id,
@@ -64,6 +102,7 @@ impl Clip {
             asset_in,
             asset_out,
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         }
     }
 
@@ -382,6 +421,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(dur),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })
     }
 
@@ -400,6 +440,7 @@ mod tests {
             asset_in: Seconds::from_integer(1),
             asset_out: Seconds::from_integer(5),
             speed: Seconds::from_integer(2),
+            effects: Vec::new(),
         };
         assert_eq!(
             c.source_at(Seconds::from_integer(1)),
@@ -462,6 +503,7 @@ mod tests {
             asset_in: Seconds::from_integer(2),
             asset_out: Seconds::from_integer(2),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })];
         assert!(p_timeline.validate().is_err());
         p_timeline.tracks[0].segments = vec![gap(0)];

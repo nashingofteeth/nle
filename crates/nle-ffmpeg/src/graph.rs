@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nle_core::timeline::{Segment, TrackKind, TransitionKind, TransitionSource};
+use nle_core::timeline::{Clip, Segment, TrackKind, TransitionKind, TransitionSource};
 use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -66,11 +66,30 @@ enum Piece {
         out_dur: String,
         /// Playback rate; `1` is a no-op retime.
         speed: Seconds,
+        /// Pre-rendered per-clip effect filters (empty when none).
+        effects: String,
         has_audio: bool,
     },
     Gap {
         dur: String,
     },
+}
+
+/// The per-clip effect filters, joined for the chain — empty when there
+/// are none, otherwise `f1,f2,` (the trailing comma is the separator before
+/// the normalize `scale`).
+fn clip_effects(c: &Clip) -> String {
+    if c.effects.is_empty() {
+        return String::new();
+    }
+    let mut s = c
+        .effects
+        .iter()
+        .map(|e| e.filter())
+        .collect::<Vec<_>>()
+        .join(",");
+    s.push(',');
+    s
 }
 
 /// The video retime stage. At 1× this is exactly the old
@@ -195,6 +214,7 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
                     src_dur: format_seconds(&c.source_duration()),
                     out_dur: format_seconds(&c.duration()),
                     speed: c.speed,
+                    effects: clip_effects(c),
                     has_audio: asset.probe.has_audio(),
                 });
             }
@@ -214,10 +234,11 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
                 src_dur,
                 out_dur,
                 speed,
+                effects,
                 has_audio,
             } => {
                 graph.push_str(&format!(
-                    "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},\
+                    "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},{effects}\
                      scale={w}:{h},setsar=1,fps={fps_s},format=yuv420p[v{i}];\n",
                     setpts = video_setpts(speed),
                 ));
@@ -424,9 +445,10 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
                     let out_dur = format_seconds(&c.duration());
                     if is_video {
                         graph.push_str(&format!(
-                            "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},\
+                            "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},{effects}\
                              scale={w}:{h},setsar=1,fps={fps_s},format=yuva420p[v{ti}_{idx}];\n",
                             setpts = video_setpts(&c.speed),
+                            effects = clip_effects(c),
                         ));
                         v_labels.push(format!("[v{ti}_{idx}]"));
                     }
@@ -635,7 +657,7 @@ mod tests {
     use super::*;
     use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
-    use nle_core::timeline::{Clip, Gap, Transition, TransitionKind, TransitionSource};
+    use nle_core::timeline::{Clip, Effect, Gap, Transition, TransitionKind, TransitionSource};
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -689,6 +711,7 @@ mod tests {
                 asset_in: Seconds::from_integer(0),
                 asset_out: Seconds::from_integer(10),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
             Segment::Gap(Gap {
                 duration: Seconds::from_integer(2),
@@ -699,6 +722,7 @@ mod tests {
                 asset_in: Seconds::from_integer(2),
                 asset_out: Seconds::from_integer(5),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
         ];
         p
@@ -756,6 +780,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(5),
             speed: Seconds::new(1001, 1250), // 24 / (30000/1001) = 0.8008x
+            effects: Vec::new(),
         })];
         let plan = compile_export(&p).unwrap();
         let g = &plan.graph;
@@ -787,6 +812,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(4),
             speed: Seconds::new(1001, 2500), // 24 / (60000/1001) = 0.4004x
+            effects: Vec::new(),
         })];
         let plan = compile_export(&p).unwrap();
         // atempo can't do 0.4x in one step; it splits into 0.5 x 0.8008
@@ -876,6 +902,7 @@ mod tests {
                 asset_in: Seconds::from_integer(1),
                 asset_out: Seconds::from_integer(2),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             }),
         ];
         p
@@ -908,6 +935,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(5),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })];
         let plan = compile_export(&p).unwrap();
         let g = &plan.graph;
@@ -939,6 +967,7 @@ mod tests {
             asset_in: Seconds::from_integer(0),
             asset_out: Seconds::from_integer(5),
             speed: Seconds::from_integer(1),
+            effects: Vec::new(),
         })];
         p.timeline.tracks[ti].muted = true;
         let g = compile_export(&p).unwrap().graph;
@@ -961,6 +990,7 @@ mod tests {
                 asset_in: Seconds::from_integer(in_),
                 asset_out: Seconds::from_integer(out),
                 speed: Seconds::from_integer(1),
+                effects: Vec::new(),
             })
         };
         p.timeline.video_track_mut().unwrap().segments = vec![
@@ -988,5 +1018,25 @@ mod tests {
         assert!(g.contains("xfade=transition=fade:"), "{g}");
         assert!(g.contains("acrossfade=d="), "{g}");
         assert_eq!(plan.duration, Seconds::from_integer(5), "clip|trans|clip");
+    }
+
+    #[test]
+    fn effects_run_before_the_geometry_normalize() {
+        let mut p = project_with_two_clips();
+        if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            c.effects = vec![
+                Effect::Crop {
+                    x: 1,
+                    y: 2,
+                    w: 3,
+                    h: 4,
+                },
+                Effect::Scale { w: 10, h: 20 },
+            ];
+        }
+        let g = compile_export(&p).unwrap().graph;
+        // Effects chain after the retime, before the normalize scale.
+        assert!(g.contains("crop=3:4:1:2,scale=10:20,"), "{g}");
+        assert!(g.contains("scale=10:20,scale=1920:1080"), "{g}");
     }
 }
