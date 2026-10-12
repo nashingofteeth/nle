@@ -236,6 +236,9 @@ below.)
   ~1 s after the transport stops (plus on quit); a reload adopts the file's
   value. `nle show` reports `at N s`. Session state, not a catalog action (no
   history entry; `--at` stays explicit).
+- **Shared-session concurrency:** the TUI adopts shell writes within a tick
+  (project, history, register, playhead) and never writes over an unseen
+  change; reloads wait for Normal mode.
 
 **Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
 

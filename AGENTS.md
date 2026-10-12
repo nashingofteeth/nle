@@ -132,6 +132,14 @@ plainly.
   stored rational come from different computation paths and can differ in the
   last ulp — a float diff re-triggers the transport flush forever
   (`playhead_moved` compares `frame_of`).
+- **Concurrent shell + TUI: adopt, never clobber.** The TUI watches the
+  mtimes of `nle.json`, the undo sidecar, and the register (as of our last
+  read/write); a foreign change reloads project + history + register +
+  playhead within a tick, deferred to Normal while a mode holds indices
+  (`watch_foreign`). Saves are guarded: `persist_playhead` refuses
+  (`Ok(false)`) when the file moved under us, and `persist_and_refresh`
+  adopts + reports `not saved: … (reloaded)`. The CLI's load→save window is
+  milliseconds and stays unguarded.
 - **Frames are 0-based everywhere** (`f0` = first frame; timecode `:FF`
   matches notices). A file/timeline of `dur` spans `[0, dur)`; the last
   representable position is `dur - 1/fps` — clamp seeks there.
