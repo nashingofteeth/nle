@@ -877,8 +877,9 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
 }
 
 fn cmd_edl(project_path: &Path, track: usize) -> Result<()> {
+    // 1-based, and 0 is not a track number (it used to mean "track 1").
+    let ti = cli_index(track, "--track").map_err(anyhow::Error::msg)?;
     let project = Project::load(project_path)?;
-    let ti = track.saturating_sub(1);
     if project.timeline.track(ti).is_none() {
         bail!("no track #{track}");
     }
@@ -965,7 +966,8 @@ fn cmd_add(
 ) -> Result<()> {
     let mut project = Project::load(project_path)?;
     // `--track` is 1-based (matching the `v1`/`a1` labels); 0 internally.
-    let ti = track.saturating_sub(1);
+    // 0 is not a track number — it used to silently mean "track 1".
+    let ti = cli_index(track, "--track").map_err(anyhow::Error::msg)?;
     if ti >= project.timeline.tracks.len() {
         bail!("no track #{track}");
     }
@@ -2444,6 +2446,25 @@ mod tests {
 
     /// A CLI edit records history — `nle undo` undoes it, and the
     /// playhead attribution comes back with the entry.
+    /// Track numbers are 1-based everywhere; `0` is not a track (it used
+    /// to silently mean "track 1" in `add` and `edl`).
+    #[test]
+    fn track_numbers_are_one_based() {
+        let dir = std::env::temp_dir().join(format!("nle-track0-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.json");
+        Project::new().save(&path).unwrap();
+
+        let err = cmd_edl(&path, 0).unwrap_err().to_string();
+        assert!(err.contains("1-based"), "{err}");
+        let err = cmd_add(&path, Path::new("nope.mp4"), 0, None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("1-based"), "{err}");
+        // …and the valid path still works.
+        assert!(cmd_edl(&path, 1).is_err(), "an empty timeline has no EDL");
+    }
+
     /// `nle seek` stores a snapped, clamped playhead — the TUI opens there.
     #[test]
     fn seek_stores_a_clamped_playhead() {
