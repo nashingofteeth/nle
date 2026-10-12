@@ -1487,6 +1487,7 @@ fn import_edl_work(
     };
 
     let mut imported = 0usize;
+    let mut notes: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(media_dir)
         .with_context(|| format!("reading media dir {}", media_dir.display()))?
     {
@@ -1497,8 +1498,13 @@ fn import_edl_work(
             .map(|e| MEDIA_EXTS.contains(&e.to_lowercase().as_str()))
             .unwrap_or(false);
         if path.is_file() && is_media {
-            add(&mut project, &path)?;
-            imported += 1;
+            // A directory scan is a *candidate* list: one unreadable file
+            // (a partial copy, a stray text file with a media extension)
+            // must not sink the whole import — warn and keep looking.
+            match add(&mut project, &path) {
+                Ok(_) => imported += 1,
+                Err(e) => notes.push(format!("warning: skipping {} — {e}", path.display())),
+            }
         }
     }
     if imported == 0 {
@@ -1544,19 +1550,22 @@ fn import_edl_work(
     project.timeline = timeline;
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
-    Ok(CommandReport::new(format!(
+    let mut report = CommandReport::new(format!(
         "✓ {} — {} event(s) → {} track(s), {} asset(s)",
         project_path.display(),
         doc.events.len(),
         project.timeline.tracks.len(),
         project.media.len()
-    )))
+    ));
+    report.warnings = notes;
+    Ok(report)
 }
 
 /// Probe every media file in `dir` into the pool; returns how many files were
 /// seen (whether or not they were already pooled).
-fn pool_media_dir(project: &mut Project, dir: &Path) -> Result<usize> {
+fn pool_media_dir(project: &mut Project, dir: &Path) -> Result<(usize, Vec<String>)> {
     let mut seen = 0usize;
+    let mut notes = Vec::new();
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("reading media dir {}", dir.display()))?
     {
@@ -1566,18 +1575,28 @@ fn pool_media_dir(project: &mut Project, dir: &Path) -> Result<usize> {
             .and_then(|e| e.to_str())
             .map(|e| MEDIA_EXTS.contains(&e.to_lowercase().as_str()))
             .unwrap_or(false);
-        if path.is_file() && is_media {
-            let canonical = path
-                .canonicalize()
-                .with_context(|| format!("{} not found", path.display()))?;
-            if project.asset_by_path(&canonical).is_none() {
-                let report = probe(&canonical)?;
-                project.add_asset(canonical, report);
-            }
-            seen += 1;
+        if !path.is_file() || !is_media {
+            continue;
         }
+        // A candidate list, not a promise: skip what can't be read.
+        let Ok(canonical) = path.canonicalize() else {
+            notes.push(format!("warning: skipping {} — not found", path.display()));
+            continue;
+        };
+        if project.asset_by_path(&canonical).is_none() {
+            match probe(&canonical) {
+                Ok(report) => {
+                    project.add_asset(canonical, report);
+                }
+                Err(e) => {
+                    notes.push(format!("warning: skipping {} — {e}", path.display()));
+                    continue;
+                }
+            }
+        }
+        seen += 1;
     }
-    Ok(seen)
+    Ok((seen, notes))
 }
 
 /// Locate a clip's media: an explicit `--remap OLD=NEW`, then the path
@@ -1649,8 +1668,10 @@ fn import_otio_work(
     let doc = otio::parse(&text).with_context(|| format!("parsing {}", otio_path.display()))?;
 
     let mut project = Project::new();
+    let mut scan_notes = Vec::new();
     if let Some(dir) = media_dir {
-        pool_media_dir(&mut project, dir)?;
+        let (_, notes) = pool_media_dir(&mut project, dir)?;
+        scan_notes = notes;
     }
 
     let remap: HashMap<String, PathBuf> = remaps
@@ -1711,6 +1732,7 @@ fn import_otio_work(
     save_and_reset_history(&project, project_path)?;
 
     let mut report = CommandReport::new(String::new());
+    report.warnings = scan_notes;
     for w in doc.warnings.iter().chain(clamp_notes.iter()) {
         report.warn(format!("warning: {w}"));
     }

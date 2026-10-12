@@ -98,6 +98,16 @@ for t in 1 3.5; do
   printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
 done
 rm -f pixel.raw
+# A directory scan is a candidate list: one unreadable file must not sink it.
+printf 'not media' > junk.mp4
+rm -f edl-junk.json edl-junk.history.json
+out=$($N --project edl-junk.json import-edl demo.edl --media . --force 2>&1)
+rm -f junk.mp4
+if printf '%s' "$out" | grep -q "skipping ./junk.mp4" && printf '%s' "$out" | grep -q "✓"; then
+  echo "  ✓ an unreadable file in --media is skipped, not fatal"
+else
+  echo "  ✗ a bad file in --media sank the import"; exit 1
+fi
 
 echo "== detect-edits: reverse-engineer a rendered file =="
 # A known 4-shot file: red 0–1, blue 1–2, black 2–3, green 3–4, with an
