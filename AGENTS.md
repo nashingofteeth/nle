@@ -111,12 +111,17 @@ plainly.
   the fix is "rebuild it" (`./demo.sh`). Bump the format version; don't
   write migration code.
 - **Undo sidecar rule (revised).** Writes that go through `History`
-  (`run_action`, `history.remove_asset`) **record**; writes that don't (pool
-  *imports*, `init`, `track rm`, `import-*`, `detect-edits`, `purge`)
+  (`run_action`, `history.remove_asset`, `history.edit_tracks`) **record**;
+  writes that don't (pool *imports*, `init`, `import-*`, `detect-edits`)
   re-baseline it via `save_and_reset_history`, or the next undo refuses with
   "history entry does not apply". `nle add` resets only when it auto-imports a
-  new file. Both stacks persist (`HISTORY_VERSION` 9) — a redo stack that
+  new file. Both stacks persist (`HISTORY_VERSION` 10) — a redo stack that
   died with the session made `nle redo` permanently empty.
+- **Track edits are whole-list changes.** `Change::Tracks` snapshots the track
+  list before/after for add/mute/rm/purge (segment snapshots can't express
+  them), verified by exact equality like `Change::Assets` — a track set changed
+  outside the stack refuses rather than mis-restoring. `History::edit_tracks`
+  rolls back a refused edit.
 - **The yank register is shared state.** `nle.clipboard.json` sits next to
   the project; `yy`/`nle yank` write it and `p`/`nle paste` read it, so a
   shell and the TUI hand segments back and forth. Convenience, never
