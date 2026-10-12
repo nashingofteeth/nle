@@ -285,7 +285,11 @@ pub fn run_action(
             apply(project, history, batch, from)
         }
         Action::SetSpeed { track, clip, rate } => {
-            let batch = edit::set_speed_on(project, *track, *clip, *rate)?;
+            // Clip ids are unique across tracks, so a clip-addressed action
+            // finds its own track — same as delete/yank/extend (`--track` is
+            // the default for position-addressed targets, not a constraint).
+            let ti = resolve_track(project, *track, Target::Clip(*clip))?;
+            let batch = edit::set_speed_on(project, ti, *clip, *rate)?;
             apply(project, history, batch, from)
         }
         Action::Extend {
@@ -1653,6 +1657,60 @@ mod tests {
         assert!(
             matches!(resolved, Segment::Clip(Clip { asset, .. }) if asset == id),
             "the asset id is remapped to this pool's: {resolved:?}"
+        );
+    }
+
+    /// Clip ids are unique across tracks: a clip-addressed action finds its
+    /// own track, so `nle speed ID` needs no `--track` (same as
+    /// delete/yank/extend).
+    #[test]
+    fn a_clip_addressed_action_finds_its_own_track() {
+        let mut p = fixture();
+        let a = p.media[0].id;
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        let clip = Segment::Clip(Clip {
+            id: 0,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(2),
+            speed: Seconds::from_integer(1),
+        });
+        let mut h = History::default();
+        let mut reg = None;
+        run_action(
+            &mut p,
+            &mut h,
+            &mut reg,
+            &Action::Paste {
+                track: ai,
+                at: 0.0,
+                ripple: true,
+                segment: Some(clip),
+            },
+            0.0,
+        )
+        .unwrap();
+        let id = match &p.timeline.track(ai).unwrap().segments[0] {
+            Segment::Clip(c) => c.id,
+            other => panic!("expected a clip, got {other:?}"),
+        };
+        // The clip lives on the audio track; `track: 0` must still find it.
+        run_action(
+            &mut p,
+            &mut h,
+            &mut reg,
+            &Action::SetSpeed {
+                track: 0,
+                clip: id,
+                rate: Seconds::from_integer(2),
+            },
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            p.timeline.track(ai).unwrap().segments[0].duration(),
+            Seconds::from_integer(1),
+            "the audio-track clip was retimed"
         );
     }
 
