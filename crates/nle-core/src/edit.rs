@@ -952,6 +952,11 @@ pub fn set_speed_on(
     // spans, so this one must too.
     let new_dur = (c.asset_out - c.asset_in) / speed;
     at_least_a_frame(project, &new_dur)?;
+    // A slow-down lengthens the track: keep it inside the timeline limit
+    // (the validate backstop would call it "corrupt", which it isn't).
+    if tr.end() - c.duration() + new_dur > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
     let before = Segment::Clip(c.clone());
     let after = Segment::Clip(Clip { speed, ..c });
     Ok(Batch {
@@ -5216,8 +5221,21 @@ mod tests {
             }));
         assert!(matches!(
             p.validate(),
-            Err(ProjectError::Timeline(TimelineError::Corrupt(_)))
+            Err(ProjectError::Timeline(TimelineError::TooLong { .. }))
         ));
+    }
+
+    #[test]
+    fn a_slow_down_past_the_timeline_limit_is_refused() {
+        let p = fixture(); // clip #1 is 2 s of source
+        // 2 s at 0.000001× is ~23 days: past the limit, and it used to be
+        // reported as "timeline corrupt" after the fact.
+        assert!(matches!(
+            set_speed(&p, 1, Seconds::new(1, 1_000_000)),
+            Err(EditError::TooLong(_))
+        ));
+        // A sane slow-down still works.
+        assert!(set_speed(&p, 1, Seconds::new(1, 10)).is_ok());
     }
 
     #[test]

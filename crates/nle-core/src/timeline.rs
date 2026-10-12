@@ -21,6 +21,8 @@ pub enum TimelineError {
     SegmentNotFound(usize),
     #[error("timeline corrupt: {0}")]
     Corrupt(String),
+    #[error("a track is {len} s long — the timeline limit is {limit} s")]
+    TooLong { len: String, limit: i64 },
 }
 
 /// The longest timeline we accept, in seconds — a day. Not a workflow
@@ -264,10 +266,12 @@ impl Timeline {
             // that merely grew too long is caught here too.
             let end = track.end();
             if end < Seconds::from_integer(0) || end > limit {
-                return Err(TimelineError::Corrupt(format!(
-                    "track {ti} length {} is out of range (limit {MAX_TIMELINE_SECONDS} s)",
-                    format_seconds(&end)
-                )));
+                // Not "corrupt": an edit simply asked for too much. (A
+                // wrapped-negative end lands here too.)
+                return Err(TimelineError::TooLong {
+                    len: format_seconds(&end),
+                    limit: MAX_TIMELINE_SECONDS,
+                });
             }
             for (si, seg) in track.segments.iter().enumerate() {
                 let bad =
