@@ -10,3 +10,5 @@ cargo test                                   # full workspace, must be green
 cargo build --release
 cargo install --path crates/nle-cli
 ./demo.sh                                    # end-to-end pixel checks
+./scripts/expect.sh                          # expected behaviours, asserted
+./scripts/fuzz.sh                            # hostile input: no panic, no corruption
