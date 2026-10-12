@@ -123,9 +123,15 @@ plainly.
   critical: a missing or version-skewed register reads as empty.
 - **The playhead is stored in the project** (`Project.playhead`, v5) — the
   shared cursor `nle seek`/`:seek` move. Snapped to the frame grid and
-  clamped into the timeline; the TUI opens there, re-saves it in
-  `persist_and_refresh`, and adopts the file's value on reload. Session
-  state: no history entry, and edits still take explicit `--at`.
+  clamped into the timeline; the TUI opens there, adopts the file's value on
+  reload, and writes it back through one writer (`persist_playhead`): after
+  every edit, from `:seek`, and ~1 s after the transport stops moving (plus
+  on quit). Session state: no history entry, and edits still take explicit
+  `--at`.
+- **Compare the playhead in frames, not floats.** The live position and the
+  stored rational come from different computation paths and can differ in the
+  last ulp — a float diff re-triggers the transport flush forever
+  (`playhead_moved` compares `frame_of`).
 - **Frames are 0-based everywhere** (`f0` = first frame; timecode `:FF`
   matches notices). A file/timeline of `dur` spans `[0, dur)`; the last
   representable position is `dur - 1/fps` — clamp seeks there.

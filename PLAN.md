@@ -232,9 +232,10 @@ below.)
 
 - **The stored playhead** (`PROJECT_VERSION` 5): `nle seek T` / `:seek T` move
   a shared cursor — snapped to the frame grid, clamped into the timeline; the
-  TUI opens there and re-saves its position after every edit, and a reload
-  adopts the file's value. `nle show` reports `at N s`. Session state, not a
-  catalog action (no history entry; `--at` stays explicit).
+  TUI opens there, re-saves its position after every edit, and flushes it
+  ~1 s after the transport stops (plus on quit); a reload adopts the file's
+  value. `nle show` reports `at N s`. Session state, not a catalog action (no
+  history entry; `--at` stays explicit).
 
 **Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
 
