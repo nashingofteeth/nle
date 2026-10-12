@@ -18,7 +18,7 @@ use thiserror::Error;
 use crate::media::RawProbe;
 use crate::project::{Asset, Project, ProjectError};
 use crate::time::{Seconds, format_seconds};
-use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
+use crate::timeline::{Clip, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind};
 
 /// Deepest undo stack we keep (changes).
 pub const MAX_HISTORY: usize = 100;
@@ -46,6 +46,8 @@ pub enum EditError {
     NothingToTrim(String),
     #[error("result would be shorter than one frame")]
     TooShort,
+    #[error("that would make the timeline longer than {0} s")]
+    TooLong(i64),
     #[error("speed must be positive (got {0})")]
     BadSpeed(String),
     #[error("cannot extend clip #{id} — no source after {out} (asset ends at {duration})")]
@@ -733,7 +735,15 @@ fn track_at(project: &Project, ti: usize) -> Result<&Track, EditError> {
 
 /// Snap a float playhead to the nearest frame of the project's fps.
 /// Without a known fps (empty project), whole seconds are the grid.
+/// Snap a position to the frame grid. Positions beyond the timeline limit
+/// are refused *here* — before any duration arithmetic can overflow (a
+/// `--at 1e18` used to saturate to `i64::MAX` frames and wrap the track's
+/// length negative).
 fn snap(project: &Project, t: f64) -> Result<Seconds, EditError> {
+    let limit = MAX_TIMELINE_SECONDS as f64;
+    if !t.is_finite() || t.abs() > limit {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
     match project.fps {
         Some(fps) => {
             let n = (t * secs_f64(&fps)).round() as i64;
@@ -2108,9 +2118,19 @@ pub fn insert_gap_on(
     }
     let t = snap(project, playhead)?;
     let fps = project.fps.ok_or(EditError::NoFps)?;
+    // Bound the length *before* converting frames to a duration: `frames`
+    // near i64::MAX would overflow the conversion itself.
+    let limit = Seconds::from_integer(MAX_TIMELINE_SECONDS);
+    let max_frames = (limit * fps).to_integer();
+    if frames > max_frames {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
     let gap = Segment::Gap(Gap {
         duration: Seconds::new(frames, 1) / fps,
     });
+    if t + gap.duration() > limit {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
     let ti = track;
     let track = track_at(project, ti)?;
 
@@ -5149,6 +5169,41 @@ mod tests {
                 duration: Seconds::from_integer(2)
             })
         );
+    }
+
+    #[test]
+    fn absurd_lengths_are_refused_not_wrapped() {
+        let p = fixture();
+        // A gap of i64::MAX frames overflowed the duration sum and wrapped
+        // the track's length negative (and would panic in a debug build).
+        assert!(matches!(
+            insert_gap(&p, 1.0, i64::MAX),
+            Err(EditError::TooLong(_))
+        ));
+        // A position beyond the limit never reaches the arithmetic at all.
+        assert!(matches!(
+            insert_gap(&p, 1e18, 30),
+            Err(EditError::TooLong(_))
+        ));
+        assert!(matches!(split(&p, 1e18), Err(EditError::TooLong(_))));
+        // The limit is the limit: a long-but-sane gap still works.
+        assert!(insert_gap(&p, 1.0, 30).is_ok());
+    }
+
+    #[test]
+    fn validate_refuses_a_track_longer_than_the_limit() {
+        let mut p = fixture();
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(Segment::Gap(Gap {
+                duration: Seconds::from_integer(MAX_TIMELINE_SECONDS + 1),
+            }));
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::Timeline(TimelineError::Corrupt(_)))
+        ));
     }
 
     #[test]

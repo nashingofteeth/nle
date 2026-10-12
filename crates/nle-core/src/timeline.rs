@@ -23,6 +23,12 @@ pub enum TimelineError {
     Corrupt(String),
 }
 
+/// The longest timeline we accept, in seconds — a day. Not a workflow
+/// limit (nobody edits a day): it is the guard that keeps duration sums
+/// (i64 rationals) from overflowing, which wraps a track's length
+/// negative in release builds and panics in debug ones.
+pub const MAX_TIMELINE_SECONDS: i64 = 24 * 60 * 60;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrackKind {
     Video,
@@ -252,7 +258,17 @@ impl Timeline {
         if self.video_tracks().next().is_none() {
             return Err(TimelineError::NoVideoTrack);
         }
+        let limit = Seconds::from_integer(MAX_TIMELINE_SECONDS);
         for (ti, track) in self.tracks.iter().enumerate() {
+            // A length that summed *past* the limit wrapped negative; one
+            // that merely grew too long is caught here too.
+            let end = track.end();
+            if end < Seconds::from_integer(0) || end > limit {
+                return Err(TimelineError::Corrupt(format!(
+                    "track {ti} length {} is out of range (limit {MAX_TIMELINE_SECONDS} s)",
+                    format_seconds(&end)
+                )));
+            }
             for (si, seg) in track.segments.iter().enumerate() {
                 let bad =
                     |what: &str| TimelineError::Corrupt(format!("track {ti} segment {si}: {what}"));
