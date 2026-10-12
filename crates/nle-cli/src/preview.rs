@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionSource};
+use nle_core::timeline::{Segment as TimelineSegment, Track};
 use nle_core::{Project, Seconds, format_seconds};
 use thiserror::Error;
 
@@ -32,6 +32,8 @@ pub enum PreviewError {
     NoFps,
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Proxy(#[from] crate::proxy::ProxyError),
 }
 
 /// Quote an EDL value with the `%len%` scheme. Allowed (and required) when
@@ -76,22 +78,18 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
 
     let mut segs = Vec::new();
     for seg in &track.segments {
+        // Effects and transitions can't be expressed by `edl://`: play the
+        // rendered proxy instead of the raw source.
+        if crate::proxy::needs_proxy(seg) {
+            let p = crate::proxy::proxy_for(project, seg)?;
+            segs.push(Segment::Clip {
+                path: p,
+                start: Seconds::from_integer(0),
+                length: seg.duration(),
+            });
+            continue;
+        }
         match seg {
-            // A transition isn't media: the monitor shows its outgoing side
-            // until the proxy cache lands (M5).
-            TimelineSegment::Transition(tr) => match &tr.a {
-                TransitionSource::Clip { asset, src_in, .. } => {
-                    let asset = project
-                        .asset(*asset)
-                        .ok_or(PreviewError::MissingAsset(*asset))?;
-                    segs.push(Segment::Clip {
-                        path: asset.path.clone(),
-                        start: *src_in,
-                        length: tr.dur,
-                    });
-                }
-                TransitionSource::Black => segs.push(Segment::Gap { length: tr.dur }),
-            },
             TimelineSegment::Clip(c) => {
                 let asset = project
                     .asset(c.asset)
@@ -103,6 +101,8 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
                 });
             }
             TimelineSegment::Gap(g) => segs.push(Segment::Gap { length: g.duration }),
+            // `needs_proxy` covers transitions; keep a safe fallback.
+            TimelineSegment::Transition(tr) => segs.push(Segment::Gap { length: tr.dur }),
         }
     }
     let tail = total - track.end();
@@ -450,7 +450,7 @@ mod tests {
     use nle_core::media::{RawFormat, RawProbe, RawStream};
     use nle_core::timeline::{
         Clip as TimelineClip, Gap as TimelineGap, Segment as TimelineSegment, Transition,
-        TransitionKind,
+        TransitionKind, TransitionSource,
     };
 
     fn seg_clip(id: u32, ain: i64, aout: i64) -> TimelineSegment {

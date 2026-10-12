@@ -11,6 +11,10 @@ mod mpv;
 // compiled but unused, so allow the dead code rather than gate each one.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
 mod preview;
+// The proxy cache renders what `edl://` can't (effects, transitions); the
+// preview uses it, so it shares preview's fate outside the TUI.
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+mod proxy;
 #[cfg(feature = "tui")]
 mod tui;
 
