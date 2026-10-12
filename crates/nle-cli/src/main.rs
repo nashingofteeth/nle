@@ -2318,6 +2318,18 @@ fn cmd_trim(
     if duration <= Seconds::from_integer(0) {
         bail!("--out ({out_point}) must be later than --in ({in_point})");
     }
+    // ffmpeg happily cuts past the end and hands back a shorter file; say so
+    // instead of silently writing something else than what was asked for.
+    let report = probe(input).with_context(|| format!("probing {}", input.display()))?;
+    if let Some(file_dur) = report.duration()
+        && end > file_dur
+    {
+        bail!(
+            "--out ({}) is beyond the file's duration ({})",
+            format_seconds(&end),
+            format_seconds(&file_dur)
+        );
+    }
 
     let spec = TrimSpec {
         input: input.to_path_buf(),
