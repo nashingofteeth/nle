@@ -488,6 +488,16 @@ fn cli_time(s: &str) -> Result<f64, String> {
         .map_err(|e| format!("invalid time {s:?} ({e})"))
 }
 
+/// The user-facing text for a model error. Track numbers are 1-based in
+/// the CLI and the TUI (`v1`, `a1`), so the model's 0-based index is
+/// translated here — one place, so the two front-ends agree.
+pub(crate) fn edit_message(e: &edit::EditError) -> String {
+    match e {
+        edit::EditError::TrackNotFound(n) => format!("no track #{}", n + 1),
+        other => other.to_string(),
+    }
+}
+
 /// A 1-based CLI index (`--track N`, `nle track rm N`) → 0-based model
 /// index. Track numbers are 1-based everywhere, matching `v1`/`a1`.
 fn cli_index(n: usize, what: &str) -> Result<usize, String> {
@@ -688,7 +698,8 @@ fn run_cli_action(project_path: &Path, action: &Action) -> Result<()> {
         },
         _ => 0.0,
     };
-    let outcome = run_action(&mut project, &mut history, &mut register, action, from)?;
+    let outcome = run_action(&mut project, &mut history, &mut register, action, from)
+        .map_err(|e| anyhow::Error::msg(edit_message(&e)))?;
     project.save(project_path)?;
     history.save(&edit::History::sidecar_path(project_path))?;
     save_register(project_path, register.as_ref())?;
@@ -2446,6 +2457,25 @@ mod tests {
 
     /// A CLI edit records history — `nle undo` undoes it, and the
     /// playhead attribution comes back with the entry.
+    /// The model counts tracks from 0; the message must speak the number
+    /// you typed (1-based, like `v1`/`a1`).
+    #[test]
+    fn track_errors_report_the_number_you_typed() {
+        let dir = std::env::temp_dir().join(format!("nle-tracknum-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.json");
+        Project::new().save(&path).unwrap();
+
+        let err = run_cli_action(&path, &Action::TrackMute { track: 4 })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("#5"), "mute track 5 → {err}");
+        let err = run_cli_action(&path, &Action::TrackRm { track: 9 })
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("#10"), "rm track 10 → {err}");
+    }
+
     /// Track numbers are 1-based everywhere; `0` is not a track (it used
     /// to silently mean "track 1" in `add` and `edl`).
     #[test]

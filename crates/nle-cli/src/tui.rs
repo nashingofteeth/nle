@@ -2254,7 +2254,7 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
             true
         }
         Err(e) => {
-            app.set_message(&e.to_string());
+            app.set_message(&crate::edit_message(&e));
             false
         }
     }
