@@ -40,7 +40,9 @@ pub enum EditError {
     SegmentNotFound(usize),
     #[error("playhead is not in a gap")]
     NoGap,
-    #[error("no segment under the playhead (empty timeline?)")]
+    #[error("no clip at that position — it is in a gap")]
+    NoClip,
+    #[error("no segment at that position — the timeline is empty or the position is outside it")]
     NoSegment,
     #[error("nothing to trim at {0} — the playhead is on a segment edge")]
     NothingToTrim(String),
@@ -806,7 +808,7 @@ fn clip_at(
     let si = track.index_at(*t).ok_or(EditError::NoSegment)?;
     match &track.segments[si] {
         Segment::Clip(c) => Ok((ti, si, c.clone())),
-        Segment::Gap(_) => Err(EditError::NoGap),
+        Segment::Gap(_) => Err(EditError::NoClip),
     }
 }
 
@@ -5216,6 +5218,17 @@ mod tests {
             p.validate(),
             Err(ProjectError::Timeline(TimelineError::Corrupt(_)))
         ));
+    }
+
+    #[test]
+    fn error_messages_name_the_actual_problem() {
+        let p = fixture(); // [Clip 0..2] [Gap 2..3] [Clip 3..5]
+        // Splitting a gap is impossible — and the message must not claim
+        // the playhead is "not in a gap" when it is.
+        assert!(matches!(split(&p, 2.5), Err(EditError::NoClip)));
+        // A position past the end is not an "empty timeline".
+        let msg = split(&p, 99.0).unwrap_err().to_string();
+        assert!(msg.contains("outside it"), "{msg}");
     }
 
     #[test]
