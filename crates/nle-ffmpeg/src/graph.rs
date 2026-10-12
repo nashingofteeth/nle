@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nle_core::timeline::{Segment, TrackKind};
+use nle_core::timeline::{Segment, TrackKind, TransitionKind, TransitionSource};
 use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -328,7 +328,89 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
 
         for seg in &track.segments {
             match seg {
-                Segment::Transition(_) => return Err(CompileError::Transition),
+                // A transition: two source sides, each retimed to exactly
+                // `dur`, crossfaded into one video output and one audio.
+                Segment::Transition(tr) => {
+                    let dur = tr.dur;
+                    let dur_s = format_seconds(&dur);
+                    let (mut vl, mut al) = (Vec::new(), Vec::new());
+                    for (side, tag) in [(&tr.a, "a"), (&tr.b, "b")] {
+                        let v = format!("t{ti}_{idx}_v{tag}");
+                        let a = format!("t{ti}_{idx}_a{tag}");
+                        match side {
+                            TransitionSource::Black => {
+                                graph.push_str(&format!(
+                                    "color=c=black:s={w}x{h}:r={fps_s}:d={dur_s},\
+                                     format=yuva420p[{v}];\n"
+                                ));
+                                graph.push_str(&format!(
+                                    "anullsrc=r={rate}:cl={layout},atrim=duration={dur_s},\
+                                     asetpts=PTS-STARTPTS[{a}];\n",
+                                    rate = AUDIO_RATE,
+                                    layout = AUDIO_LAYOUT
+                                ));
+                            }
+                            TransitionSource::Clip {
+                                asset: asset_id,
+                                src_in,
+                                src_out,
+                            } => {
+                                let asset = project
+                                    .asset(*asset_id)
+                                    .ok_or(CompileError::MissingAsset(*asset_id))?;
+                                let input = *input_of.entry(*asset_id).or_insert_with(|| {
+                                    inputs.push(asset.path.clone());
+                                    inputs.len() - 1
+                                });
+                                let src_start = format_seconds(src_in);
+                                let src_dur = format_seconds(&(*src_out - *src_in));
+                                // The span renders into `dur`, so its rate is
+                                // source-per-timeline = src_dur / dur.
+                                let speed = (*src_out - *src_in) / dur;
+                                graph.push_str(&format!(
+                                    "[{input}:v]trim=start={src_start}:duration={src_dur},\
+                                     {setpts},scale={w}:{h},setsar=1,fps={fps_s},\
+                                     format=yuva420p[{v}];\n",
+                                    setpts = video_setpts(&speed)
+                                ));
+                                if asset.probe.has_audio() {
+                                    graph.push_str(&format!(
+                                        "[{input}:a]atrim=start={src_start}:duration={src_dur},\
+                                         asetpts=PTS-STARTPTS{atempo},aformat=sample_rates={rate}:\
+                                         channel_layouts={layout}[{a}];\n",
+                                        atempo = audio_atempo(&speed),
+                                        rate = AUDIO_RATE,
+                                        layout = AUDIO_LAYOUT
+                                    ));
+                                } else {
+                                    graph.push_str(&format!(
+                                        "anullsrc=r={rate}:cl={layout},atrim=duration={dur_s},\
+                                         asetpts=PTS-STARTPTS[{a}];\n",
+                                        rate = AUDIO_RATE,
+                                        layout = AUDIO_LAYOUT
+                                    ));
+                                }
+                            }
+                        }
+                        vl.push(v);
+                        al.push(a);
+                    }
+                    let xfade = match tr.kind {
+                        TransitionKind::Dissolve => "fade",
+                        TransitionKind::FadeBlack => "fadeblack",
+                    };
+                    graph.push_str(&format!(
+                        "[{}][{}]xfade=transition={xfade}:duration={dur_s}:offset=0,\
+                         format=yuva420p[v{ti}_{idx}];\n",
+                        vl[0], vl[1]
+                    ));
+                    graph.push_str(&format!(
+                        "[{}][{}]acrossfade=d={dur_s}[a{ti}_{idx}];\n",
+                        al[0], al[1]
+                    ));
+                    v_labels.push(format!("[v{ti}_{idx}]"));
+                    a_labels.push(format!("[a{ti}_{idx}]"));
+                }
                 Segment::Clip(c) => {
                     let asset = project
                         .asset(c.asset)
@@ -553,7 +635,7 @@ mod tests {
     use super::*;
     use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
-    use nle_core::timeline::{Clip, Gap};
+    use nle_core::timeline::{Clip, Gap, Transition, TransitionKind, TransitionSource};
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -864,5 +946,47 @@ mod tests {
         // so there's nothing to mix.
         assert!(!g.contains("amix"), "{g}");
         assert!(g.contains("[aout]"), "{g}");
+    }
+
+    #[test]
+    fn transition_composes_with_xfade_and_acrossfade() {
+        let mut p = project_with_two_clips();
+        let a = p.media[0].id;
+        // [clip1 src 0..2] [1 s dissolve] [clip2 src 1..3] — the two sides
+        // hold the trimmed-away source spans (each clip gave up 1 s).
+        let clip = |id, in_, out| {
+            Segment::Clip(Clip {
+                id,
+                asset: a,
+                asset_in: Seconds::from_integer(in_),
+                asset_out: Seconds::from_integer(out),
+                speed: Seconds::from_integer(1),
+            })
+        };
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            clip(1, 0, 2),
+            Segment::Transition(Transition {
+                id: 3,
+                dur: Seconds::from_integer(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: a,
+                    src_in: Seconds::from_integer(2),
+                    src_out: Seconds::from_integer(3),
+                },
+                b: TransitionSource::Clip {
+                    asset: a,
+                    src_in: Seconds::from_integer(0),
+                    src_out: Seconds::from_integer(1),
+                },
+            }),
+            clip(2, 1, 3),
+        ];
+        let plan = compile_export(&p).unwrap();
+        let g = &plan.graph;
+        // Two sides, each retimed to 1 s, crossfaded into one output.
+        assert!(g.contains("xfade=transition=fade:"), "{g}");
+        assert!(g.contains("acrossfade=d="), "{g}");
+        assert_eq!(plan.duration, Seconds::from_integer(5), "clip|trans|clip");
     }
 }
