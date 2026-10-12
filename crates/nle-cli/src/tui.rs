@@ -1096,30 +1096,39 @@ fn import_command(app: &mut App, cmd: &str) -> String {
     if rest.is_empty() {
         return "usage: :import PATH [PATH…]".to_string();
     }
+    let playhead = frame_of(app.project.fps.as_ref(), app.playhead);
     let mut new = 0usize;
     let mut existing = 0usize;
     let mut failed: Vec<String> = Vec::new();
     for arg in rest.split_whitespace() {
         match PathBuf::from(arg).canonicalize() {
-            Ok(path) => match nle_ffmpeg::probe(&path) {
-                Ok(report) => {
-                    if app.project.add_asset(path, report).1 {
-                        new += 1;
-                    } else {
-                        existing += 1;
-                    }
+            Ok(path) => {
+                if app.project.asset_by_path(&path).is_some() {
+                    existing += 1;
+                    continue;
                 }
-                Err(e) => failed.push(format!("{arg}: {e}")),
-            },
+                match nle_ffmpeg::probe(&path) {
+                    Ok(report) => {
+                        app.history
+                            .add_asset(&mut app.project, path, report, playhead);
+                        new += 1;
+                    }
+                    Err(e) => failed.push(format!("{arg}: {e}")),
+                }
+            }
             Err(_) => failed.push(format!("{arg}: not found")),
         }
     }
     if new > 0 {
-        app.history = History::default();
-        let _ = std::fs::remove_file(History::sidecar_path(&app.path));
-        if app.project.save(&app.path).is_ok() {
-            app.note_seen();
+        // Recorded pool additions (`u` removes them again). The timeline is
+        // untouched, so no preview rebuild is needed.
+        if let Err(e) = app.project.save(&app.path) {
+            return format!("imported {new} — save failed: {e}");
         }
+        if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
+            return format!("imported {new} — history save failed: {e}");
+        }
+        app.note_seen();
     }
     let mut msg = format!("imported {new} new, {existing} already pooled");
     if !failed.is_empty() {
@@ -1204,22 +1213,26 @@ fn add_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option
         Ok(()) => {}
         Err(e) => return Some(e),
     }
+    let playhead = frame_of(app.project.fps.as_ref(), app.playhead);
     let (scratch, imported) = match crate::stage_clip(
         &mut app.project,
+        &mut app.history,
         &file,
         in_point.as_deref(),
         out_point.as_deref(),
+        playhead,
     ) {
         Ok(v) => v,
         Err(e) => return Some(format!("add failed: {e}")),
     };
     if imported {
-        // A pool write re-baselines the undo sidecar (same rule as
-        // `:import`), and lands on disk before the edit does.
-        app.history = History::default();
-        let _ = std::fs::remove_file(History::sidecar_path(&app.path));
+        // A recorded pool addition lands on disk before the edit does, so
+        // undo peels the insert and then the import.
         if let Err(e) = app.project.save(&app.path) {
             return Some(format!("save failed: {e}"));
+        }
+        if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
+            return Some(format!("history save failed: {e}"));
         }
         app.note_seen();
     }

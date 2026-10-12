@@ -888,6 +888,10 @@ fn save_and_reset_history(project: &Project, path: &Path) -> Result<()> {
 
 fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
     let mut project = Project::load(project_path)?;
+    let mut history =
+        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
+    let playhead = frame_of(project.fps.as_ref(), secs_f64(&project.playhead));
+    let mut added = 0usize;
     for file in files {
         let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
         let canonical = file
@@ -897,7 +901,9 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
             println!("· {} already imported (asset #{})", file.display(), a.id);
             continue;
         }
-        let (id, _) = project.add_asset(canonical, report);
+        // Recorded: `nle undo` removes the asset again.
+        let (id, _) = history.add_asset(&mut project, canonical, report, playhead);
+        added += 1;
         let asset = project.asset(id).context("asset vanished")?;
         println!(
             "✓ asset #{id}  {}  {}",
@@ -905,7 +911,10 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
             asset_summary(asset)
         );
     }
-    save_and_reset_history(&project, project_path)?;
+    if added > 0 {
+        project.save(project_path)?;
+        history.save(&edit::History::sidecar_path(project_path))?;
+    }
     let clip_count = |p: &Project| {
         p.timeline
             .tracks
@@ -937,7 +946,17 @@ fn cmd_add(
     if ti >= project.timeline.tracks.len() {
         bail!("no track #{track}");
     }
-    let (scratch, imported) = stage_clip(&mut project, file, in_point, out_point)?;
+    let mut history =
+        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
+    let playhead = frame_of(project.fps.as_ref(), secs_f64(&project.playhead));
+    let (scratch, imported) = stage_clip(
+        &mut project,
+        &mut history,
+        file,
+        in_point,
+        out_point,
+        playhead,
+    )?;
     if imported && let Segment::Clip(c) = &scratch {
         println!("· auto-imported as asset #{}", c.asset);
     }
@@ -951,15 +970,13 @@ fn cmd_add(
             .map(|t| t.end())
             .unwrap_or_else(|| Seconds::from_integer(0)),
     };
-    // The pool/settings writes land first: a fresh import re-baselines the
-    // undo sidecar (an out-of-band pool write), while an add of an
-    // already-pooled file records history like any other edit. The insert
-    // itself goes through the catalog — the same `Paste` the TUI's pool
-    // insert runs — so it is undoable.
+    // The pool/settings writes land first, with their history: a recorded
+    // pool addition (undo removes the asset again) plus the first-clip
+    // settings. The insert itself goes through the catalog below — the
+    // same `Paste` the TUI's pool insert runs.
+    project.save(project_path)?;
     if imported {
-        save_and_reset_history(&project, project_path)?;
-    } else {
-        project.save(project_path)?;
+        history.save(&edit::History::sidecar_path(project_path))?;
     }
     run_cli_action(
         project_path,
@@ -974,24 +991,27 @@ fn cmd_add(
 
 /// Probe `file` into the pool if it is new, validate the source range,
 /// and stage the clip to insert — shared by `nle add` and the TUI's
-/// `:add`. Returns the clip and whether the pool was written (an
-/// out-of-band pool write re-baselines the undo sidecar). The first clip
-/// defines the sequence settings, like a real NLE.
+/// `:add`. Returns the clip and whether the pool was written (a recorded
+/// pool addition, so it is undoable). The first clip defines the sequence
+/// settings, like a real NLE.
 fn stage_clip(
     project: &mut Project,
+    history: &mut edit::History,
     file: &Path,
     in_point: Option<&str>,
     out_point: Option<&str>,
+    playhead: i64,
 ) -> Result<(Segment, bool)> {
     let canonical = file
         .canonicalize()
         .with_context(|| format!("{} not found", file.display()))?;
 
-    let (asset_id, imported) = match project.asset_by_path(&canonical) {
-        Some(a) => (a.id, false),
+    let existing = project.asset_by_path(&canonical).map(|a| a.id);
+    let (asset_id, imported) = match existing {
+        Some(id) => (id, false),
         None => {
             let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
-            let (id, _) = project.add_asset(canonical, report);
+            let (id, _) = history.add_asset(project, canonical, report, playhead);
             (id, true)
         }
     };

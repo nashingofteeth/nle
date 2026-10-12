@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
+use crate::media::RawProbe;
 use crate::project::{Asset, Project, ProjectError};
 use crate::time::{Seconds, format_seconds};
 use crate::timeline::{Clip, Gap, Segment, TimelineError, Track, TrackKind};
@@ -303,6 +304,29 @@ impl History {
             playhead,
         }));
         Ok(desc)
+    }
+
+    /// Add `path` to the pool and record it, so undo removes it again —
+    /// refused, loudly, while a clip still uses it (`validate` catches
+    /// that). Returns the asset id and the description.
+    pub fn add_asset(
+        &mut self,
+        project: &mut Project,
+        path: PathBuf,
+        probe: RawProbe,
+        playhead: i64,
+    ) -> (u32, String) {
+        let before = project.media.clone();
+        let (id, _) = project.add_asset(path, probe);
+        let after = project.media.clone();
+        let desc = format!("import asset #{id}");
+        self.push_change(Change::Assets(AssetChange {
+            before,
+            after,
+            desc: desc.clone(),
+            playhead,
+        }));
+        (id, desc)
     }
 
     /// Push onto `done`, clear redo, and enforce the depth cap.
@@ -4508,6 +4532,49 @@ mod tests {
 
     // An unused pooled asset can be removed and undone; the whole pool is
     // restored (same order/ids).
+    #[test]
+    fn asset_addition_is_undoable() {
+        let mut p = fixture();
+        let before = p.media.clone();
+
+        let mut h = History::default();
+        let (id, desc) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 42);
+        assert!(desc.contains(&format!("#{id}")), "{desc}");
+        assert!(p.asset(id).is_some(), "pooled");
+        assert_eq!(p.media.len(), before.len() + 1);
+
+        let outcome = h.undo(&mut p).unwrap();
+        assert_eq!(outcome.desc, desc, "undo names the same entry");
+        assert_eq!(outcome.playhead, 42);
+        assert!(p.asset(id).is_none(), "the import undoes");
+
+        h.redo(&mut p).unwrap();
+        assert!(p.asset(id).is_some(), "and redoes");
+    }
+
+    // Undoing an import that a clip now depends on refuses loudly (validate
+    // catches the dangling asset) rather than leaving a broken project.
+    #[test]
+    fn undoing_an_import_in_use_refuses() {
+        let mut p = fixture();
+        let mut h = History::default();
+        let (id, _) = h.add_asset(&mut p, "/media/extra.mp4".into(), probe_report("5"), 0);
+        // A clip of the new asset lands on the timeline — outside the stack,
+        // as if an out-of-band write put it there.
+        let clip = Segment::Clip(Clip::new(
+            99,
+            id,
+            Seconds::from_integer(0),
+            Seconds::from_integer(1),
+        ));
+        for op in &paste_ripple(&p, &clip, 0.0).unwrap().ops {
+            op.apply(&mut p).unwrap();
+        }
+        let err = h.undo(&mut p).unwrap_err();
+        assert!(matches!(err, EditError::Project(_)), "refused: {err}");
+        assert!(p.asset(id).is_some(), "the asset survived the refusal");
+    }
+
     #[test]
     fn asset_removal_is_undoable() {
         let mut p = fixture();
