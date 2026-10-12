@@ -66,6 +66,8 @@ pub enum EditError {
     NothingToRedo,
     #[error("the yank register is empty — yank a segment first")]
     RegisterEmpty,
+    #[error("the register was yanked from a different project — {0} is not in this pool")]
+    RegisterForeign(String),
     #[error("can't remove the only video track")]
     LastVideoTrack,
     #[error("{0}")]

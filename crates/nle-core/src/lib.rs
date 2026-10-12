@@ -17,8 +17,8 @@ pub mod time;
 pub mod timeline;
 
 pub use action::{
-    Action, Edge, GapLen, Outcome, ParseDefaults, ParseError, Target, load_register, register_path,
-    run_action, save_register, track_label,
+    Action, Edge, GapLen, Outcome, ParseDefaults, ParseError, Register, Target, load_register,
+    register_path, run_action, save_register, track_label,
 };
 pub use detect::{Span, reconstruct};
 pub use edit::{

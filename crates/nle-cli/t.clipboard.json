@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "segment": {
     "Clip": {
       "id": 1,
@@ -8,5 +8,6 @@
       "asset_out": "4/1",
       "speed": "1/1"
     }
-  }
+  },
+  "path": "/media/red.mp4"
 }

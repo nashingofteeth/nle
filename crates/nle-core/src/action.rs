@@ -214,7 +214,7 @@ impl std::fmt::Display for ParseError {
 pub fn run_action(
     project: &mut Project,
     history: &mut History,
-    register: &mut Option<Segment>,
+    register: &mut Option<Register>,
     action: &Action,
     from: f64,
 ) -> Result<Outcome, EditError> {
@@ -255,7 +255,9 @@ pub fn run_action(
             let ti = resolve_track(project, *track, *target)?;
             let seg = segment_at(project, ti, *target)?;
             let desc = yank_desc(project, &seg);
-            *register = Some(seg);
+            // Keep the asset's identity with it: ids don't survive a
+            // rebuilt project, paths do.
+            *register = Some(Register::of(project, seg));
             Ok(Outcome {
                 desc,
                 changed: false,
@@ -270,7 +272,10 @@ pub fn run_action(
         } => {
             let seg = match segment {
                 Some(s) => s.clone(),
-                None => register.clone().ok_or(EditError::RegisterEmpty)?,
+                None => register
+                    .as_ref()
+                    .ok_or(EditError::RegisterEmpty)?
+                    .resolve(project)?,
             };
             let batch = if *ripple {
                 edit::paste_ripple_on(project, *track, &seg, *at)?
@@ -607,12 +612,60 @@ fn yank_desc(project: &Project, seg: &Segment) -> String {
 /// Register sidecar format version. Bumped on a shape change; a skewed or
 /// unreadable file reads as an empty register (the register is
 /// convenience, not critical state — the project file is).
-pub const REGISTER_VERSION: u32 = 1;
+/// v2 carries the yanked clip's asset path.
+pub const REGISTER_VERSION: u32 = 2;
+
+/// A yanked segment plus, for a clip, the asset path it came from. Asset
+/// ids are **project-scoped**, so a register that outlives its project
+/// (a rebuilt `nle.json`, a copied sidecar) must be resolved against the
+/// pool by path — pasting the wrong media silently would be worse than
+/// refusing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Register {
+    pub segment: Segment,
+    pub path: Option<PathBuf>,
+}
+
+impl Register {
+    /// The register entry for `segment`, resolving a clip's asset path
+    /// from `project`.
+    pub fn of(project: &Project, segment: Segment) -> Self {
+        let path = match &segment {
+            Segment::Clip(c) => project.asset(c.asset).map(|a| a.path.clone()),
+            Segment::Gap(_) => None,
+        };
+        Self { segment, path }
+    }
+
+    /// Resolve against `project`: same file, possibly under a different
+    /// asset id. Refuses when the media isn't in this pool at all.
+    pub fn resolve(&self, project: &Project) -> Result<Segment, EditError> {
+        let Segment::Clip(c) = &self.segment else {
+            return Ok(self.segment.clone());
+        };
+        let Some(path) = &self.path else {
+            return Ok(self.segment.clone());
+        };
+        if project.asset(c.asset).map(|a| &a.path) == Some(path) {
+            return Ok(self.segment.clone()); // same id, same file
+        }
+        let Some(asset) = project.media.iter().find(|a| &a.path == path) else {
+            return Err(EditError::RegisterForeign(path.display().to_string()));
+        };
+        let mut segment = self.segment.clone();
+        if let Segment::Clip(clip) = &mut segment {
+            clip.asset = asset.id;
+        }
+        Ok(segment)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RegisterFile {
     version: u32,
     segment: Segment,
+    #[serde(default)]
+    path: Option<PathBuf>,
 }
 
 /// The register sidecar for a project (`nle.json` → `nle.clipboard.json`).
@@ -621,24 +674,28 @@ pub fn register_path(project_path: &Path) -> PathBuf {
 }
 
 /// The yanked segment a project's register holds, if any.
-pub fn load_register(project_path: &Path) -> Option<Segment> {
+pub fn load_register(project_path: &Path) -> Option<Register> {
     let text = std::fs::read_to_string(register_path(project_path)).ok()?;
     let file: RegisterFile = serde_json::from_str(&text).ok()?;
-    (file.version == REGISTER_VERSION).then_some(file.segment)
+    (file.version == REGISTER_VERSION).then_some(Register {
+        segment: file.segment,
+        path: file.path,
+    })
 }
 
 /// Persist the register; `None` clears it (the file goes away). Atomic,
 /// like the project save — a crash can't leave half a register.
-pub fn save_register(project_path: &Path, segment: Option<&Segment>) -> std::io::Result<()> {
+pub fn save_register(project_path: &Path, register: Option<&Register>) -> std::io::Result<()> {
     use std::io::Write as _;
     let path = register_path(project_path);
-    let Some(segment) = segment else {
+    let Some(register) = register else {
         let _ = std::fs::remove_file(path);
         return Ok(());
     };
     let file = RegisterFile {
         version: REGISTER_VERSION,
-        segment: segment.clone(),
+        segment: register.segment.clone(),
+        path: register.path.clone(),
     };
     let mut json = serde_json::to_string_pretty(&file)
         .map_err(|e| std::io::Error::other(format!("register serialize: {e}")))?;
@@ -1279,7 +1336,7 @@ mod tests {
         p
     }
 
-    fn run(p: &mut Project, reg: &mut Option<Segment>, a: &Action) -> Result<Outcome, EditError> {
+    fn run(p: &mut Project, reg: &mut Option<Register>, a: &Action) -> Result<Outcome, EditError> {
         let mut h = History::default();
         run_action(p, &mut h, reg, a, 0.0)
     }
@@ -1319,7 +1376,13 @@ mod tests {
         )
         .unwrap();
         assert!(!out.changed, "a yank writes the register, not the project");
-        assert!(matches!(reg, Some(Segment::Clip(Clip { id: 1, .. }))));
+        assert!(matches!(
+            reg,
+            Some(Register {
+                segment: Segment::Clip(Clip { id: 1, .. }),
+                ..
+            })
+        ));
         // Pasting without a register is an error; with one it inserts.
         assert!(matches!(
             run(
@@ -1488,6 +1551,50 @@ mod tests {
     }
 
     #[test]
+    fn a_register_from_another_project_resolves_or_refuses() {
+        let p = fixture();
+        // The same file pooled here under a different id (asset 1 is
+        // red.mp4 in the fixture): the register resolves by path.
+        let mut other = p.clone();
+        let (spare, _) = other.add_asset("/media/spare.mp4".into(), probe_report("5"));
+        let reg = Register::of(
+            &other,
+            Segment::Clip(Clip {
+                id: 7,
+                asset: spare,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+            }),
+        );
+        assert_eq!(reg.path.as_deref(), Some(Path::new("/media/spare.mp4")));
+        // Not in this pool → refuse, loudly.
+        assert!(matches!(
+            reg.resolve(&p),
+            Err(EditError::RegisterForeign(path)) if path.contains("spare.mp4")
+        ));
+
+        // A file this project *does* pool (under a different id) remaps.
+        let mut here = p.clone();
+        let (id, _) = here.add_asset("/media/other/red.mp4".into(), probe_report("10"));
+        let entry = Register {
+            segment: Segment::Clip(Clip {
+                id: 7,
+                asset: 999, // the id it had over there
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+            }),
+            path: Some(PathBuf::from("/media/other/red.mp4")),
+        };
+        let resolved = entry.resolve(&here).unwrap();
+        assert!(
+            matches!(resolved, Segment::Clip(Clip { asset, .. }) if asset == id),
+            "the asset id is remapped to this pool's: {resolved:?}"
+        );
+    }
+
+    #[test]
     fn extend_moves_an_edge_under_the_same_rules_as_the_tui() {
         let mut p = fixture();
         let mut reg = None;
@@ -1518,11 +1625,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nle.json");
         assert_eq!(load_register(&path), None, "no file, no register");
-        let seg = Segment::Gap(Gap {
-            duration: Seconds::from_integer(2),
-        });
-        save_register(&path, Some(&seg)).unwrap();
-        assert_eq!(load_register(&path), Some(seg));
+        let reg = Register {
+            segment: Segment::Gap(Gap {
+                duration: Seconds::from_integer(2),
+            }),
+            path: Some(PathBuf::from("/media/red.mp4")),
+        };
+        save_register(&path, Some(&reg)).unwrap();
+        assert_eq!(load_register(&path), Some(reg));
         save_register(&path, None).unwrap();
         assert_eq!(load_register(&path), None, "clearing removes the file");
         assert!(!register_path(&path).exists());
