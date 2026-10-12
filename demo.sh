@@ -241,6 +241,20 @@ $N --project live.json show
 echo "  → in one terminal:  ./target/release/nle --project demo-sandbox/live.json edit"
 echo "    in another:       ./target/release/nle --project demo-sandbox/live.json split --at 5"
 
+echo "== robustness: a closed or unwritable stdout must not panic =="
+# Rust ignores SIGPIPE, so a plain println! panics on `nle … | head` — and a
+# full disk made every command crash. Both must exit cleanly.
+if $N --project live.json media ls > /dev/full 2>/dev/null; then
+  echo "  ✓ failed stdout write exits cleanly (no panic)"
+else
+  echo "  ✗ stdout write failure crashed the CLI"; exit 1
+fi
+if $N --project live.json media ls | head -1 >/dev/null; then
+  echo "  ✓ early-closed pipe (| head) exits cleanly"
+else
+  echo "  ✗ broken pipe crashed the CLI"; exit 1
+fi
+
 echo "== log check (NLE_LOG end-to-end) =="
 LOG="$(pwd)/nle-log-check.txt"
 rm -f "$LOG" log-check.json

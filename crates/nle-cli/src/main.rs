@@ -14,6 +14,28 @@ mod preview;
 #[cfg(feature = "tui")]
 mod tui;
 
+/// Print a line, tolerating a closed consumer (`nle show | head`). Rust
+/// ignores `SIGPIPE`, so `say!` *panics* on the broken pipe; a Unix
+/// tool should just stop talking. Same syntax as `say!` — all CLI
+/// output goes through here. (A genuine write failure, e.g. a full disk,
+/// is swallowed too: the exit status stays the command's, not the
+/// terminal's.)
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+pub(crate) use say;
+
+/// `say!` for warnings (stderr).
+macro_rules! say_err {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -671,8 +693,8 @@ fn run_cli_action(project_path: &Path, action: &Action) -> Result<()> {
     save_register(project_path, register.as_ref())?;
     log::line(&format!("action {}", outcome.desc));
     match outcome.playhead {
-        Some(f) => println!("✓ {} (playhead f{f})", outcome.desc),
-        None => println!("✓ {}", outcome.desc),
+        Some(f) => say!("✓ {} (playhead f{f})", outcome.desc),
+        None => say!("✓ {}", outcome.desc),
     }
     Ok(())
 }
@@ -859,7 +881,7 @@ fn cmd_edl(project_path: &Path, track: usize) -> Result<()> {
     if project.timeline.track(ti).is_none() {
         bail!("no track #{track}");
     }
-    println!("{}", preview::build_edl(&project, ti)?);
+    say!("{}", preview::build_edl(&project, ti)?);
     Ok(())
 }
 
@@ -871,7 +893,7 @@ fn cmd_init(path: &Path, force: bool) -> Result<()> {
         );
     }
     save_and_reset_history(&Project::new(), path)?;
-    println!("✓ created {}", path.display());
+    say!("✓ created {}", path.display());
     Ok(())
 }
 
@@ -898,14 +920,14 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
             .canonicalize()
             .with_context(|| format!("resolving {}", file.display()))?;
         if let Some(a) = project.asset_by_path(&canonical) {
-            println!("· {} already imported (asset #{})", file.display(), a.id);
+            say!("· {} already imported (asset #{})", file.display(), a.id);
             continue;
         }
         // Recorded: `nle undo` removes the asset again.
         let (id, _) = history.add_asset(&mut project, canonical, report, playhead);
         added += 1;
         let asset = project.asset(id).context("asset vanished")?;
-        println!(
+        say!(
             "✓ asset #{id}  {}  {}",
             file.display(),
             asset_summary(asset)
@@ -923,7 +945,7 @@ fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
             .filter(|s| matches!(s, Segment::Clip(_)))
             .count()
     };
-    println!(
+    say!(
         "· {} — {} assets, {} clip(s)",
         project_path.display(),
         project.media.len(),
@@ -958,7 +980,7 @@ fn cmd_add(
         playhead,
     )?;
     if imported && let Segment::Clip(c) = &scratch {
-        println!("· auto-imported as asset #{}", c.asset);
+        say!("· auto-imported as asset #{}", c.asset);
     }
 
     // Ripple paste: inserts at --at (splits clips/gaps) or appends.
@@ -1069,10 +1091,10 @@ fn secs_f64(t: &Seconds) -> f64 {
 fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
     let project = Project::load(project_path)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&project)?);
+        say!("{}", serde_json::to_string_pretty(&project)?);
         return Ok(());
     }
-    println!(
+    say!(
         "{} — {}",
         project_path.display(),
         show_report(&project).trim_end()
@@ -1085,7 +1107,7 @@ fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
 fn cmd_seek(project_path: &Path, at: Option<&str>) -> Result<()> {
     let mut project = Project::load(project_path)?;
     let Some(s) = at else {
-        println!("{}", format_seconds(&project.playhead));
+        say!("{}", format_seconds(&project.playhead));
         return Ok(());
     };
     let t = parse_signed_time(s).with_context(|| format!("invalid time {s:?}"))?;
@@ -1094,11 +1116,11 @@ fn cmd_seek(project_path: &Path, at: Option<&str>) -> Result<()> {
     log::line(&format!("seek -> {landed} s"));
     let frame = frame_of(project.fps.as_ref(), landed);
     match project.fps {
-        Some(_) => println!(
+        Some(_) => say!(
             "✓ playhead → {} s (f{frame})",
             format_seconds(&project.playhead)
         ),
-        None => println!("✓ playhead → {} s", format_seconds(&project.playhead)),
+        None => say!("✓ playhead → {} s", format_seconds(&project.playhead)),
     }
     Ok(())
 }
@@ -1179,10 +1201,10 @@ pub(crate) fn show_report(project: &Project) -> String {
 fn cmd_media_ls(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
     if project.media.is_empty() {
-        println!("media pool is empty — `nle import <file>`");
+        say!("media pool is empty — `nle import <file>`");
         return Ok(());
     }
-    println!(
+    say!(
         "{} — {} asset(s)",
         project_path.display(),
         project.media.len()
@@ -1194,7 +1216,7 @@ fn cmd_media_ls(project_path: &Path) -> Result<()> {
         } else {
             format!("used by {used:?}")
         };
-        println!("  #{:<4} {:<9} {}", a.id, asset_summary(a), usage);
+        say!("  #{:<4} {:<9} {}", a.id, asset_summary(a), usage);
     }
     Ok(())
 }
@@ -1202,7 +1224,7 @@ fn cmd_media_ls(project_path: &Path) -> Result<()> {
 /// `nle track ls` — the track listing. (add/mute/rm are catalog actions.)
 fn cmd_track_ls(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
-    println!(
+    say!(
         "{} — {} track(s)",
         project_path.display(),
         project.timeline.tracks.len()
@@ -1213,7 +1235,7 @@ fn cmd_track_ls(project_path: &Path) -> Result<()> {
             TrackKind::Audio => "audio",
         };
         let mute = if t.muted { " (muted)" } else { "" };
-        println!(
+        say!(
             "  {:<3} {:<6} {} segment(s){}",
             i + 1,
             kind,
@@ -2009,7 +2031,7 @@ fn cmd_export(
     preset: &str,
     bitrate: &str,
 ) -> Result<()> {
-    println!(
+    say!(
         "{}",
         run_export(project_path, output, encoder, crf, preset, bitrate)?
     );
@@ -2061,7 +2083,7 @@ fn run_export(
 
 /// What a work function produced: warnings for stderr (or the log) and
 /// the summary line the caller shows. Keeps the TUI free of stray prints
-/// — a `println!` would draw over the terminal UI.
+/// — a `say!` would draw over the terminal UI.
 struct CommandReport {
     warnings: Vec<String>,
     summary: String,
@@ -2082,9 +2104,9 @@ impl CommandReport {
     /// The CLI's rendering: warnings on stderr, summary on stdout.
     fn print(&self) {
         for w in &self.warnings {
-            eprintln!("{w}");
+            say_err!("{w}");
         }
-        println!("{}", self.summary);
+        say!("{}", self.summary);
     }
 }
 
@@ -2112,7 +2134,7 @@ fn asset_summary(a: &Asset) -> String {
 fn cmd_probe(file: &Path, json: bool) -> Result<()> {
     let report = probe(file)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        say!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
     print_summary(file, &report);
@@ -2120,7 +2142,7 @@ fn cmd_probe(file: &Path, json: bool) -> Result<()> {
 }
 
 fn print_summary(path: &Path, report: &RawProbe) {
-    println!("{}", path.display());
+    say!("{}", path.display());
 
     let f = &report.format;
     let mut container = f.format_name.clone();
@@ -2137,13 +2159,13 @@ fn print_summary(path: &Path, report: &RawProbe) {
     if let Some(b) = f.bit_rate.as_deref().and_then(parse_u64) {
         meta.push(format!("{} kb/s", b / 1000));
     }
-    println!("  container  {}", meta.join("  ·  "));
+    say!("  container  {}", meta.join("  ·  "));
 
     for s in &report.streams {
         match s.codec_type.as_deref() {
-            Some("video") => println!("  video #{}   {}", s.index, video_desc(s)),
-            Some("audio") => println!("  audio #{}   {}", s.index, audio_desc(s)),
-            other => println!(
+            Some("video") => say!("  video #{}   {}", s.index, video_desc(s)),
+            Some("audio") => say!("  audio #{}   {}", s.index, audio_desc(s)),
+            other => say!(
                 "  {} #{}   {}",
                 other.unwrap_or("data"),
                 s.index,
@@ -2262,7 +2284,7 @@ fn cmd_trim(
         Some(d) => format!("{d:.2} s"),
         None => "?".to_string(),
     };
-    println!("✓ {}  ({})", output.display(), shown);
+    say!("✓ {}  ({})", output.display(), shown);
     Ok(())
 }
 

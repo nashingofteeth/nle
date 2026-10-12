@@ -649,7 +649,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
 
     ratatui::restore();
     if let Some(msg) = app.exit_message {
-        println!("{msg}");
+        crate::say!("{msg}");
     }
     Ok(())
 }
