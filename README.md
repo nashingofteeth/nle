@@ -167,6 +167,14 @@ move it; the TUI opens there, re-saves it after every edit, and writes it
 about a second after the transport stops moving (so a pause or a seek is
 visible to the next shell command).
 
+**Concurrent shell + TUI.** The TUI watches `nle.json`, the undo sidecar,
+and the register: a shell command (`nle split`, `nle seek`, `nle yank`) is
+adopted within a tick — you see it in the TUI without pressing anything —
+and the TUI never writes over a change it hasn't seen (it adopts that
+instead of clobbering it). The reload waits while a mode is active
+(extend, the pool, a `:` line) because those hold indices into the
+current state; it applies as soon as you're back in Normal.
+
 Commands that need processes (probe, export, detect, EDL/OTIO import) are
 CLI-only in the model sense, but the TUI spells them too (`:export`,
 `:detect`, `:edl-import`, `:otio-import`, `:add`) — long ones run in a

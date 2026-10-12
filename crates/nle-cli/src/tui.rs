@@ -6,7 +6,7 @@
 //! the reader thread and is rendered on the next tick (~20fps redraw).
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
@@ -279,6 +279,20 @@ pub(crate) enum Pending {
     Y,
 }
 
+/// The files a session shares with the shell — `nle.json`, its undo
+/// sidecar, and the yank register — and the mtimes we last read or wrote
+/// them at. A foreign mtime means a shell command got there first.
+#[derive(Debug, Default)]
+struct Seen {
+    project: Option<SystemTime>,
+    history: Option<SystemTime>,
+    register: Option<SystemTime>,
+}
+
+fn mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// A background job (an ffmpeg render, a heavy import): its label for
 /// notices, whether the project file changed underneath us (reload after),
 /// and the channel its worker reports on. One at a time — the monitor
@@ -324,11 +338,16 @@ pub struct App {
     pub active_track: usize,
     /// The background render/import, if one is running.
     job: Option<Job>,
+    /// Session files as we last read/wrote them (see [`Seen`]).
+    seen: Seen,
+    /// A foreign change arrived while a mode held state; reload when back
+    /// in Normal.
+    reload_pending: bool,
 }
 
 impl App {
     pub fn new(project: Project, path: PathBuf) -> Self {
-        Self {
+        let mut app = Self {
             project,
             path,
             mode: Mode::Normal,
@@ -349,7 +368,12 @@ impl App {
             last_pool_sel: 0,
             active_track: 0,
             job: None,
-        }
+            seen: Seen::default(),
+            reload_pending: false,
+        };
+        // The disk state we start from: anything later is foreign.
+        app.note_seen();
+        app
     }
 
     /// The active track index, clamped to a valid one.
@@ -366,6 +390,36 @@ impl App {
     pub fn set_message(&mut self, msg: &str) {
         crate::log::line(msg);
         self.message = msg.to_string();
+    }
+
+    /// Remember the on-disk times of the session files — after a load, or
+    /// after a save we made (so our own writes don't read as foreign).
+    fn note_seen(&mut self) {
+        self.seen = Seen {
+            project: mtime(&self.path),
+            history: mtime(&History::sidecar_path(&self.path)),
+            register: mtime(&action::register_path(&self.path)),
+        };
+    }
+
+    fn note_project(&mut self) {
+        self.seen.project = mtime(&self.path);
+    }
+
+    fn note_history(&mut self) {
+        self.seen.history = mtime(&History::sidecar_path(&self.path));
+    }
+
+    fn note_register(&mut self) {
+        self.seen.register = mtime(&action::register_path(&self.path));
+    }
+
+    /// Whether a shell wrote one of the shared files since we last read or
+    /// wrote it.
+    fn external_change(&self) -> bool {
+        mtime(&self.path) != self.seen.project
+            || mtime(&History::sidecar_path(&self.path)) != self.seen.history
+            || mtime(&action::register_path(&self.path)) != self.seen.register
     }
 
     pub fn sync(&mut self, st: &PlaybackState) {
@@ -505,6 +559,17 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         let st = player.state();
         app.sync(&st);
 
+        // A shell may have written the shared files (`nle split`,
+        // `nle seek`, `nle yank`) — adopt it before anything of our own,
+        // so the next save can't clobber it. Modes hold indices into the
+        // current state, so the reload waits for Normal.
+        if watch_foreign(&mut app) {
+            match reload_project(&mut app, &player) {
+                Ok(()) => app.set_message("adopted changes from the shell"),
+                Err(e) => app.set_message(&format!("reload failed: {e}")),
+            }
+        }
+
         if app.reload_requested {
             app.reload_requested = false;
             match reload_project(&mut app, &player) {
@@ -530,13 +595,12 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         } else if let Some(since) = playhead_moving
             && since.elapsed() >= PLAYHEAD_FLUSH_IDLE
         {
+            playhead_moving = None; // one shot; a failure retries on the next move
             match persist_playhead(&mut app) {
-                Ok(()) => playhead_moving = None,
-                Err(e) => {
-                    // Don't retry every tick; the next move tries again.
-                    app.set_message(&format!("save failed: {e}"));
-                    playhead_moving = None;
-                }
+                Ok(true) => {}
+                // A shell write landed mid-flight: adopt it next tick.
+                Ok(false) => app.reload_pending = true,
+                Err(e) => app.set_message(&format!("save failed: {e}")),
             }
         }
 
@@ -602,10 +666,34 @@ fn playhead_moved(app: &App) -> bool {
 /// Write the session playhead into the project and save it — the stored
 /// cursor `nle seek` reads. Called after edits, by `:seek`, and by the
 /// transport's idle flush.
-fn persist_playhead(app: &mut App) -> anyhow::Result<()> {
+///
+/// `Ok(true)` = written; `Ok(false)` = a shell got there first, so nothing
+/// was written (the caller adopts the file instead — we never clobber).
+fn persist_playhead(app: &mut App) -> anyhow::Result<bool> {
+    if app.external_change() {
+        return Ok(false);
+    }
     app.project.set_playhead(app.playhead);
     app.project.save(&app.path)?;
-    Ok(())
+    app.note_project();
+    Ok(true)
+}
+
+/// Decide what to do about a foreign write to the shared files: adopt it
+/// now (Normal mode), or hold it until the mode ends — modes hold indices
+/// into the current state. Returns whether a reload should run now.
+fn watch_foreign(app: &mut App) -> bool {
+    let foreign = app.external_change();
+    if foreign && !matches!(app.mode, Mode::Normal) {
+        app.reload_pending = true;
+        return false;
+    }
+    if !foreign && !app.reload_pending {
+        return false;
+    }
+    // Normal mode with something to adopt (just arrived, or held earlier).
+    app.reload_pending = false;
+    true
 }
 
 /// Reload the project (and its undo history) from disk and rebuild the
@@ -618,10 +706,15 @@ fn reload_project(app: &mut App, player: &dyn Mpv) -> anyhow::Result<()> {
         .active_track
         .min(app.project.timeline.tracks.len().saturating_sub(1));
     app.history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
+    // The register is shared too: a shell may have yanked since we read it.
+    app.register = load_register(&app.path);
     // Adopt the file's playhead: a shell may have moved it (`nle seek`).
     app.playhead = secs(&app.project.playhead);
     let edl = preview::build_composite_edl(&app.project)?;
     player.load(&edl, Some(app.playhead));
+    // Everything on disk is ours again.
+    app.note_seen();
+    app.reload_pending = false;
     Ok(())
 }
 
@@ -1024,7 +1117,9 @@ fn import_command(app: &mut App, cmd: &str) -> String {
     if new > 0 {
         app.history = History::default();
         let _ = std::fs::remove_file(History::sidecar_path(&app.path));
-        let _ = app.project.save(&app.path);
+        if app.project.save(&app.path).is_ok() {
+            app.note_seen();
+        }
     }
     let mut msg = format!("imported {new} new, {existing} already pooled");
     if !failed.is_empty() {
@@ -1126,6 +1221,7 @@ fn add_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option
         if let Err(e) = app.project.save(&app.path) {
             return Some(format!("save failed: {e}"));
         }
+        app.note_seen();
     }
     run_action(
         app,
@@ -1157,8 +1253,13 @@ fn seek_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Optio
     };
     // Same clamp as every other seek: into the timeline.
     app.seek_to(player, t.clamp(0.0, app.total()));
-    if let Err(e) = persist_playhead(app) {
-        return Some(format!("save failed: {e}"));
+    match persist_playhead(app) {
+        Ok(true) => {}
+        Ok(false) => {
+            app.reload_pending = true;
+            return Some("not saved: nle.json changed on disk — reloading".to_string());
+        }
+        Err(e) => return Some(format!("save failed: {e}")),
     }
     Some(format!(
         "playhead → {}",
@@ -2125,7 +2226,9 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
             }
             app.set_message(&outcome.desc);
             // The register is shared with the CLI (`nle yank`/`nle paste`).
-            let _ = save_register(&app.path, app.register.as_ref());
+            if save_register(&app.path, app.register.as_ref()).is_ok() {
+                app.note_register();
+            }
             if outcome.changed {
                 persist_and_refresh(app, player);
             }
@@ -2146,12 +2249,30 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
 fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
     // The stored playhead follows the session — it is what `nle seek`
     // reads and where the next TUI session opens.
-    if let Err(e) = persist_playhead(app) {
-        app.set_message(&format!("save failed: {e}"));
-        return;
+    match persist_playhead(app) {
+        Ok(true) => {}
+        Ok(false) => {
+            // A shell wrote the project first: adopt theirs rather than
+            // clobber it, and say so — this edit was not saved.
+            if let Err(e) = reload_project(app, player) {
+                app.set_message(&format!("reload failed: {e}"));
+                return;
+            }
+            let prev = app.message.clone();
+            app.set_message(&format!(
+                "{prev} — not saved: nle.json changed on disk (reloaded)"
+            ));
+            return;
+        }
+        Err(e) => {
+            app.set_message(&format!("save failed: {e}"));
+            return;
+        }
     }
     if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
         app.set_message(&format!("history save failed: {e}"));
+    } else {
+        app.note_history();
     }
     if is_pool(app) {
         // A remove/undo changed the list; keep the selection in range and
@@ -4066,6 +4187,105 @@ mod tests {
         // Sub-frame noise must not look like a move.
         app.playhead = secs(&app.project.playhead) + 1e-9;
         assert!(!playhead_moved(&app), "frame-granular, not float-granular");
+        assert!(
+            !app.external_change(),
+            "our own save is not a foreign change"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    /// A project the composite preview can build (gaps need a size).
+    fn watchable_project() -> Project {
+        let mut p = asset_project();
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        p
+    }
+
+    // A shell write (`nle seek`, `nle yank`, an edit) is adopted within a
+    // tick instead of being clobbered by our next save.
+    #[test]
+    fn a_foreign_write_is_seen_and_adopted() {
+        let path = temp_project_path("watch-adopt");
+        watchable_project().save(&path).unwrap();
+        let mut app = App::new(watchable_project(), path.clone());
+        assert!(!app.external_change(), "we start in sync with the file");
+
+        // The shell parks the cursor and yanks a gap into the register.
+        let mut p = Project::load(&path).unwrap();
+        p.set_playhead(3.0);
+        p.save(&path).unwrap();
+        let reg = TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(2),
+        });
+        nle_core::save_register(&path, Some(&reg)).unwrap();
+
+        assert!(app.external_change());
+        assert!(watch_foreign(&mut app), "Normal mode adopts it right away");
+        reload_project(&mut app, &FakeMpv::new()).unwrap();
+        assert_eq!(app.playhead, 3.0, "the shell's cursor");
+        assert_eq!(app.register, Some(reg), "and its yank");
+        assert!(!app.external_change(), "the watch re-baselines");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    // The guard: never write over a change we haven't seen.
+    #[test]
+    fn a_foreign_write_is_not_clobbered() {
+        let path = temp_project_path("watch-guard");
+        watchable_project().save(&path).unwrap();
+        let mut app = App::new(watchable_project(), path.clone());
+        let mut p = Project::load(&path).unwrap();
+        p.set_playhead(3.0);
+        p.save(&path).unwrap();
+
+        app.playhead = 5.0;
+        assert!(!persist_playhead(&mut app).unwrap(), "the guard refuses");
+        assert_eq!(
+            Project::load(&path).unwrap().playhead,
+            Seconds::from_integer(3),
+            "the shell's cursor survived"
+        );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    // A mode holds indices into the current state, so a foreign write waits
+    // for Normal instead of yanking the ground out from under it.
+    #[test]
+    fn watch_foreign_waits_for_a_mode_to_end() {
+        let path = temp_project_path("watch-mode");
+        watchable_project().save(&path).unwrap();
+        let mut app = App::new(watchable_project(), path.clone());
+        app.mode = Mode::Extend(ExtendState {
+            track: 0,
+            armed: Armed::Clip { id: 1, head: true },
+            edge_pos: 0.0,
+            ripple: false,
+            lo: 0.0,
+            hi: None,
+            mat: None,
+            preview_off: 0.0,
+        });
+        let mut p = Project::load(&path).unwrap();
+        p.set_playhead(2.0);
+        p.save(&path).unwrap();
+
+        assert!(
+            !watch_foreign(&mut app),
+            "no reload while a mode holds state"
+        );
+        assert!(app.reload_pending);
+        app.mode = Mode::Normal;
+        assert!(watch_foreign(&mut app), "applied once Normal");
+        assert!(!app.reload_pending);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
         let _ = std::fs::remove_file(nle_core::register_path(&path));
