@@ -36,6 +36,8 @@ pub enum CompileError {
     NoSize,
     #[error("no video track in timeline")]
     NoVideoTrack,
+    #[error("every video track is muted — nothing to export")]
+    AllMuted,
     #[error("asset #{0} is referenced by the timeline but missing from the media pool")]
     MissingAsset(u32),
 }
@@ -133,6 +135,12 @@ pub struct ExportPlan {
 /// byte unchanged); anything else composites video tracks (`overlay`) and
 /// mixes audio (`amix`).
 pub fn compile_export(project: &Project) -> Result<ExportPlan, CompileError> {
+    // The fast path (one video track, no audio) ignores the mute flag, so a
+    // muted sole video track exported as if unmuted. There is no video to
+    // render either way: say so.
+    if project.timeline.video_tracks().all(|t| t.muted) {
+        return Err(CompileError::AllMuted);
+    }
     let video_count = project.timeline.video_tracks().count();
     let audio_count = project.timeline.audio_tracks().count();
     if video_count <= 1 && audio_count == 0 {
@@ -816,6 +824,15 @@ mod tests {
         assert!(g.contains("[vt0]format=yuv420p[vout]"), "{g}");
         assert!(!g.contains("null[vcomp]"), "{g}");
         assert_eq!(plan.duration, Seconds::from_integer(15));
+    }
+
+    #[test]
+    fn a_muted_sole_video_track_is_not_silently_unmuted() {
+        // The fast path (one video track, no audio) ignored `muted`, so a
+        // muted sole video track exported its video anyway.
+        let mut p = project_with_two_clips();
+        p.timeline.tracks[0].muted = true;
+        assert!(matches!(compile_export(&p), Err(CompileError::AllMuted)));
     }
 
     #[test]
