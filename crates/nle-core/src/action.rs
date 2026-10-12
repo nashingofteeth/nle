@@ -936,9 +936,12 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
     let (verb, mut f) = split_args(input)?;
     let at = |f: &mut Flags, d: &ParseDefaults| -> Result<f64, ParseError> {
-        Ok(opt_time(f, "at")?.unwrap_or(
-            d.at.ok_or_else(|| ParseError::Invalid("no position given — pass --at T".to_string()))?,
-        ))
+        match opt_time(f, "at")? {
+            Some(t) => Ok(t),
+            None => d
+                .at
+                .ok_or_else(|| ParseError::Invalid("no position given — pass --at T".to_string())),
+        }
     };
     match verb.as_str() {
         "trim-in" => {
@@ -1263,6 +1266,26 @@ mod tests {
         // guessing a position.
         let bare = ParseDefaults::default();
         assert!(matches!(parse("split", &bare), Err(ParseError::Invalid(_)),));
+    }
+
+    /// An explicit `--at` works with no playhead default (the parser used
+    /// to evaluate its fallback eagerly, so `--at 1` reported "no position
+    /// given" whenever the front-end had no default position).
+    #[test]
+    fn explicit_flags_work_without_defaults() {
+        let bare = ParseDefaults::default();
+        assert_eq!(
+            parse("split --at 1.5", &bare),
+            Ok(Action::Split { track: 0, at: 1.5 })
+        );
+        assert_eq!(
+            parse("delete --clip 3 --ripple", &bare),
+            Ok(Action::Delete {
+                track: 0,
+                target: Target::Clip(3),
+                ripple: true,
+            })
+        );
     }
 
     #[test]
