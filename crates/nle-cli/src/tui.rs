@@ -18,7 +18,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use nle_core::action::{self, Action, Edge, GapLen, ParseDefaults, ParseError, Target};
 #[cfg(test)]
 use nle_core::edit;
-use nle_core::timeline::{Segment as TimelineSegment, Track};
+use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
 use nle_core::{
     Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_of,
     frame_to_secs, gap_span, load_register, plan_commit, resolve_armed, save_register, track_label,
@@ -1112,7 +1112,7 @@ fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale
@@ -1899,6 +1899,25 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         // `R` opens the speed prompt for the clip under the playhead; the
         // command line is pre-filled so it reads as `:speed `.
         KeyCode::Char('R') => app.mode = Mode::Command("speed ".to_string()),
+        // `x` — cross-dissolve at the boundary; a count is the duration in
+        // frames (default 1 s).
+        KeyCode::Char('x') => {
+            let len = if had_count {
+                GapLen::Frames(mult as i64)
+            } else {
+                GapLen::Seconds(1.0)
+            };
+            run_action(
+                app,
+                player,
+                &Action::Transition {
+                    track: app.active(),
+                    at: app.playhead,
+                    kind: TransitionKind::Dissolve,
+                    len,
+                },
+            );
+        }
         KeyCode::Char(':') => app.mode = Mode::Command(String::new()),
         _ => {}
     }
@@ -3026,7 +3045,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
         "motion     j/k cuts · w/b clips · n/N gaps · < > (, .) clip start/end",
         "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
-        "           R speed (rate prompt) · e/E extend · [ ] side · m pool",
+        "           R speed · x transition · e/E extend · [ ] side · m pool",
         "extend     e/E enter · [ ] side · m pool · u undo · r reload · : cmd · q quit",
         "tracks     t/T cycle · <N>t jump to N · :track add video|audio",
     ]
@@ -6595,5 +6614,50 @@ mod tests {
         );
         assert!(app.message.contains(":import"), "{}", app.message);
         assert!(app.message.contains(":track"), "{}", app.message);
+    }
+
+    // `x` adds a cross-dissolve at the boundary under the playhead.
+    #[test]
+    fn x_key_adds_a_transition() {
+        let mut app = App::new(asset_project(), temp_project_path("x-key"));
+        app.loaded = true;
+        app.playhead = 3.0; // asset_project's clip|gap cut
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('x'));
+        let track = app.project.timeline.video_track().unwrap();
+        assert!(
+            track
+                .segments
+                .iter()
+                .any(|s| matches!(s, TimelineSegment::Transition(_))),
+            "a transition was added: {:?}",
+            track.segments
+        );
+    }
+
+    // `:transition fade` picks the fade-through-black kind.
+    #[test]
+    fn transition_command_adds_a_fade() {
+        let mut app = App::new(asset_project(), temp_project_path("trans-cmd"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key(':'));
+        for c in "transition fade".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let track = app.project.timeline.video_track().unwrap();
+        assert!(
+            track.segments.iter().any(
+                |s| matches!(s, TimelineSegment::Transition(t) if t.kind == TransitionKind::FadeBlack)
+            ),
+            "a fade was added: {:?}",
+            track.segments
+        );
     }
 }

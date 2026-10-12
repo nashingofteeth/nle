@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use crate::edit::{self, EditError, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
-use crate::time::{Seconds, frame_of, grid_time, parse_signed_time, secs_f64};
-use crate::timeline::{Segment, TrackKind};
+use crate::time::{Seconds, frame_of, frames_to_seconds, grid_time, parse_signed_time, secs_f64};
+use crate::timeline::{Segment, TrackKind, TransitionKind};
 
 /// What an action addresses: the segment under a timeline position, a
 /// clip by id (stable across edits), or a segment by index (as printed
@@ -108,6 +108,13 @@ pub enum Action {
         to: f64,
         ripple: bool,
     },
+    /// Add a crossfade at a boundary (`x`, `:transition`).
+    Transition {
+        track: usize,
+        at: f64,
+        kind: TransitionKind,
+        len: GapLen,
+    },
     /// Drop sub-frame stumps and snap to the frame grid (`:purge`).
     /// Re-baselines the undo stack.
     PurgeStumps {
@@ -159,6 +166,7 @@ impl Action {
             Action::AssetRm { .. } => 13,
             Action::Undo => 14,
             Action::Redo => 15,
+            Action::Transition { .. } => 16,
         }
     }
 }
@@ -240,6 +248,20 @@ pub fn run_action(
                 }
             };
             let batch = edit::insert_gap_on(project, *track, *at, frames)?;
+            apply(project, history, batch, from)
+        }
+        Action::Transition {
+            track,
+            at,
+            kind,
+            len,
+        } => {
+            let fps = project.fps.ok_or(EditError::NoFps)?;
+            let dur = match len {
+                GapLen::Frames(n) => frames_to_seconds(*n, fps),
+                GapLen::Seconds(s) => frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps),
+            };
+            let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
             apply(project, history, batch, from)
         }
         Action::Delete {
@@ -1014,6 +1036,35 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             Ok(Action::InsertGap {
                 track: t,
                 at: a,
+                len,
+            })
+        }
+        "transition" => {
+            let (a, t) = (at(&mut f, d)?, parse_track(&mut f, d)?);
+            let kind = match f.positional().as_deref() {
+                None | Some("dissolve") => TransitionKind::Dissolve,
+                Some("fade") => TransitionKind::FadeBlack,
+                Some(other) => {
+                    return Err(ParseError::Invalid(format!(
+                        "unknown kind {other:?} — use dissolve or fade"
+                    )));
+                }
+            };
+            let len = match (opt_usize(&mut f, "frames")?, opt_time(&mut f, "dur")?) {
+                (Some(_), Some(_)) => {
+                    return Err(ParseError::Invalid(
+                        "use either --frames N or --dur T".to_string(),
+                    ));
+                }
+                (Some(n), None) => GapLen::Frames(n as i64),
+                (None, Some(s)) => GapLen::Seconds(s),
+                (None, None) => GapLen::Seconds(1.0),
+            };
+            f.finish(":transition [dissolve|fade] [--at T] [--track N] [--frames N | --dur T]")?;
+            Ok(Action::Transition {
+                track: t,
+                at: a,
+                kind,
                 len,
             })
         }
