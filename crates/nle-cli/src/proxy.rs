@@ -44,8 +44,8 @@ pub fn proxy_cache_dir() -> PathBuf {
 }
 
 /// Everything the render depends on: the segment (effects, transition,
-/// source spans, speed), the output geometry, and the media it reads
-/// (path + mtime, so replacing a file invalidates).
+/// source spans, speed), the output geometry and frame rate, and the media it
+/// reads (path + mtime, so replacing a file invalidates).
 fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
     if let Ok(s) = serde_json::to_string(seg) {
@@ -53,6 +53,10 @@ fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     }
     w.hash(&mut hasher);
     h.hash(&mut hasher);
+    // The render bakes the project rate in (`fps=…`), so it belongs in the
+    // key too: the same segment in a 24 fps and a 30 fps project must not
+    // share an entry.
+    project.fps.hash(&mut hasher);
     let mut assets: Vec<u32> = Vec::new();
     match seg {
         Segment::Clip(c) => assets.push(c.asset),
@@ -106,15 +110,23 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
         muted: false,
         segments: vec![seg.clone()],
     }];
-    // Intra-only so the monitor can seek the proxy exactly.
+    // Write to a temp name (still ending in .mp4 so ffmpeg can infer the
+    // muxer) and rename into place: a crash mid-render must not leave a
+    // half-written file that `path.exists()` would then serve forever (the
+    // hash is stable, so it would never re-render).
+    let tmp = dir.join(format!("{hash:x}.tmp-{}.mp4", std::process::id()));
     let spec = ExportSpec {
-        output: path.clone(),
+        output: tmp.clone(),
         encoder: Encoder::Cpu,
         crf: 18,
         preset: "ultrafast".into(),
         bitrate: "8M".into(),
     };
-    export(&p, &spec)?;
+    if let Err(e) = export(&p, &spec) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
 
@@ -170,6 +182,16 @@ mod tests {
             ha,
             proxy_hash(&p, &a, 640, 480),
             "geometry is part of the key"
+        );
+        // The render bakes the frame rate in, so it must be too.
+        let mut p24 = Project::new();
+        p24.fps = Some(Seconds::from_integer(24));
+        let mut p30 = Project::new();
+        p30.fps = Some(Seconds::from_integer(30));
+        assert_ne!(
+            proxy_hash(&p24, &a, 320, 240),
+            proxy_hash(&p30, &a, 320, 240),
+            "frame rate is part of the key"
         );
     }
 }
