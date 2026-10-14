@@ -385,6 +385,26 @@ check_no "red.mp4" "$edl" "a 2x clip plays its proxy (an EDL entry can't retime)
 check_has "/proxy/" "$edl" "…from the proxy cache"
 check_has "green.mp4" "$edl" "an untouched clip still plays its source"
 
+echo "== retiming a neighbour retimes the transition side =="
+base
+$N --project b.json transition --at 2 --frames 15 >/dev/null
+$N --project b.json speed 1 2 >/dev/null
+# red 0..2 at 2x is 1 s, and the dissolve owns the last 0.5 s of it: the clip
+# keeps 0.5 s and the transition's side plays source 1..2, also at 2x. Before,
+# the clip kept 0.75 s and the transition played its span at 1x — a speed step
+# at the seam.
+out=$($N --project b.json show)
+check_has "4.5 s" "$out" "the retimed contribution (1 s) plus green + blue"
+$N --project b.json export -o ts.mp4 >/dev/null 2>&1
+got=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of csv=p=0 ts.mp4)
+# 15 (red) + 15 (transition) + 45 (green) + 60 (blue).
+if [ "$got" = "135" ]; then
+  echo "  ✓ the render is the model's 135 frames"
+else
+  echo "  ✗ the render is $got frames, the model says 135"
+  FAIL=$((FAIL+1))
+fi
+
 echo "== a rate that misses the frame grid snaps the timeline, not the source =="
 base
 $N --project b.json speed 1 0.7 >/dev/null

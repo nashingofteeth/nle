@@ -172,6 +172,15 @@ plainly.
 - **Opposite-end extend commit = delete** (ripple), by **id** for a clip
   (not by playhead position, which resolves to the follower) and by
   **index** for a gap.
+- **A transition's side plays at its neighbour's rate.** `add_transition` gives
+  each side the span `dur × that neighbour's rate`, and the side renders that
+  span into `dur`, so `span / dur` is the rate at the seam. `set_speed_on`
+  keeps that true by retiming the sides the retimed clip owns: the transition's
+  `dur` (the crossfade the user chose) and the cut (`a.src_out` / `b.src_in`)
+  stay put and the inner edge follows — which is also the neighbour's in/out
+  point, so the two stay contiguous. One rate covers the clip plus its sides,
+  so a retimed clip gives up `dur × rate` of source and the seam has no speed
+  step.
 - **Removing a transition gives its trimmed frames back.** A transition owns
   the spans it took off its neighbours, so `dd`/`D` re-extend them — but
   *only* where the neighbour still lines up exactly (same asset, contiguous

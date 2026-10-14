@@ -265,7 +265,8 @@ below.)
   `xfade`/`acrossfade`; creation via `x` / `:transition`. Cuts only:
   `Dissolve` + `FadeBlack`. `dd`/`D` remove one and hand the frames it
   trimmed back to its neighbours (only when they still line up); `i`/`o`/`s`/
-  `_` refuse.
+  `_` refuse. A neighbour's rate change retimes the side it owns — `dur` and
+  the cut stay, the inner edge follows — so the seam never steps rate.
 - **Effects:** a typed `Effect` enum (`Crop`/`Scale`/`Eq`/`Lut`) on
   `Clip.effects`, applied in the export chain after the retime and before
   the geometry normalize (so layers stay uniform for `overlay`); `:effect`

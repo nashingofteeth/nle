@@ -975,6 +975,67 @@ fn gap_piece(duration: Seconds) -> Option<Segment> {
 /// Change a clip's playback speed. nle's timeline is a sequence, so a new
 /// duration reflows every follower — **a speed change always ripples**. The
 /// source range is untouched; only the timeline span changes.
+/// A transition beside a clip whose side carries part of that clip's
+/// material. Its `dur` (the crossfade the user chose) and its *outer* source
+/// edge (the cut `x` was made at) stay put; only the inner edge — which is
+/// also the clip's in/out point — follows the clip's rate.
+struct AdjacentTransition {
+    /// The transition's index in the track.
+    index: usize,
+    /// The transition is *after* the clip: the clip is its outgoing (left)
+    /// neighbour and the `a` side carries the clip's tail.
+    outgoing: bool,
+    /// The transition's timeline length.
+    dur: Seconds,
+    /// The fixed source edge: `a.src_out` when outgoing, else `b.src_in`.
+    outer: Seconds,
+    /// The transition as stored, for the replace op.
+    segment: Segment,
+}
+
+/// The transitions in `segs` whose material abuts clip `c` (at `si`), each
+/// with the contiguous source edge `add_transition` left: `a.src_in` is the
+/// clip's out-point, `b.src_out` its in-point. A span that no longer lines up
+/// (the clip was edited some other way) is left alone.
+fn adjacent_transitions(segs: &[Segment], si: usize, c: &Clip) -> Vec<AdjacentTransition> {
+    let mut out = Vec::new();
+    if let Some(Segment::Transition(t)) = si.checked_sub(1).and_then(|i| segs.get(i))
+        && let TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+        } = &t.b
+        && *asset == c.asset
+        && *src_out == c.asset_in
+    {
+        out.push(AdjacentTransition {
+            index: si - 1,
+            outgoing: false,
+            dur: t.dur,
+            outer: *src_in,
+            segment: Segment::Transition(t.clone()),
+        });
+    }
+    if let Some(Segment::Transition(t)) = segs.get(si + 1)
+        && let TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+        } = &t.a
+        && *asset == c.asset
+        && *src_in == c.asset_out
+    {
+        out.push(AdjacentTransition {
+            index: si + 1,
+            outgoing: true,
+            dur: t.dur,
+            outer: *src_out,
+            segment: Segment::Transition(t.clone()),
+        });
+    }
+    out
+}
+
 pub fn set_speed_on(
     project: &Project,
     track: usize,
@@ -993,38 +1054,93 @@ pub fn set_speed_on(
         Segment::Clip(c) => c.clone(),
         Segment::Gap(_) | Segment::Transition(_) => return Err(EditError::ClipNotFound(clip_id)),
     };
-    // A fast retime can shrink the timeline span below a frame (a 1-frame
-    // clip at 2×): every other duration-changing op refuses sub-frame
-    // spans, so this one must too.
-    let want = (c.asset_out - c.asset_in) / requested;
-    at_least_a_frame(project, &want)?;
 
-    // Land the duration on the frame grid, like every other duration-changing
-    // op — but keep the source span exactly as selected and let the *rate*
-    // absorb the snap. `speed` is then `source / duration`, the rate the
-    // render actually applies, so the model and the export can't disagree.
-    // (Bending the span instead reads one extra source frame, and the render
-    // grows a frame per retimed clip — measured 87, 174 against the model's
-    // 86, 172.)
+    // A transition beside this clip owns a source span *and* renders it into
+    // its own `dur`, so its side plays at `span / dur` — which is this clip's
+    // rate, the way `add_transition` built it. Retiming the clip must retime
+    // those sides too, or the crossfade keeps a rate the neighbouring clip no
+    // longer plays (a speed step at the seam).
+    let adjacent = adjacent_transitions(&tr.segments, si, &c);
+    let owned: Seconds = adjacent.iter().map(|a| a.dur).sum();
+    let src_lo = adjacent
+        .iter()
+        .find(|a| !a.outgoing)
+        .map(|a| a.outer)
+        .unwrap_or(c.asset_in);
+    let src_hi = adjacent
+        .iter()
+        .find(|a| a.outgoing)
+        .map(|a| a.outer)
+        .unwrap_or(c.asset_out);
+
+    // One rate plays the whole contribution — this clip plus the transition
+    // sides it owns — and the timeline duration lands on the frame grid, like
+    // every other duration-changing op. `speed` is then `source / duration`,
+    // the rate the render applies, so the model and the export can't disagree.
+    // The source spans stay exactly as selected; only how they are split
+    // between the clip and the transition sides changes. (Bending a span to
+    // fit instead reads one extra source frame, and the render grows a frame
+    // per retimed clip — measured 87, 174 against the model's 86, 172.)
     let fps = project.fps.ok_or(EditError::NoFps)?;
-    let frames = (want * fps).round().to_integer();
-    if frames < 1 {
-        return Err(EditError::TooShort);
+    let want = (src_hi - src_lo) / requested;
+    // A fast retime can shrink the span below a frame (a 1-frame clip at 2×):
+    // refuse rather than round the *request* up to a frame, which would apply
+    // a rate nobody asked for (3 s at "100×" must not quietly become 90×).
+    at_least_a_frame(project, &(want - owned))?;
+    let total = Seconds::from_integer((want * fps).round().to_integer()) / fps;
+    let mine_dur = total - owned;
+    at_least_a_frame(project, &mine_dur)?;
+    let speed = (src_hi - src_lo) / total;
+
+    let mut after = c.clone();
+    after.speed = speed;
+    if let Some(a) = adjacent.iter().find(|a| !a.outgoing) {
+        after.asset_in = a.outer + a.dur * speed;
     }
-    let new_dur = Seconds::from_integer(frames) / fps;
-    // 0.7× of a 2 s clip is 85.714 frames: the grid takes 86, and the rate
-    // that fits is 30/43. The notice says both, so a typed rate that can't
-    // land exactly doesn't look like a bug.
-    let speed = (c.asset_out - c.asset_in) / new_dur;
+    if let Some(a) = adjacent.iter().find(|a| a.outgoing) {
+        after.asset_out = a.outer - a.dur * speed;
+    }
 
     // A slow-down lengthens the track: keep it inside the timeline limit
     // (the validate backstop would call it "corrupt", which it isn't).
-    if tr.end() - c.duration() + new_dur > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
+    if tr.end() - c.duration() + mine_dur > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
         return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
     }
-    let before = Segment::Clip(c.clone());
-    let after = Segment::Clip(Clip { speed, ..c.clone() });
-    let desc = if speed == requested {
+
+    let mut ops: Vec<EditOp> = Vec::new();
+    for a in &adjacent {
+        let Segment::Transition(t) = &a.segment else {
+            unreachable!("adjacent_transitions only yields transitions")
+        };
+        let mut t = t.clone();
+        if a.outgoing {
+            // The `a` side carries the clip's tail: its inner edge is the
+            // clip's new out-point.
+            if let TransitionSource::Clip { src_in, .. } = &mut t.a {
+                *src_in = after.asset_out;
+            }
+        } else if let TransitionSource::Clip { src_out, .. } = &mut t.b {
+            // The `b` side carries the clip's head.
+            *src_out = after.asset_in;
+        }
+        ops.push(EditOp::Replace {
+            track: ti,
+            index: a.index,
+            before: a.segment.clone(),
+            after: Segment::Transition(t),
+        });
+    }
+    ops.push(EditOp::Replace {
+        track: ti,
+        index: si,
+        before: Segment::Clip(c.clone()),
+        after: Segment::Clip(after),
+    });
+
+    // 0.7× of a 2 s clip is 85.714 frames: the grid takes 86, and the rate
+    // that fits is 30/43. The notice says both, so a typed rate that can't
+    // land exactly doesn't look like a bug.
+    let mut desc = if speed == requested {
         format!("speed clip #{clip_id} to {}x", format_seconds(&speed))
     } else {
         format!(
@@ -1033,15 +1149,10 @@ pub fn set_speed_on(
             format_seconds(&requested)
         )
     };
-    Ok(Batch {
-        ops: vec![EditOp::Replace {
-            track: ti,
-            index: si,
-            before,
-            after,
-        }],
-        desc,
-    })
+    if !adjacent.is_empty() {
+        desc += " · transition side(s) retimed";
+    }
+    Ok(Batch { ops, desc })
 }
 
 pub fn set_speed(project: &Project, clip_id: u32, speed: Seconds) -> Result<Batch, EditError> {
@@ -5865,6 +5976,180 @@ mod tests {
         assert_eq!(frames(c.duration()), 129);
         assert_eq!(c.asset_out, Seconds::from_integer(3));
         assert_eq!(c.speed, Seconds::new(30, 43));
+    }
+
+    /// The playback rate of one transition side: its source span over the
+    /// transition's `dur`.
+    fn side_rate(p: &Project, index: usize, outgoing: bool) -> Seconds {
+        let seg = &p.timeline.video_track().unwrap().segments[index];
+        let Segment::Transition(t) = seg else {
+            panic!("expected a transition at {index}, got {seg:?}")
+        };
+        let side = if outgoing { &t.a } else { &t.b };
+        match side {
+            TransitionSource::Clip {
+                src_in, src_out, ..
+            } => (*src_out - *src_in) / t.dur,
+            TransitionSource::Black => panic!("expected a clip side"),
+        }
+    }
+
+    /// A transition's side renders its span into the transition's own `dur`,
+    /// so `span / dur` must equal the neighbouring clip's rate. Retiming the
+    /// clip retimes the side: `dur` and the cut (`a.src_out` / `b.src_in`)
+    /// stay put, the inner edge follows — and that edge is the clip's in/out
+    /// point, so the two stay contiguous.
+    #[test]
+    fn speed_retimes_the_transition_sides_it_owns() {
+        // [C1 src 0..3][C2 src 0..3] with a 1 s dissolve at the 3.0 cut:
+        // C1' src 0..2 [0,2) · T{a 2..3, b 0..1} [2,3) · C2' src 1..3 [3,5)
+        let mut p = clip_pair();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        // The clip that *leads* into the transition owns the `a` side. At 2×
+        // the whole contribution is the first 3 s of the take: 0.5 s of clip
+        // plus the transition's own 1 s, so the clip gives up 1 s of source.
+        let batch = set_speed(&p, 1, Seconds::from_integer(2)).unwrap();
+        assert!(
+            batch.desc.contains("transition side(s) retimed"),
+            "{}",
+            batch.desc
+        );
+        let mut q = p.clone();
+        h.apply(&mut q, batch, 0).unwrap();
+        let c = clip_by_id(&q, 1);
+        assert_eq!(
+            (c.speed, c.asset_in, c.asset_out),
+            (2.into(), 0.into(), 1.into()),
+            "the clip's own span shrank to what the transition leaves"
+        );
+        let Segment::Transition(t) = &q.timeline.video_track().unwrap().segments[1] else {
+            panic!("expected the transition")
+        };
+        assert_eq!(
+            t.dur,
+            Seconds::from_integer(1),
+            "the crossfade length holds"
+        );
+        let (ain, aout) = match &t.a {
+            TransitionSource::Clip {
+                src_in, src_out, ..
+            } => (*src_in, *src_out),
+            TransitionSource::Black => panic!("expected a clip side"),
+        };
+        assert_eq!(
+            (ain, aout),
+            (Seconds::from_integer(1), Seconds::from_integer(3)),
+            "a keeps the cut (src_out) and follows the clip (src_in)"
+        );
+        assert_eq!(
+            side_rate(&q, 1, true),
+            2.into(),
+            "a plays at the clip's rate"
+        );
+        assert_eq!(
+            side_rate(&q, 1, false),
+            1.into(),
+            "b keeps the other clip's"
+        );
+        assert_eq!(
+            clip_by_id(&q, 2),
+            clip_by_id(&p, 2),
+            "the follower is untouched"
+        );
+        assert_eq!(q.timeline.end(), Seconds::new(7, 2), "0.5 + 1 + 2");
+
+        // One undo covers the clip and the side it retimed.
+        h.undo(&mut q).unwrap();
+        assert_eq!(q, p, "undo retimes the side back with the clip");
+
+        // The mirror: the clip that *follows* the transition owns the `b` side.
+        let mut q = p.clone();
+        let batch = set_speed(&p, 2, Seconds::from_integer(2)).unwrap();
+        History::default().apply(&mut q, batch, 0).unwrap();
+        let c = clip_by_id(&q, 2);
+        assert_eq!(
+            (c.speed, c.asset_in, c.asset_out),
+            (2.into(), 2.into(), 3.into())
+        );
+        assert_eq!(
+            side_rate(&q, 1, false),
+            2.into(),
+            "b plays at the clip's rate"
+        );
+        assert_eq!(side_rate(&q, 1, true), 1.into(), "a keeps the other clip's");
+    }
+
+    /// A clip between two transitions is retimed as one rate across all three
+    /// spans, and refused when the two sides would need more material than the
+    /// clip has.
+    #[test]
+    fn speed_retimes_a_clip_between_two_transitions() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("30"));
+        let clip = |id, in_, out| {
+            Segment::Clip(Clip {
+                id,
+                asset: a,
+                asset_in: Seconds::from_integer(in_),
+                asset_out: Seconds::from_integer(out),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            })
+        };
+        p.timeline.video_track_mut().unwrap().segments =
+            vec![clip(1, 0, 4), clip(2, 0, 4), clip(3, 0, 4)];
+        let mut h = History::default();
+        for at in [4.0, 7.0] {
+            let batch = add_transition(
+                &p,
+                0,
+                at,
+                TransitionKind::Dissolve,
+                Seconds::from_integer(1),
+            )
+            .unwrap();
+            h.apply(&mut p, batch, 0).unwrap();
+        }
+        // [C1' 0..3][T{a 3..4, b 0..1}][C2'' 1..3][T{a 3..4, b 0..1}][C3' 1..4]
+        // Both sides must give up `dur × rate` of source, so 2× would need all
+        // 4 s of the middle clip and is refused.
+        assert!(matches!(
+            set_speed(&p, 2, Seconds::from_integer(2)),
+            Err(EditError::TooShort)
+        ));
+
+        // 1.5× fits: 4 s of source / 1.5 = 2.667 s, minus the two 1 s sides.
+        let batch = set_speed(&p, 2, Seconds::from_integer(3) / Seconds::from_integer(2)).unwrap();
+        let mut q = p.clone();
+        History::default().apply(&mut q, batch, 0).unwrap();
+        let c = clip_by_id(&q, 2);
+        assert_eq!(c.speed, Seconds::from_integer(3) / Seconds::from_integer(2));
+        assert_eq!(
+            (c.asset_in, c.asset_out),
+            (Seconds::new(3, 2), Seconds::new(5, 2))
+        );
+        assert_eq!(c.duration(), Seconds::new(2, 3), "1 s of source at 1.5×");
+        assert_eq!(
+            side_rate(&q, 1, false),
+            Seconds::new(3, 2),
+            "the leading side"
+        );
+        assert_eq!(
+            side_rate(&q, 3, true),
+            Seconds::new(3, 2),
+            "the trailing side"
+        );
     }
 
     fn transition_seg(id: u32, dur: Seconds, a_out: Seconds) -> Segment {
