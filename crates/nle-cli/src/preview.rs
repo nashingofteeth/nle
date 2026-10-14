@@ -114,70 +114,46 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
 
 /// A notice for the monitor when any clip plays at a non-1× speed: mpv's
 /// EDL has no speed concept, so the monitor plays those clips at 1× and
-/// reads the wrong source span. Editing and export are unaffected.
+/// reads the wrong source span. A clip with effects is retimed by its proxy
+/// (see [`composite_segments`]) and is skipped; editing and export are
+/// unaffected.
 pub fn speed_notice(project: &Project) -> Option<String> {
     let n = project
         .timeline
         .tracks
         .iter()
         .flat_map(|t| t.segments.iter())
-        .filter(|s| matches!(s, TimelineSegment::Clip(c) if c.speed != Seconds::from_integer(1)))
+        .filter(|s| {
+            matches!(s, TimelineSegment::Clip(c)
+                if c.speed != Seconds::from_integer(1) && c.effects.is_empty())
+        })
         .count();
     (n > 0).then(|| format!("monitor is 1x: {n} speed clip(s) play at normal speed"))
 }
 
-/// The monitor can't blend a transition — it previews one as a cut (the
-/// outgoing side) until the proxy cache lands (M5). Surface that honestly.
-pub fn transition_notice(project: &Project) -> Option<String> {
-    let n = project
-        .timeline
-        .tracks
-        .iter()
-        .flat_map(|t| t.segments.iter())
-        .filter(|s| matches!(s, TimelineSegment::Transition(_)))
-        .count();
-    (n > 0).then(|| format!("{n} transition(s) preview as a cut"))
-}
-
-/// The monitor shows raw clips: effects aren't applied in preview until the
-/// proxy cache lands (M5). Surface that honestly.
-pub fn effects_notice(project: &Project) -> Option<String> {
-    let n = project
-        .timeline
-        .tracks
-        .iter()
-        .flat_map(|t| t.segments.iter())
-        .filter_map(|s| match s {
-            TimelineSegment::Clip(c) if !c.effects.is_empty() => Some(()),
-            _ => None,
-        })
-        .count();
-    (n > 0).then(|| format!("{n} effect clip(s) preview unstyled"))
-}
-
-/// Everything the monitor can't show faithfully, joined. Until the proxy
-/// cache (M5), that's un-retimed speed, un-blended transitions, and
-/// unapplied effects.
+/// Everything the monitor can't show faithfully, joined. Effects and
+/// transitions are rendered to proxies (see [`composite_segments`]), so the
+/// only remaining gap is un-retimed speed.
 pub fn monitor_notices(project: &Project) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(s) = speed_notice(project) {
-        parts.push(s);
-    }
-    if let Some(t) = transition_notice(project) {
-        parts.push(t);
-    }
-    if let Some(e) = effects_notice(project) {
-        parts.push(e);
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
+    let notices: Vec<String> = [speed_notice(project)].into_iter().flatten().collect();
+    (!notices.is_empty()).then(|| notices.join(" · "))
 }
 
-/// Flatten the video tracks into one preview sequence, topmost first: at
-/// each instant the highest unmuted video track with a clip wins, and only
-/// where every track is a gap does the preview show black. This is what the
-/// monitor plays, so a gap in an upper layer reveals the layer below rather
-/// than stopping playback.
-pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
+/// One interval of the composite: the topmost track's material covering it,
+/// at `offset` into that segment for `len`, or a gap where every track is a
+/// gap. Pure — the layering decision is settled here; resolving an asset path
+/// or rendering a proxy happens in [`composite_segments`].
+#[derive(Debug)]
+enum Window<'a> {
+    Segment(&'a TimelineSegment, Seconds, Seconds),
+    Gap(Seconds),
+}
+
+/// The composite plan: the union of every unmuted video track's cut points,
+/// with the topmost segment picked per interval. A clip **or a transition**
+/// wins over the layers below it — a transition is rendered material (its
+/// proxy), not a hole; a gap falls through.
+fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError> {
     let total = project.timeline.end();
     if total <= Seconds::from_integer(0) {
         return Err(PreviewError::Empty);
@@ -205,33 +181,67 @@ pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewErro
     cuts.sort();
     cuts.dedup();
 
-    let mut segs: Vec<Segment> = Vec::new();
+    let mut windows = Vec::new();
     for w in cuts.windows(2) {
         let (a, b) = (w[0], w[1]);
         if b <= a {
             continue;
         }
-        // The topmost track with a clip covering [a, b).
+        // The topmost track with material (a clip or a transition) covering
+        // `[a, b)`; a gap falls through to the layer below.
         let picked = video.iter().rev().find_map(|t| {
             let si = t.index_at(a)?;
             match &t.segments[si] {
-                TimelineSegment::Clip(c) => Some((c, t.start_of(si))),
-                TimelineSegment::Gap(_) | TimelineSegment::Transition(_) => None,
+                TimelineSegment::Clip(_) | TimelineSegment::Transition(_) => {
+                    Some((&t.segments[si], t.start_of(si)))
+                }
+                TimelineSegment::Gap(_) => None,
             }
         });
-        match picked {
-            Some((c, seg_start)) => {
-                let asset = project
-                    .asset(c.asset)
-                    .ok_or(PreviewError::MissingAsset(c.asset))?;
-                segs.push(Segment::Clip {
-                    path: asset.path.clone(),
-                    // `a` is inside the clip: offset into its source.
-                    start: c.asset_in + (a - seg_start),
-                    length: b - a,
-                });
+        windows.push(match picked {
+            Some((seg, seg_start)) => Window::Segment(seg, a - seg_start, b - a),
+            None => Window::Gap(b - a),
+        });
+    }
+    Ok(windows)
+}
+
+/// Flatten the video tracks into one preview sequence, topmost first: at
+/// each instant the highest unmuted video track with material wins, and only
+/// where every track is a gap does the preview show black. This is what the
+/// monitor plays, so a gap in an upper layer reveals the layer below rather
+/// than stopping playback.
+///
+/// A segment with effects, or a transition, can't be expressed by `edl://`:
+/// that window plays the rendered proxy (the same one `nle edl` uses),
+/// offset into it like any source.
+pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
+    let mut segs: Vec<Segment> = Vec::new();
+    for w in composite_windows(project)? {
+        match w {
+            Window::Gap(len) => push_gap(&mut segs, len),
+            Window::Segment(seg, offset, len) => {
+                if crate::proxy::needs_proxy(seg) {
+                    let path = crate::proxy::proxy_for(project, seg)?;
+                    segs.push(Segment::Clip {
+                        path,
+                        start: offset,
+                        length: len,
+                    });
+                } else if let TimelineSegment::Clip(c) = seg {
+                    let asset = project
+                        .asset(c.asset)
+                        .ok_or(PreviewError::MissingAsset(c.asset))?;
+                    segs.push(Segment::Clip {
+                        path: asset.path.clone(),
+                        // `offset` is inside the clip: offset into its source.
+                        start: c.asset_in + offset,
+                        length: len,
+                    });
+                }
+                // Nothing else reaches here: only a clip gets through
+                // without a proxy, since every transition needs one.
             }
-            None => push_gap(&mut segs, b - a),
         }
     }
     Ok(segs)
@@ -449,7 +459,7 @@ mod tests {
     use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
     use nle_core::timeline::{
-        Clip as TimelineClip, Gap as TimelineGap, Segment as TimelineSegment, Transition,
+        Clip as TimelineClip, Effect, Gap as TimelineGap, Segment as TimelineSegment, Transition,
         TransitionKind, TransitionSource,
     };
 
@@ -476,9 +486,9 @@ mod tests {
     }
 
     #[test]
-    fn transition_notice_flags_transitions() {
+    fn a_transition_is_no_longer_a_monitor_caveat() {
+        // A transition is no longer a caveat: the monitor plays its proxy.
         let mut p = project_with_gap();
-        assert!(transition_notice(&p).is_none());
         p.timeline.video_track_mut().unwrap().segments.insert(
             1,
             TimelineSegment::Transition(Transition {
@@ -489,10 +499,64 @@ mod tests {
                 b: TransitionSource::Black,
             }),
         );
-        let notice = transition_notice(&p).expect("notice");
-        assert!(notice.contains("1 transition"), "{notice}");
-        let all = monitor_notices(&p).expect("notices");
-        assert!(all.contains("transition"), "{all}");
+        assert!(monitor_notices(&p).is_none(), "no caveat to report");
+    }
+
+    // The composite picks a transition over the layer below (it is rendered
+    // material) and routes it through the proxy cache.
+    #[test]
+    fn composite_plan_treats_a_transition_as_material_to_proxy() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let (low, _) = p.add_asset("/media/low.mp4".into(), probe_report("10"));
+        p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 4)];
+        let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![TimelineSegment::Transition(Transition {
+            id: 9,
+            dur: Seconds::from_integer(1),
+            kind: TransitionKind::Dissolve,
+            a: TransitionSource::Clip {
+                asset: low,
+                src_in: Seconds::from_integer(0),
+                src_out: Seconds::from_integer(1),
+            },
+            b: TransitionSource::Black,
+        })];
+
+        let windows = composite_windows(&p).unwrap();
+        assert_eq!(windows.len(), 2, "the transition's cuts split the low clip");
+        match &windows[0] {
+            Window::Segment(seg, offset, len) => {
+                assert!(matches!(seg, TimelineSegment::Transition(_)));
+                assert_eq!(*offset, Seconds::from_integer(0));
+                assert_eq!(*len, Seconds::from_integer(1));
+                assert!(
+                    crate::proxy::needs_proxy(seg),
+                    "a transition is rendered to a proxy"
+                );
+            }
+            other => panic!("expected the transition to win, got {other:?}"),
+        }
+        // Below the top track's end, the low clip shows through.
+        match &windows[1] {
+            Window::Segment(TimelineSegment::Clip(c), offset, len) => {
+                assert_eq!((c.asset, *offset, *len), (low, 1.into(), 3.into()));
+            }
+            other => panic!("expected the low clip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_plan_proxies_a_clip_with_effects() {
+        let mut p = composite_project();
+        if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
+            c.effects = vec![Effect::Scale { w: 2, h: 2 }];
+        }
+        let windows = composite_windows(&p).unwrap();
+        match &windows[1] {
+            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(seg), "{seg:?}"),
+            other => panic!("expected the top clip window, got {other:?}"),
+        }
     }
 
     fn project_with_gap() -> Project {
