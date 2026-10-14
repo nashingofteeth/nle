@@ -163,7 +163,9 @@ below.)
   seconds and slowly drifted speed clips).
 - **Editing:** timeline↔source deltas scale by speed (`source_span`, or
   `Clip::source_at`/`timeline_offset_of`); a speed change **always ripples**
-  (`set_speed` / `:speed` / `nle speed`, and the `R` key).
+  (`set_speed` / `:speed` / `nle speed`, and the `R` key) and lands the new
+  duration on the frame grid, storing the rate that fits (`source / duration`)
+  with the source span untouched.
 - **Repair:** `nle purge-stumps [--track N]` / `:purge` drops sub-frame stumps
   and snaps a drifted timeline back onto the frame grid (cumulative snap, so
   cuts stay within half a frame).

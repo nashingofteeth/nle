@@ -979,10 +979,10 @@ pub fn set_speed_on(
     project: &Project,
     track: usize,
     clip_id: u32,
-    speed: Seconds,
+    requested: Seconds,
 ) -> Result<Batch, EditError> {
-    if speed <= Seconds::from_integer(0) {
-        return Err(EditError::BadSpeed(format_seconds(&speed)));
+    if requested <= Seconds::from_integer(0) {
+        return Err(EditError::BadSpeed(format_seconds(&requested)));
     }
     let ti = track;
     let tr = track_at(project, ti)?;
@@ -996,8 +996,27 @@ pub fn set_speed_on(
     // A fast retime can shrink the timeline span below a frame (a 1-frame
     // clip at 2×): every other duration-changing op refuses sub-frame
     // spans, so this one must too.
-    let new_dur = (c.asset_out - c.asset_in) / speed;
-    at_least_a_frame(project, &new_dur)?;
+    let want = (c.asset_out - c.asset_in) / requested;
+    at_least_a_frame(project, &want)?;
+
+    // Land the duration on the frame grid, like every other duration-changing
+    // op — but keep the source span exactly as selected and let the *rate*
+    // absorb the snap. `speed` is then `source / duration`, the rate the
+    // render actually applies, so the model and the export can't disagree.
+    // (Bending the span instead reads one extra source frame, and the render
+    // grows a frame per retimed clip — measured 87, 174 against the model's
+    // 86, 172.)
+    let fps = project.fps.ok_or(EditError::NoFps)?;
+    let frames = (want * fps).round().to_integer();
+    if frames < 1 {
+        return Err(EditError::TooShort);
+    }
+    let new_dur = Seconds::from_integer(frames) / fps;
+    // 0.7× of a 2 s clip is 85.714 frames: the grid takes 86, and the rate
+    // that fits is 30/43. The notice says both, so a typed rate that can't
+    // land exactly doesn't look like a bug.
+    let speed = (c.asset_out - c.asset_in) / new_dur;
+
     // A slow-down lengthens the track: keep it inside the timeline limit
     // (the validate backstop would call it "corrupt", which it isn't).
     if tr.end() - c.duration() + new_dur > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
@@ -1005,6 +1024,15 @@ pub fn set_speed_on(
     }
     let before = Segment::Clip(c.clone());
     let after = Segment::Clip(Clip { speed, ..c.clone() });
+    let desc = if speed == requested {
+        format!("speed clip #{clip_id} to {}x", format_seconds(&speed))
+    } else {
+        format!(
+            "speed clip #{clip_id} to {}x ({}x rounded to the frame grid)",
+            format_seconds(&speed),
+            format_seconds(&requested)
+        )
+    };
     Ok(Batch {
         ops: vec![EditOp::Replace {
             track: ti,
@@ -1012,7 +1040,7 @@ pub fn set_speed_on(
             before,
             after,
         }],
-        desc: format!("speed clip #{} to {}x", clip_id, format_seconds(&speed)),
+        desc,
     })
 }
 
@@ -5782,6 +5810,61 @@ mod tests {
             set_speed(&p, 1, Seconds::from_integer(100)),
             Err(EditError::TooShort)
         ));
+    }
+
+    /// A rate is a rate, but the *timeline* duration it implies lands on the
+    /// frame grid. The source span stays exactly as selected and the rate
+    /// absorbs the snap, so the model and the render can't disagree.
+    #[test]
+    fn set_speed_lands_the_duration_on_the_frame_grid() {
+        let fps = Seconds::from_integer(30);
+        let frames = |d: Seconds| (d * fps).to_integer();
+        let mut p = fixture(); // [C1 src 1..3] [gap 1] [C2 src 0..2] @30 fps
+        let mut h = History::default();
+        let batch = set_speed(&p, 1, Seconds::new(7, 10)).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        let c = clip_by_id(&p, 1);
+        assert_eq!(frames(c.duration()), 86, "2 s / 0.7 = 2.857 s → 86 frames");
+        assert_eq!(
+            c.asset_out,
+            Seconds::from_integer(3),
+            "the selected source span is untouched"
+        );
+        assert_eq!(
+            c.speed,
+            Seconds::new(30, 43),
+            "…and the rate is source / duration = 2 s / (86/30 s)"
+        );
+        for seg in &p.timeline.video_track().unwrap().segments {
+            assert!(
+                (seg.duration() * fps).is_integer(),
+                "a segment is off the grid: {:?}",
+                seg.duration()
+            );
+        }
+
+        // No frame is claimed past the media either: a clip that already reads
+        // to the end of its asset slows down as-is (the span does not grow).
+        let mut p = Project::new();
+        p.fps = Some(fps);
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("3"));
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(3), // exactly the media
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })];
+        let mut h = History::default();
+        let batch = set_speed(&p, 1, Seconds::new(7, 10)).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let c = clip_by_id(&p, 1);
+        // 3 / 0.7 = 4.2857 s = 128.57 frames → 129 frames at 30/43.
+        assert_eq!(frames(c.duration()), 129);
+        assert_eq!(c.asset_out, Seconds::from_integer(3));
+        assert_eq!(c.speed, Seconds::new(30, 43));
     }
 
     fn transition_seg(id: u32, dur: Seconds, a_out: Seconds) -> Segment {

@@ -223,6 +223,14 @@ plainly.
   retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained outside
   [0.5, 2]); the 1× graph stays byte-identical. The monitor can't retime an
   EDL entry, so a non-1× clip goes through the proxy cache like an effect.
+  A rate change snaps the new *timeline* duration to the frame grid and stores
+  the rate that fits (`source / duration`), leaving the source span exactly as
+  selected — 0.7× of a 2 s clip is 86 frames at 30/43. Bending the span
+  instead reads one extra source frame and the render grows a frame per
+  retimed clip (measured 87, 174 against the model's 86, 172). A *rate
+  conform* from an EDL/OTIO import is the other way round: `clamp_to_media`
+  keeps its rate and nudges the span, because that rate is the source's
+  timebase, not a request.
 - **The monitor proxies whatever `edl://` can't express.** `preview::needs_proxy`
   (an effect, a non-1× retime, a transition) is the one list; the proxy is
   rendered by the *export* graph, so there is no second filter chain to drift,

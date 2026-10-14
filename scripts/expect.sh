@@ -385,6 +385,26 @@ check_no "red.mp4" "$edl" "a 2x clip plays its proxy (an EDL entry can't retime)
 check_has "/proxy/" "$edl" "…from the proxy cache"
 check_has "green.mp4" "$edl" "an untouched clip still plays its source"
 
+echo "== a rate that misses the frame grid snaps the timeline, not the source =="
+base
+$N --project b.json speed 1 0.7 >/dev/null
+out=$($N --project b.json show)
+# 2 s / 0.7 = 2.857 s = 85.714 frames. The clip takes 86 frames and the rate
+# becomes 30/43, so every boundary stays on the grid and the source span — the
+# material the user picked — is untouched.
+check_has "2.866667" "$out" "the clip lands on frame 86"
+check_has "@0.697674" "$out" "…at the rate that fits"
+$N --project b.json export -o fr.mp4 >/dev/null 2>&1
+got=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of csv=p=0 fr.mp4)
+# The model's frames: 86 (0.7x) + 60 + 60. A source span nudged to fit 86
+# frames would read one extra source frame and render 207.
+if [ "$got" = "206" ]; then
+  echo "  ✓ the render is the model's 206 frames (86+60+60)"
+else
+  echo "  ✗ the render is $got frames, the model says 206"
+  FAIL=$((FAIL+1))
+fi
+
 echo "== CLI-only guards =="
 out=$($N trim red.mp4 --in 0 --out 99 -o t.mp4 2>&1)
 check_has "beyond the file's duration" "$out" "trim refuses an --out past the end"
