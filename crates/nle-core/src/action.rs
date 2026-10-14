@@ -180,7 +180,7 @@ impl Action {
 
 /// How many slots the catalog has — the coverage tests assert exactly
 /// this many are reachable from each spelling.
-pub const SLOTS: usize = 16;
+pub const SLOTS: usize = 18;
 
 /// What running an action produced. `changed` tells the caller whether
 /// the project needs persisting (a yank only writes the register).
@@ -979,6 +979,59 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
     }
 }
 
+/// The `:effect` / `nle effect` usage string — one spelling for both
+/// front-ends.
+pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] crop --w --h [--x --y] | \
+     scale --w --h | eq [--brightness --contrast --saturation] | lut --path P";
+
+/// The parameters of an effect call, before the kind picks which of them
+/// apply. Shared by the `:cmd` grammar and the CLI so a new kind can't drift
+/// between them.
+#[derive(Debug, Clone, Default)]
+pub struct EffectArgs {
+    pub w: Option<u32>,
+    pub h: Option<u32>,
+    pub x: Option<u32>,
+    pub y: Option<u32>,
+    pub brightness: Option<f64>,
+    pub contrast: Option<f64>,
+    pub saturation: Option<f64>,
+    pub path: Option<String>,
+}
+
+/// Build a typed [`Effect`] from `kind` and its parameters. The one place the
+/// required flags and the `eq` neutral defaults live.
+pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError> {
+    let need = |v: Option<u32>, n: &str| -> Result<u32, ParseError> {
+        v.ok_or_else(|| ParseError::Invalid(format!("effect needs --{n}")))
+    };
+    match kind {
+        "crop" => Ok(Effect::Crop {
+            x: a.x.unwrap_or(0),
+            y: a.y.unwrap_or(0),
+            w: need(a.w, "w")?,
+            h: need(a.h, "h")?,
+        }),
+        "scale" => Ok(Effect::Scale {
+            w: need(a.w, "w")?,
+            h: need(a.h, "h")?,
+        }),
+        // ffmpeg's `eq` is neutral at brightness 0 / contrast 1 /
+        // saturation 1: 0 contrast and saturation mean flat and grey.
+        "eq" => Ok(Effect::Eq {
+            brightness: a.brightness.unwrap_or(0.0),
+            contrast: a.contrast.unwrap_or(1.0),
+            saturation: a.saturation.unwrap_or(1.0),
+        }),
+        "lut" => Ok(Effect::Lut {
+            path: a
+                .path
+                .ok_or_else(|| ParseError::Invalid("effect needs --path".to_string()))?,
+        }),
+        _ => Err(ParseError::Invalid(EFFECT_USAGE.to_string())),
+    }
+}
+
 /// Parse one `:cmd` line into an [`Action`].
 pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
     let (verb, mut f) = split_args(input)?;
@@ -1084,45 +1137,24 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             })
         }
         "effect" => {
-            let usage = ":effect [--clip N] [--track N] crop --w --h [--x --y] | scale --w --h | \
-                 eq [--brightness --contrast --saturation] | lut --path P";
             let track = parse_track(&mut f, d)?;
             let clip = opt_u32(&mut f, "clip")?
                 .ok_or_else(|| ParseError::Invalid("effect needs --clip N".to_string()))?;
             let kind = f
                 .positional()
-                .ok_or_else(|| ParseError::Invalid(usage.to_string()))?;
-            let need = |f: &mut Flags, n: &str| -> Result<u32, ParseError> {
-                opt_u32(f, n)?.ok_or_else(|| ParseError::Invalid(format!("effect needs --{n}")))
+                .ok_or_else(|| ParseError::Invalid(EFFECT_USAGE.to_string()))?;
+            let args = EffectArgs {
+                w: opt_u32(&mut f, "w")?,
+                h: opt_u32(&mut f, "h")?,
+                x: opt_u32(&mut f, "x")?,
+                y: opt_u32(&mut f, "y")?,
+                brightness: opt_time(&mut f, "brightness")?,
+                contrast: opt_time(&mut f, "contrast")?,
+                saturation: opt_time(&mut f, "saturation")?,
+                path: f.take("path"),
             };
-            let effect = match kind.as_str() {
-                "crop" => Effect::Crop {
-                    x: opt_u32(&mut f, "x")?.unwrap_or(0),
-                    y: opt_u32(&mut f, "y")?.unwrap_or(0),
-                    w: need(&mut f, "w")?,
-                    h: need(&mut f, "h")?,
-                },
-                "scale" => Effect::Scale {
-                    w: need(&mut f, "w")?,
-                    h: need(&mut f, "h")?,
-                },
-                "eq" => Effect::Eq {
-                    // ffmpeg's `eq` is neutral at brightness 0 / contrast 1 /
-                    // saturation 1 — defaulting contrast and saturation to 0
-                    // (as this did) desaturated and flattened the clip even
-                    // when only `--brightness` was given.
-                    brightness: opt_time(&mut f, "brightness")?.unwrap_or(0.0),
-                    contrast: opt_time(&mut f, "contrast")?.unwrap_or(1.0),
-                    saturation: opt_time(&mut f, "saturation")?.unwrap_or(1.0),
-                },
-                "lut" => Effect::Lut {
-                    path: f
-                        .take("path")
-                        .ok_or_else(|| ParseError::Invalid("effect needs --path".to_string()))?,
-                },
-                _ => return Err(ParseError::Invalid(usage.to_string())),
-            };
-            f.finish(usage)?;
+            let effect = effect_from_args(&kind, args)?;
+            f.finish(EFFECT_USAGE)?;
             Ok(Action::AddEffect {
                 track,
                 clip,
@@ -1343,6 +1375,8 @@ mod tests {
             "media rm 1",
             "undo",
             "redo",
+            "transition --at 3",
+            "effect crop --clip 1 --w 10 --h 10",
         ];
         let mut seen = vec![false; SLOTS];
         for spec in SPECS {

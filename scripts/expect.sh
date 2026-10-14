@@ -27,6 +27,14 @@ check_dur() { # check_dur FILE SECONDS LABEL
 }
 check_has() { if printf '%s' "$2" | grep -qF -- "$1"; then echo "  ✓ $3"; else echo "  ✗ $3 — no '$1' in: $(printf '%s' "$2" | head -3 | tr '\n' '|')"; FAIL=$((FAIL+1)); fi; }
 check_no() { if printf '%s' "$2" | grep -qF -- "$1"; then echo "  ✗ $3 — found '$1'"; FAIL=$((FAIL+1)); else echo "  ✓ $3"; fi; }
+px_at() { # px_at FILE TIME -> the frame's first pixel as hex (r g b)
+  ffmpeg -v error -y -ss "$2" -i "$1" -frames:v 1 -f rawvideo -pix_fmt rgb24 px.raw
+  local got; got=$(xxd -p -l 3 px.raw); rm -f px.raw; printf '%s' "$got"
+}
+check_px_ne() { # check_px_ne FILE TIME NOTHEX LABEL
+  local got; got=$(px_at "$1" "$2")
+  if [ "$got" != "$3" ]; then echo "  ✓ $4"; else echo "  ✗ $4 — still pure $got"; FAIL=$((FAIL+1)); fi
+}
 
 gen() { # gen NAME COLOR SIZE RATE DUR FREQ
   local name=$1 color=$2 size=$3 rate=$4 dur=$5 freq=$6
@@ -320,6 +328,35 @@ check_px otio.mp4 1 "$RED"    "OTIO clip 1"
 check_px otio.mp4 2.5 "$BLACK" "the OTIO gap"
 check_px otio.mp4 4 "$GREEN"  "OTIO clip 2"
 check_dur otio.mp4 5 "5 s"
+
+echo "== transitions (xfade/acrossfade) =="
+base
+$N --project b.json transition --at 2 --frames 15 >/dev/null
+export_ b.json t.mp4
+# Each neighbour gives up 15 f (0.5 s) and the transition takes its own 0.5 s.
+check_dur t.mp4 5.5 "a clip|clip transition shortens the timeline by its length"
+check_px t.mp4 1 "$RED"   "red before the seam"
+check_px t.mp4 5 "$BLUE"  "blue still follows"
+# The old cut at 2.0 is now a blend: neither side is pure there.
+check_px_ne t.mp4 1.75 "$RED"   "the seam is no longer a cut"
+check_px_ne t.mp4 1.75 "$GREEN" "…and not the incoming side either"
+# `--dur` and the fade kind are the same code path.
+base
+$N --project b.json transition fade --at 2 --dur 0.5 >/dev/null
+export_ b.json t.mp4
+check_dur t.mp4 5.5 "--dur and the fade kind agree"
+
+echo "== effects =="
+base
+# No eq parameter given: contrast/saturation must stay neutral (this used to
+# come back flat and grey).
+$N --project b.json effect eq --clip 1 >/dev/null
+export_ b.json fx.mp4
+check_px fx.mp4 1 "$RED" "eq defaults to a neutral filter"
+# An effect clip can't be expressed by `edl://`: the preview plays its proxy.
+edl=$($N --project b.json edl --track 1)
+check_no "red.mp4" "$edl" "an effect clip plays its proxy"
+check_has "/proxy/" "$edl" "…from the proxy cache"
 
 echo "== CLI-only guards =="
 out=$($N trim red.mp4 --in 0 --out 99 -o t.mp4 2>&1)

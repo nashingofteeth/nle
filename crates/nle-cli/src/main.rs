@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use nle_core::action::{EffectArgs, effect_from_args};
 use nle_core::detect::{Span, reconstruct};
 use nle_core::edit;
 use nle_core::edl::{self, EdlEvent};
@@ -53,8 +54,9 @@ use nle_core::project::wrong_kind;
 use nle_core::time::{parse_signed_time, parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 use nle_core::{
-    Action, Asset, Edge, GapLen, Project, Seconds, Target, VideoSettings, format_seconds, frame_of,
-    load_register, parse_rate, parse_time, run_action, save_register, track_label,
+    Action, Asset, Edge, GapLen, Project, Seconds, Target, TransitionKind, VideoSettings,
+    format_seconds, frame_of, load_register, parse_rate, parse_time, run_action, save_register,
+    track_label,
 };
 use nle_ffmpeg::detect::{DetectOptions, detect};
 use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
@@ -257,6 +259,60 @@ enum Cmd {
         /// Ripple: push followers aside instead of overwriting
         #[arg(long)]
         ripple: bool,
+    },
+    /// Add a crossfade at a boundary (TUI `x`; the default kind is a dissolve)
+    Transition {
+        /// Which shape: dissolve (default) or fade (through black)
+        #[arg(value_name = "KIND")]
+        kind: Option<String>,
+        /// Where the cut is (seconds or timecode)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        at: String,
+        /// Length in frames (default: one second)
+        #[arg(long, allow_negative_numbers = true)]
+        frames: Option<i64>,
+        /// Length as a time (alternative to --frames)
+        #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
+        dur: Option<String>,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+    },
+    /// Append a visual effect to a clip (TUI `:effect`)
+    Effect {
+        /// Which effect: crop | scale | eq | lut
+        #[arg(value_name = "KIND")]
+        kind: String,
+        /// The clip to attach it to
+        #[arg(long)]
+        clip: u32,
+        /// Track number (1-based; default 1)
+        #[arg(long, default_value_t = 1)]
+        track: usize,
+        /// crop/scale width
+        #[arg(long)]
+        w: Option<u32>,
+        /// crop/scale height
+        #[arg(long)]
+        h: Option<u32>,
+        /// crop x offset
+        #[arg(long)]
+        x: Option<u32>,
+        /// crop y offset
+        #[arg(long)]
+        y: Option<u32>,
+        /// eq brightness (0 is neutral)
+        #[arg(long, value_name = "F", allow_negative_numbers = true)]
+        brightness: Option<f64>,
+        /// eq contrast (1 is neutral)
+        #[arg(long, value_name = "F", allow_negative_numbers = true)]
+        contrast: Option<f64>,
+        /// eq saturation (1 is neutral)
+        #[arg(long, value_name = "F", allow_negative_numbers = true)]
+        saturation: Option<f64>,
+        /// lut3d file
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
     },
     /// Undo the last edit (TUI `u`; works on TUI-made edits too)
     Undo {},
@@ -677,6 +733,67 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                 .transpose()
                 .map(|track| Action::PurgeStumps { track }),
         ),
+        Cmd::Transition {
+            kind,
+            at,
+            frames,
+            dur,
+            track,
+        } => Some(cli_index(*track, "--track").and_then(|track| {
+            let at = cli_time(at)?;
+            let kind = match kind.as_deref() {
+                None | Some("dissolve") => TransitionKind::Dissolve,
+                Some("fade") => TransitionKind::FadeBlack,
+                Some(other) => {
+                    return Err(format!("unknown kind {other:?} — use dissolve or fade"));
+                }
+            };
+            let len = match (frames, dur) {
+                (Some(_), Some(_)) => return Err("use either --frames or --dur".to_string()),
+                (Some(n), None) => GapLen::Frames(*n),
+                (None, Some(d)) => GapLen::Seconds(cli_time(d)?),
+                (None, None) => GapLen::Seconds(1.0),
+            };
+            Ok(Action::Transition {
+                track,
+                at,
+                kind,
+                len,
+            })
+        })),
+        Cmd::Effect {
+            kind,
+            clip,
+            track,
+            w,
+            h,
+            x,
+            y,
+            brightness,
+            contrast,
+            saturation,
+            path,
+        } => Some(cli_index(*track, "--track").and_then(|track| {
+            effect_from_args(
+                kind,
+                EffectArgs {
+                    w: *w,
+                    h: *h,
+                    x: *x,
+                    y: *y,
+                    brightness: *brightness,
+                    contrast: *contrast,
+                    saturation: *saturation,
+                    path: path.clone(),
+                },
+            )
+            .map_err(|e| e.to_string())
+            .map(|effect| Action::AddEffect {
+                track,
+                clip: *clip,
+                effect,
+            })
+        })),
         Cmd::Undo {} => Some(Ok(Action::Undo)),
         Cmd::Redo {} => Some(Ok(Action::Redo)),
         Cmd::Track { action } => match action {
@@ -2478,6 +2595,26 @@ mod tests {
             },
             Cmd::Undo {},
             Cmd::Redo {},
+            Cmd::Transition {
+                kind: None,
+                at: "1".into(),
+                frames: Some(3),
+                dur: None,
+                track: 1,
+            },
+            Cmd::Effect {
+                kind: "crop".into(),
+                clip: 1,
+                track: 1,
+                w: Some(10),
+                h: Some(10),
+                x: None,
+                y: None,
+                brightness: None,
+                contrast: None,
+                saturation: None,
+                path: None,
+            },
         ];
         let mut seen = vec![false; nle_core::action::SLOTS];
         for cmd in &cmds {
