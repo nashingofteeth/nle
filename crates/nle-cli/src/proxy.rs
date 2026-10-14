@@ -26,14 +26,37 @@ pub enum ProxyError {
     Io(#[from] std::io::Error),
 }
 
-/// Does this segment need a proxy (something `edl://` can't express)? A
-/// speed clip is included: mpv's EDL has no rate concept, so playing the
-/// source directly would show the wrong span at 1×.
-pub fn needs_proxy(seg: &Segment) -> bool {
+/// Does this segment need a proxy (something `edl://` can't express)?
+///
+/// An EDL entry plays a file the way mpv finds it: no filter, no rate, no
+/// scale. So a proxy is needed for
+/// - an effect, or a non-1× retime (the raw source would play unfiltered);
+/// - a transition (it is a blend of two sides);
+/// - a clip whose picture **size** differs from the sequence's. The export
+///   scales every clip to the sequence geometry (`scale=w:h,setsar=1`), while
+///   mpv re-frames a raw file to *its* aspect (bars) — and the transition
+///   beside such a clip *is* scaled, so the framing would jump at the seam.
+pub fn needs_proxy(project: &Project, seg: &Segment) -> bool {
     match seg {
-        Segment::Clip(c) => !c.effects.is_empty() || c.speed != Seconds::from_integer(1),
+        Segment::Clip(c) => {
+            !c.effects.is_empty()
+                || c.speed != Seconds::from_integer(1)
+                || off_geometry(project, c.asset)
+        }
         Segment::Transition(_) => true,
         Segment::Gap(_) => false,
+    }
+}
+
+/// Whether the asset's picture size differs from the sequence's, so `edl://`
+/// would preview it at another size/aspect than the export renders.
+fn off_geometry(project: &Project, asset: u32) -> bool {
+    let Some(v) = &project.video else {
+        return false;
+    };
+    match project.asset(asset).and_then(|a| a.video_size()) {
+        Some((w, h)) => (w, h) != (v.width, v.height),
+        None => false,
     }
 }
 
@@ -149,32 +172,79 @@ mod tests {
         ))
     }
 
+    fn probe_size(w: u32, h: u32) -> nle_core::RawProbe {
+        nle_core::RawProbe {
+            streams: vec![nle_core::RawStream {
+                index: 0,
+                codec_type: Some("video".into()),
+                width: Some(w),
+                height: Some(h),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn needs_proxy_only_for_what_edl_cant_express() {
+        let p = Project::new();
         // A plain clip and a gap play straight from source.
-        assert!(!needs_proxy(&clip()));
-        assert!(!needs_proxy(&Segment::Gap(Gap {
-            duration: Seconds::from_integer(1)
-        })));
+        assert!(!needs_proxy(&p, &clip()));
+        assert!(!needs_proxy(
+            &p,
+            &Segment::Gap(Gap {
+                duration: Seconds::from_integer(1)
+            })
+        ));
         // An effect clip and a transition need rendering.
         let mut c = clip();
         if let Segment::Clip(cl) = &mut c {
             cl.effects = vec![Effect::Scale { w: 2, h: 2 }];
         }
-        assert!(needs_proxy(&c), "effects are rendered");
+        assert!(needs_proxy(&p, &c), "effects are rendered");
         // …and so does a retimed clip: an EDL entry plays its source at 1×.
         let mut s = clip();
         if let Segment::Clip(cl) = &mut s {
             cl.speed = Seconds::new(1, 2);
         }
-        assert!(needs_proxy(&s), "speed is rendered");
-        assert!(needs_proxy(&Segment::Transition(Transition {
-            id: 1,
-            dur: Seconds::from_integer(1),
-            kind: TransitionKind::Dissolve,
-            a: TransitionSource::Black,
-            b: TransitionSource::Black,
-        })));
+        assert!(needs_proxy(&p, &s), "speed is rendered");
+        assert!(needs_proxy(
+            &p,
+            &Segment::Transition(Transition {
+                id: 1,
+                dur: Seconds::from_integer(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Black,
+                b: TransitionSource::Black,
+            })
+        ));
+    }
+
+    /// A clip whose picture size differs from the sequence's is scaled by the
+    /// export but re-framed (bars) by mpv through `edl://`, so it needs a
+    /// proxy too — otherwise the framing jumps at the transition beside it.
+    #[test]
+    fn a_clip_off_the_sequence_geometry_needs_a_proxy() {
+        let mut p = Project::new();
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (wide, _) = p.add_asset("/media/wide.mp4".into(), probe_size(640, 360));
+        let (same, _) = p.add_asset("/media/same.mp4".into(), probe_size(320, 240));
+        let clip_of = |asset| {
+            Segment::Clip(Clip::new(
+                1,
+                asset,
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+            ))
+        };
+        assert!(needs_proxy(&p, &clip_of(wide)), "off the sequence size");
+        assert!(
+            !needs_proxy(&p, &clip_of(same)),
+            "the sequence size plays raw"
+        );
     }
 
     #[test]

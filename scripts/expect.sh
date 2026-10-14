@@ -40,6 +40,32 @@ check_px_ne() { # check_px_ne FILE TIME NOTHEX LABEL
   local got; got=$(px_at "$1" "$2")
   if [ "$got" != "$3" ]; then echo "  ✓ $4"; else echo "  ✗ $4 — still pure $got"; FAIL=$((FAIL+1)); fi
 }
+check_edl_geometry() { # check_edl_geometry EDL WxH LABEL
+  # mpv plays every EDL entry into one window: an entry at another size is
+  # re-framed (bars), so the framing jumps when the monitor crosses into it.
+  local bad; bad=$(python3 - "$1" "$2" <<'PY'
+import subprocess, sys
+edl, want = sys.argv[1], sys.argv[2]
+bad = 0
+for entry in edl.replace("edl://", "").split(";"):
+    i = entry.index("%", 1)
+    path = entry[i + 1 : i + 1 + int(entry[1:i])]
+    got = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+        capture_output=True, text=True).stdout.strip()
+    if got != want:
+        bad += 1
+print(bad)
+PY
+)
+  if [ "$bad" = "0" ]; then
+    echo "  ✓ $3"
+  else
+    echo "  ✗ $3 — $bad entry(ies) not $2"
+    FAIL=$((FAIL+1))
+  fi
+}
 
 gen() { # gen NAME COLOR SIZE RATE DUR FREQ
   local name=$1 color=$2 size=$3 rate=$4 dur=$5 freq=$6
@@ -424,6 +450,21 @@ else
   echo "  ✗ the render is $got frames, the model says 206"
   FAIL=$((FAIL+1))
 fi
+
+echo "== an off-sequence clip previews at the sequence size =="
+gen wide169.mp4 blue 640x360 30 5 880
+rm -f ar.json ar.history.json ar.clipboard.json
+$N --project ar.json init --force >/dev/null
+$N --project ar.json import red.mp4 wide169.mp4 >/dev/null
+$N --project ar.json add red.mp4     --in 0 --out 2 >/dev/null # 4:3 sets the sequence
+$N --project ar.json add wide169.mp4 --at 2 --in 0 --out 2 >/dev/null
+$N --project ar.json transition --at 2 --frames 30 >/dev/null
+edl=$($N --project ar.json edl --track 1)
+# mpv re-frames a raw file to its own aspect (bars) but plays the transition's
+# proxy already scaled to the sequence, so the wide clip must be a proxy too —
+# otherwise the framing jumps as the monitor leaves the dissolve.
+check_no "wide169.mp4" "$edl" "the 16:9 clip is proxied, not played raw"
+check_edl_geometry "$edl" "320,240" "every entry is the sequence's 320x240"
 
 echo "== CLI-only guards =="
 out=$($N trim red.mp4 --in 0 --out 99 -o t.mp4 2>&1)

@@ -241,7 +241,10 @@ plainly.
   keeps its rate and nudges the span, because that rate is the source's
   timebase, not a request.
 - **The monitor proxies whatever `edl://` can't express.** `preview::needs_proxy`
-  (an effect, a non-1× retime, a transition) is the one list; the proxy is
+  (an effect, a non-1× retime, a transition, or a clip whose picture size isn't
+  the sequence's — mpv re-frames a raw file to *its* aspect while the export
+  scales it and the transition beside it is already scaled, so the framing would
+  jump at the seam) is the one list; the proxy is
   rendered by the *export* graph, so there is no second filter chain to drift,
   and cached under `~/.cache/nle/proxy` by a hash of the segment + geometry +
   fps + each asset's path/mtime. The render is `export_quiet` — the monitor

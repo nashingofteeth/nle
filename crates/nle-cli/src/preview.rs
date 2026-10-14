@@ -78,9 +78,10 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
 
     let mut segs = Vec::new();
     for seg in &track.segments {
-        // Effects, a retime and transitions can't be expressed by `edl://`:
-        // play the rendered proxy instead of the raw source.
-        if crate::proxy::needs_proxy(seg) {
+        // Effects, a retime, a transition and an off-sequence size can't be
+        // expressed by `edl://`: play the rendered proxy instead of the raw
+        // source.
+        if crate::proxy::needs_proxy(project, seg) {
             let p = crate::proxy::proxy_for(project, seg)?;
             segs.push(Segment::Clip {
                 path: p,
@@ -195,7 +196,7 @@ pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewErro
         match w {
             Window::Gap(len) => push_gap(&mut segs, len),
             Window::Segment(seg, offset, len) => {
-                if crate::proxy::needs_proxy(seg) {
+                if crate::proxy::needs_proxy(project, seg) {
                     let path = crate::proxy::proxy_for(project, seg)?;
                     segs.push(Segment::Clip {
                         path,
@@ -480,7 +481,7 @@ mod tests {
                 assert_eq!(*offset, Seconds::from_integer(0));
                 assert_eq!(*len, Seconds::from_integer(1));
                 assert!(
-                    crate::proxy::needs_proxy(seg),
+                    crate::proxy::needs_proxy(&p, seg),
                     "a transition is rendered to a proxy"
                 );
             }
@@ -504,7 +505,7 @@ mod tests {
         }
         let windows = composite_windows(&p).unwrap();
         match &windows[1] {
-            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(seg), "{seg:?}"),
+            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
             other => panic!("expected the top clip window, got {other:?}"),
         }
 
@@ -515,7 +516,7 @@ mod tests {
         }
         let windows = composite_windows(&p).unwrap();
         match &windows[1] {
-            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(seg), "{seg:?}"),
+            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
             other => panic!("expected the top clip window, got {other:?}"),
         }
     }

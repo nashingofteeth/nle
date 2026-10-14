@@ -273,7 +273,8 @@ below.)
   creates them. Undoable (`Atom::Clip`). `merge_pair` only joins clips with
   matching effects; a paste carries them over.
 - **Proxy cache:** segments `edl://` can't express (effects, transitions,
-  retimes)
+  retimes, an off-sequence picture size — mpv would re-frame that one while the
+  export scales it, so the framing would jump at a transition's edge)
   are rendered once into `~/.cache/nle/proxy/<hash>.mp4` and the monitor
   plays the proxy; the hash covers the segment + geometry + frame rate +
   each asset's path **and mtime**. The render puts the segment on its own
