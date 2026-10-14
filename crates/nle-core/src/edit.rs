@@ -1997,7 +1997,8 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
 
 /// `dd` — delete what's under the playhead, leaving a gap where a clip
 /// was (the timeline end is preserved); a gap under the playhead is
-/// removed (shrinking the timeline).
+/// removed (shrinking the timeline); a transition is removed and hands the
+/// frames it had trimmed off its neighbours back to them.
 pub fn delete_under_on(project: &Project, track: usize, playhead: f64) -> Result<Batch, EditError> {
     let t = snap(project, playhead)?;
     let (ti, si) = {
@@ -2009,7 +2010,8 @@ pub fn delete_under_on(project: &Project, track: usize, playhead: f64) -> Result
     };
     let seg = track_at(project, ti)?.segments[si].clone();
     match seg {
-        // A transition isn't media: removing it ripples, like a gap.
+        // Removing a transition gives its trimmed spans back to the
+        // neighbours (see `delete_transition_on`).
         Segment::Transition(_) => delete_segment_ripple(project, ti, si),
         Segment::Clip(c) => {
             let dur = c.duration();
@@ -2143,8 +2145,94 @@ pub fn delete_clip_ripple_by_id_on(
     delete_segment_ripple(project, ti, si)
 }
 
+/// Remove a transition, handing each side's trimmed span back to the
+/// neighbour it was taken from — so `x` then `dd` round-trips. A side is only
+/// restored when its neighbour still lines up exactly (same asset, contiguous
+/// source); a neighbour edited since `x` is left alone and the material that
+/// transition held is simply gone (undo is the way back). The neighbours are
+/// *not* merged: before `x` they were two segments, and removing it must not
+/// fuse them.
+fn delete_transition_on(
+    project: &Project,
+    ti: usize,
+    si: usize,
+    t: Transition,
+) -> Result<Batch, EditError> {
+    let segs = &track_at(project, ti)?.segments;
+    let mut ops: Vec<EditOp> = Vec::new();
+    let mut restored: Vec<&str> = Vec::new();
+
+    // Outgoing side: the transition holds the left neighbour's trimmed tail,
+    // so giving it back means extending that clip's out-point.
+    if let Some(Segment::Clip(left)) = si.checked_sub(1).and_then(|i| segs.get(i))
+        && let TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+        } = &t.a
+        && left.asset == *asset
+        && left.asset_out == *src_in
+    {
+        let after = Clip {
+            asset_out: *src_out,
+            ..left.clone()
+        };
+        ops.push(EditOp::Replace {
+            track: ti,
+            index: si - 1,
+            before: Segment::Clip(left.clone()),
+            after: Segment::Clip(after),
+        });
+        restored.push("left");
+    }
+
+    // Incoming side: the transition holds the right neighbour's trimmed head,
+    // so giving it back means moving that clip's in-point earlier.
+    if let Some(Segment::Clip(right)) = segs.get(si + 1)
+        && let TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+        } = &t.b
+        && right.asset == *asset
+        && right.asset_in == *src_out
+    {
+        let after = Clip {
+            asset_in: *src_in,
+            ..right.clone()
+        };
+        ops.push(EditOp::Replace {
+            track: ti,
+            index: si + 1,
+            before: Segment::Clip(right.clone()),
+            after: Segment::Clip(after),
+        });
+        restored.push("right");
+    }
+
+    ops.push(EditOp::Remove {
+        track: ti,
+        index: si,
+        segment: Segment::Transition(t),
+    });
+    let desc = if restored.is_empty() {
+        "delete transition".to_string()
+    } else {
+        format!(
+            "delete transition (restored the {} handle)",
+            restored.join(" and ")
+        )
+    };
+    Ok(Batch { ops, desc })
+}
+
 fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batch, EditError> {
     let seg = track_at(project, ti)?.segments[si].clone();
+    // A transition owns the material either side of it: removing one hands
+    // that back rather than rippling, so `x` then `dd` round-trips.
+    if let Segment::Transition(t) = seg {
+        return delete_transition_on(project, ti, si, t);
+    }
     let mut ops = vec![EditOp::Remove {
         track: ti,
         index: si,
@@ -2153,7 +2241,7 @@ fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batc
     let mut desc = match seg {
         Segment::Clip(_) => "ripple delete".to_string(),
         Segment::Gap(_) => "delete gap (ripple)".to_string(),
-        Segment::Transition(_) => "delete transition".to_string(),
+        Segment::Transition(_) => unreachable!("handled above"),
     };
     // The removal joins si-1 and si+1: merge them when seamless.
     let segs = &track_at(project, ti)?.segments;
@@ -2647,7 +2735,8 @@ pub fn paste_ripple_on(
 
 /// Delete the segment at `index`: a gap, or a clip when `ripple`, is
 /// removed whole with its neighbours merged; a plain clip delete leaves a
-/// gap behind (dd semantics).
+/// gap behind (dd semantics); a transition is removed and gives its trimmed
+/// spans back to the neighbours.
 pub fn delete_segment_on(
     project: &Project,
     track: usize,
@@ -2661,7 +2750,8 @@ pub fn delete_segment_on(
         }
         Some(Segment::Clip(c)) => delete_clip_by_id_on(project, ti, c.id),
         Some(Segment::Gap(_)) => delete_segment_ripple(project, ti, index),
-        // A transition isn't media: removing it ripples, like a gap.
+        // Removing a transition gives its trimmed spans back to the
+        // neighbours (see `delete_transition_on`).
         Some(Segment::Transition(_)) => delete_segment_ripple(project, ti, index),
         None => Err(EditError::SegmentNotFound(index)),
     }
@@ -6048,6 +6138,121 @@ mod tests {
             add_effect_on(&p, ai, 9, Effect::Scale { w: 2, h: 2 }),
             Err(EditError::EffectsNeedVideo)
         ));
+    }
+
+    /// [Clip #1 [0..3) src 0..3] [Clip #2 [3..6) src 0..3] — a plain cut.
+    fn clip_pair() -> Project {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let clip = |id, in_, out| {
+            Segment::Clip(Clip {
+                id,
+                asset: a,
+                asset_in: Seconds::from_integer(in_),
+                asset_out: Seconds::from_integer(out),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            })
+        };
+        p.timeline.video_track_mut().unwrap().segments = vec![clip(1, 0, 3), clip(2, 0, 3)];
+        p
+    }
+
+    // `x` then `dd` is a round trip: removing a transition hands each
+    // neighbour's trimmed span back.
+    #[test]
+    fn deleting_a_transition_restores_the_neighbours() {
+        let mut p = clip_pair();
+        let before = p.clone();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(
+            p.timeline.end(),
+            Seconds::from_integer(5),
+            "clip|clip shortens the timeline"
+        );
+
+        // `dd` with the playhead inside the transition.
+        let batch = delete_under(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("left and right"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(p, before, "x then dd is a round trip");
+    }
+
+    // The clip|gap case: only the clip side has a handle to give back; the
+    // gap (and the length) stay.
+    #[test]
+    fn deleting_a_clip_gap_transition_restores_the_clip() {
+        let mut p = fixture();
+        let before = p.clone();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            2.0,
+            TransitionKind::FadeBlack,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        // [C1' 0..1][transition 1..2][gap 2..3][C2 3..5]
+        let batch = delete_under(&p, 1.5).unwrap();
+        assert!(batch.desc.contains("restored the left"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(
+            p, before,
+            "the clip's tail comes back, the gap is untouched"
+        );
+    }
+
+    // A neighbour edited since `x` no longer lines up: it is left alone (its
+    // material stays gone) while the other side still gets its own back.
+    #[test]
+    fn deleting_a_transition_leaves_a_stale_neighbour_alone() {
+        let mut p = clip_pair();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        // [C1' 0..2 src 0..2][transition 2..3][C2' 3..5 src 1..3]
+        // Pull #2's head further in: it no longer starts where `b` ends.
+        let Segment::Clip(c2) = &mut p.timeline.video_track_mut().unwrap().segments[2] else {
+            unreachable!()
+        };
+        c2.asset_in += Seconds::from_integer(1);
+
+        let batch = delete_under(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("restored the left"), "{}", batch.desc);
+        assert!(!batch.desc.contains("right"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        let segs = &p.timeline.video_track().unwrap().segments;
+        assert_eq!(segs.len(), 2, "the transition goes either way");
+        match &segs[..] {
+            [Segment::Clip(a), Segment::Clip(b)] => {
+                assert_eq!(a.asset_out, Seconds::from_integer(3), "left handle back");
+                assert_eq!(
+                    b.asset_in,
+                    Seconds::from_integer(2),
+                    "the stale neighbour is untouched"
+                );
+            }
+            other => panic!("expected the two clips, got {other:?}"),
+        }
     }
 
     /// A straddled transition that would shrink to under a frame is dropped

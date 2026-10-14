@@ -346,6 +346,16 @@ $N --project b.json transition fade --at 2 --dur 0.5 >/dev/null
 export_ b.json t.mp4
 check_dur t.mp4 5.5 "--dur and the fade kind agree"
 
+echo "== removing a transition gives the frames back =="
+base
+$N --project b.json transition --at 2 --frames 15 >/dev/null
+$N --project b.json delete --at 1.7 >/dev/null
+export_ b.json t.mp4
+check_dur t.mp4 6 "the timeline is whole again"
+check_px t.mp4 1 "$RED"   "red's tail is restored"
+check_px t.mp4 3 "$GREEN" "green's head is restored"
+check_px t.mp4 5 "$BLUE"  "blue is untouched"
+
 echo "== effects =="
 base
 # No eq parameter given: contrast/saturation must stay neutral (this used to
