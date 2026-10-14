@@ -3327,13 +3327,24 @@ fn trim_or_absorb_head(
         }
         // A straddled transition shrinks to its uncovered tail (like a gap);
         // its sources stay, so a shorter `dur` just means a faster crossfade.
+        // Under a frame is a sliver, not a transition: drop it whole.
         Segment::Transition(tr) => {
+            let remainder = start + tr.dur - t;
+            if at_least_a_frame(project, &remainder).is_err() {
+                absorbed.push(format!("transition #{}", tr.id));
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index,
+                    segment: Segment::Transition(tr),
+                });
+                return Ok(());
+            }
             ops.push(EditOp::Replace {
                 track: ti,
                 index,
                 before: Segment::Transition(tr.clone()),
                 after: Segment::Transition(Transition {
-                    dur: start + tr.dur - t,
+                    dur: remainder,
                     ..tr.clone()
                 }),
             });
@@ -3392,13 +3403,24 @@ fn trim_or_absorb_tail(
         }
         // A straddled transition shrinks to its uncovered head (like a gap);
         // its sources stay, so a shorter `dur` just means a faster crossfade.
+        // Under a frame is a sliver, not a transition: drop it whole.
         Segment::Transition(tr) => {
+            let remainder = tr.dur - (t - start);
+            if at_least_a_frame(project, &remainder).is_err() {
+                absorbed.push(format!("transition #{}", tr.id));
+                ops.push(EditOp::Remove {
+                    track: ti,
+                    index,
+                    segment: Segment::Transition(tr),
+                });
+                return Ok(());
+            }
             ops.push(EditOp::Replace {
                 track: ti,
                 index,
                 before: Segment::Transition(tr.clone()),
                 after: Segment::Transition(Transition {
-                    dur: tr.dur - (t - start),
+                    dur: remainder,
                     ..tr.clone()
                 }),
             });
@@ -6002,5 +6024,61 @@ mod tests {
             Segment::Clip(c) => assert_eq!(c.effects, vec![eff.clone()], "purge"),
             s => panic!("expected a clip, got {s:?}"),
         }
+    }
+
+    /// A straddled transition that would shrink to under a frame is dropped
+    /// whole (like a clip stump) rather than left as a sliver the export
+    /// can't render.
+    #[test]
+    fn a_straddled_transition_sliver_is_absorbed() {
+        let p = fixture();
+        let mut ops = Vec::new();
+        let mut absorbed = Vec::new();
+        // A 2/30 s transition, trimmed down to 1/60 s (half a frame).
+        trim_or_absorb_head(
+            &p,
+            0,
+            Straddle {
+                index: 1,
+                start: Seconds::from_integer(0),
+                seg: transition_seg(7, Seconds::new(2, 30), Seconds::from_integer(1)),
+            },
+            Seconds::new(1, 20),
+            &mut ops,
+            &mut absorbed,
+        )
+        .unwrap();
+        assert!(
+            matches!(ops[..], [EditOp::Remove { index: 1, .. }]),
+            "{ops:?}"
+        );
+        assert_eq!(absorbed, vec!["transition #7".to_string()]);
+
+        // One whole frame left: it shrinks to that frame instead.
+        let mut ops = Vec::new();
+        let mut absorbed = Vec::new();
+        trim_or_absorb_head(
+            &p,
+            0,
+            Straddle {
+                index: 1,
+                start: Seconds::from_integer(0),
+                seg: transition_seg(7, Seconds::new(2, 30), Seconds::from_integer(1)),
+            },
+            Seconds::new(1, 30),
+            &mut ops,
+            &mut absorbed,
+        )
+        .unwrap();
+        match &ops[..] {
+            [
+                EditOp::Replace {
+                    after: Segment::Transition(t),
+                    ..
+                },
+            ] => assert_eq!(t.dur, Seconds::new(1, 30), "shrunk to the one frame left"),
+            other => panic!("expected a shrink, got {other:?}"),
+        }
+        assert!(absorbed.is_empty());
     }
 }
