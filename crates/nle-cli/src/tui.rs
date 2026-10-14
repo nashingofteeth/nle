@@ -2174,8 +2174,12 @@ fn edit_anchor(project: &Project, playhead: f64, ti: usize) -> Option<Anchor> {
         TimelineSegment::Gap(_) => Some(Anchor::Gap(GapAnchor {
             start: secs(&track.start_of(idx)),
         })),
-        // Edits on a transition are refused, so there's nothing to anchor.
-        TimelineSegment::Transition(_) => None,
+        // A transition is only ever deleted (rippling), so — like a gap — the
+        // playhead lands on the seam its neighbours then share. Other edits
+        // over one are refused, so there is nothing else to anchor.
+        TimelineSegment::Transition(_) => Some(Anchor::Gap(GapAnchor {
+            start: secs(&track.start_of(idx)),
+        })),
     }
 }
 
@@ -3754,7 +3758,9 @@ fn truncate_label(label: &str, width: u16) -> String {
 mod tests {
     use super::*;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
-    use nle_core::timeline::{Gap as TimelineGap, Timeline, Track, TrackKind};
+    use nle_core::timeline::{
+        Gap as TimelineGap, Timeline, Track, TrackKind, Transition, TransitionSource,
+    };
     use std::path::PathBuf;
 
     fn asset_project() -> Project {
@@ -5298,6 +5304,38 @@ mod tests {
             edit_anchor(&app.project, 4.0, 0),
             Some(Anchor::Gap(_))
         ));
+    }
+
+    // A transition is only ever deleted (`dd`/`D` ripple it), so the playhead
+    // lands on the seam its neighbours then share — like a gap.
+    #[test]
+    fn playhead_lands_on_the_seam_a_deleted_transition_leaves() {
+        let mut p = asset_project();
+        // Swap the gap for a 2 s transition in the same [3,5) slot.
+        p.timeline.video_track_mut().unwrap().segments[1] =
+            TimelineSegment::Transition(Transition {
+                id: 9,
+                dur: Seconds::from_integer(2),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: 1,
+                    src_in: Seconds::from_integer(3),
+                    src_out: Seconds::from_integer(4),
+                },
+                b: TransitionSource::Clip {
+                    asset: 1,
+                    src_in: Seconds::from_integer(0),
+                    src_out: Seconds::from_integer(1),
+                },
+            });
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.playhead = 4.0; // inside the transition
+        let anchor = edit_anchor(&app.project, app.playhead, 0);
+        assert_eq!(anchor, Some(Anchor::Gap(GapAnchor { start: 3.0 })));
+        let batch = edit::delete_under(&app.project, app.playhead).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 3.0, "cut between the clips");
     }
 
     // The anchor maps through a speed clip's rate: the media frame is a
