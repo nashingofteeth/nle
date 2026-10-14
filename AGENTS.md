@@ -221,7 +221,14 @@ plainly.
   scales by speed (`source_span`). **A speed change always ripples** — the
   timeline is a sequence, so a new duration moves every follower. Export
   retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained outside
-  [0.5, 2]); the 1× graph stays byte-identical.
+  [0.5, 2]); the 1× graph stays byte-identical. The monitor can't retime an
+  EDL entry, so a non-1× clip goes through the proxy cache like an effect.
+- **The monitor proxies whatever `edl://` can't express.** `preview::needs_proxy`
+  (an effect, a non-1× retime, a transition) is the one list; the proxy is
+  rendered by the *export* graph, so there is no second filter chain to drift,
+  and cached under `~/.cache/nle/proxy` by a hash of the segment + geometry +
+  fps + each asset's path/mtime. The render is `export_quiet` — the monitor
+  calls it, so ffmpeg must never write to the TUI's stderr.
 - **Any timeline↔source mapping must scale by `Clip.speed`.** Edits use
   `source_span` (`edit.rs`); anything outside it uses `Clip::source_at` /
   `Clip::timeline_offset_of`. The playhead anchor missed the factor and

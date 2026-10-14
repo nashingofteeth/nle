@@ -10,6 +10,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use nle_core::Project;
+use nle_core::Seconds;
 use nle_core::timeline::{Segment, Track, TrackKind};
 use nle_ffmpeg::graph::ExportSpec;
 use nle_ffmpeg::{Encoder, ExportError, export_quiet};
@@ -25,10 +26,12 @@ pub enum ProxyError {
     Io(#[from] std::io::Error),
 }
 
-/// Does this segment need a proxy (something `edl://` can't express)?
+/// Does this segment need a proxy (something `edl://` can't express)? A
+/// speed clip is included: mpv's EDL has no rate concept, so playing the
+/// source directly would show the wrong span at 1×.
 pub fn needs_proxy(seg: &Segment) -> bool {
     match seg {
-        Segment::Clip(c) => !c.effects.is_empty(),
+        Segment::Clip(c) => !c.effects.is_empty() || c.speed != Seconds::from_integer(1),
         Segment::Transition(_) => true,
         Segment::Gap(_) => false,
     }
@@ -135,7 +138,6 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nle_core::Seconds;
     use nle_core::timeline::{Clip, Effect, Gap, Transition, TransitionKind, TransitionSource};
 
     fn clip() -> Segment {
@@ -160,6 +162,12 @@ mod tests {
             cl.effects = vec![Effect::Scale { w: 2, h: 2 }];
         }
         assert!(needs_proxy(&c), "effects are rendered");
+        // …and so does a retimed clip: an EDL entry plays its source at 1×.
+        let mut s = clip();
+        if let Segment::Clip(cl) = &mut s {
+            cl.speed = Seconds::new(1, 2);
+        }
+        assert!(needs_proxy(&s), "speed is rendered");
         assert!(needs_proxy(&Segment::Transition(Transition {
             id: 1,
             dur: Seconds::from_integer(1),
@@ -180,6 +188,11 @@ mod tests {
         let ha = proxy_hash(&p, &a, 320, 240);
         assert_eq!(ha, proxy_hash(&p, &a, 320, 240), "stable");
         assert_ne!(ha, proxy_hash(&p, &b, 320, 240), "effects change it");
+        let mut s = clip();
+        if let Segment::Clip(cl) = &mut s {
+            cl.speed = Seconds::new(1, 2);
+        }
+        assert_ne!(ha, proxy_hash(&p, &s, 320, 240), "speed changes it");
         assert_ne!(
             ha,
             proxy_hash(&p, &a, 640, 480),

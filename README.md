@@ -45,7 +45,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   fx:        x cross-dissolve at the boundary (count = frames) ·
 #              :transition [dissolve|fade] [--dur T|--frames N] ·
 #              :effect [--clip N] crop|scale|eq|lut … · rendered at export;
-#              the monitor plays a rendered proxy for effects/transitions ·
+#              the monitor plays a rendered proxy for effects/speed/transitions ·
 #              dd/D removes one, giving the frames it trimmed back
 #   commands:  the :cmd line is the CLI grammar, flag for flag — every
 #              action has both spellings:

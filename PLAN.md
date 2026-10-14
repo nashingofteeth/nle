@@ -169,8 +169,8 @@ below.)
   cuts stay within half a frame).
 - **Export:** `setpts=(PTS-STARTPTS)/speed`, `atempo` (chained outside its
   range, e.g. 0.4× → 0.5 × 0.8008), source-span trim; the 1× graph stays
-  byte-identical. Preview plays speed clips at 1× with a notice (mpv's EDL has
-  no speed).
+  byte-identical. Preview plays a speed clip from a rendered proxy (mpv's
+  EDL has no rate).
 
 **Deferred:** OTIO transitions/nesting; audio-only OTIO.
 
@@ -269,7 +269,8 @@ below.)
   the geometry normalize (so layers stay uniform for `overlay`); `:effect`
   creates them. Undoable (`Atom::Clip`). `merge_pair` only joins clips with
   matching effects; a paste carries them over.
-- **Proxy cache:** segments `edl://` can't express (effects, transitions)
+- **Proxy cache:** segments `edl://` can't express (effects, transitions,
+  retimes)
   are rendered once into `~/.cache/nle/proxy/<hash>.mp4` and the monitor
   plays the proxy; the hash covers the segment + geometry + frame rate +
   each asset's path **and mtime**. The render puts the segment on its own

@@ -78,8 +78,8 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
 
     let mut segs = Vec::new();
     for seg in &track.segments {
-        // Effects and transitions can't be expressed by `edl://`: play the
-        // rendered proxy instead of the raw source.
+        // Effects, a retime and transitions can't be expressed by `edl://`:
+        // play the rendered proxy instead of the raw source.
         if crate::proxy::needs_proxy(seg) {
             let p = crate::proxy::proxy_for(project, seg)?;
             segs.push(Segment::Clip {
@@ -110,33 +110,6 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
         segs.push(Segment::Gap { length: tail });
     }
     Ok(segs)
-}
-
-/// A notice for the monitor when any clip plays at a non-1× speed: mpv's
-/// EDL has no speed concept, so the monitor plays those clips at 1× and
-/// reads the wrong source span. A clip with effects is retimed by its proxy
-/// (see [`composite_segments`]) and is skipped; editing and export are
-/// unaffected.
-pub fn speed_notice(project: &Project) -> Option<String> {
-    let n = project
-        .timeline
-        .tracks
-        .iter()
-        .flat_map(|t| t.segments.iter())
-        .filter(|s| {
-            matches!(s, TimelineSegment::Clip(c)
-                if c.speed != Seconds::from_integer(1) && c.effects.is_empty())
-        })
-        .count();
-    (n > 0).then(|| format!("monitor is 1x: {n} speed clip(s) play at normal speed"))
-}
-
-/// Everything the monitor can't show faithfully, joined. Effects and
-/// transitions are rendered to proxies (see [`composite_segments`]), so the
-/// only remaining gap is un-retimed speed.
-pub fn monitor_notices(project: &Project) -> Option<String> {
-    let notices: Vec<String> = [speed_notice(project)].into_iter().flatten().collect();
-    (!notices.is_empty()).then(|| notices.join(" · "))
 }
 
 /// One interval of the composite: the topmost track's material covering it,
@@ -212,7 +185,8 @@ fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError>
 /// monitor plays, so a gap in an upper layer reveals the layer below rather
 /// than stopping playback.
 ///
-/// A segment with effects, or a transition, can't be expressed by `edl://`:
+/// A segment with effects, a non-1× retime, or a transition can't be
+/// expressed by `edl://`:
 /// that window plays the rendered proxy (the same one `nle edl` uses),
 /// offset into it like any source.
 pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
@@ -477,34 +451,6 @@ mod tests {
         })
     }
 
-    #[test]
-    fn speed_notice_flags_non_unit_speed() {
-        let mut p = project_with_gap();
-        assert!(speed_notice(&p).is_none());
-        if let TimelineSegment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
-            c.speed = Seconds::new(1, 2);
-        }
-        let notice = speed_notice(&p).expect("notice");
-        assert!(notice.contains("1 speed clip"), "{notice}");
-    }
-
-    #[test]
-    fn a_transition_is_no_longer_a_monitor_caveat() {
-        // A transition is no longer a caveat: the monitor plays its proxy.
-        let mut p = project_with_gap();
-        p.timeline.video_track_mut().unwrap().segments.insert(
-            1,
-            TimelineSegment::Transition(Transition {
-                id: 9,
-                dur: Seconds::from_integer(1),
-                kind: TransitionKind::Dissolve,
-                a: TransitionSource::Black,
-                b: TransitionSource::Black,
-            }),
-        );
-        assert!(monitor_notices(&p).is_none(), "no caveat to report");
-    }
-
     // The composite picks a transition over the layer below (it is rendered
     // material) and routes it through the proxy cache.
     #[test]
@@ -550,10 +496,22 @@ mod tests {
     }
 
     #[test]
-    fn composite_plan_proxies_a_clip_with_effects() {
+    fn composite_plan_proxies_effect_and_speed_clips() {
+        // An effect clip…
         let mut p = composite_project();
         if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
             c.effects = vec![Effect::Scale { w: 2, h: 2 }];
+        }
+        let windows = composite_windows(&p).unwrap();
+        match &windows[1] {
+            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(seg), "{seg:?}"),
+            other => panic!("expected the top clip window, got {other:?}"),
+        }
+
+        // …and a retimed clip (an EDL entry would play it at 1×).
+        let mut p = composite_project();
+        if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
+            c.speed = Seconds::new(1, 2);
         }
         let windows = composite_windows(&p).unwrap();
         match &windows[1] {

@@ -377,6 +377,14 @@ edl=$($N --project b.json edl --track 1)
 check_no "red.mp4" "$edl" "an effect clip plays its proxy"
 check_has "/proxy/" "$edl" "…from the proxy cache"
 
+echo "== a retimed clip previews from a proxy too =="
+base
+$N --project b.json speed 1 2 >/dev/null
+edl=$($N --project b.json edl --track 1)
+check_no "red.mp4" "$edl" "a 2x clip plays its proxy (an EDL entry can't retime)"
+check_has "/proxy/" "$edl" "…from the proxy cache"
+check_has "green.mp4" "$edl" "an untouched clip still plays its source"
+
 echo "== CLI-only guards =="
 out=$($N trim red.mp4 --in 0 --out 99 -o t.mp4 2>&1)
 check_has "beyond the file's duration" "$out" "trim refuses an --out past the end"
