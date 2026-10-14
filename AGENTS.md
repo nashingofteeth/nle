@@ -172,6 +172,13 @@ plainly.
 - **Opposite-end extend commit = delete** (ripple), by **id** for a clip
   (not by playhead position, which resolves to the follower) and by
   **index** for a gap.
+- **Removing a transition gives its trimmed frames back.** A transition owns
+  the spans it took off its neighbours, so `dd`/`D` re-extend them — but
+  *only* where the neighbour still lines up exactly (same asset, contiguous
+  source); one edited since `x` is left alone and that material is really
+  gone. Never merge the neighbours (before `x` they were two segments), and
+  the playhead anchor is the transition's **end** — the cut the restore
+  leaves — not its start.
 - **Any inward gap move ripples**; outward gap growth honours the flag
   (`e` overwrite, `E` insert space).
 - **`e`/`E`/`[`/`]` must agree**: a leading gap's head is `GapHead` for all

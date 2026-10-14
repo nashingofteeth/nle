@@ -261,7 +261,9 @@ below.)
   side gives up `dur` — clip↔clip shortens the timeline by `dur` (matches
   `xfade`: 10+10−1 = 19), clip↔black leaves it. Export blends with
   `xfade`/`acrossfade`; creation via `x` / `:transition`. Cuts only:
-  `Dissolve` + `FadeBlack`. `dd`/`D` remove one; `i`/`o`/`s`/`_` refuse.
+  `Dissolve` + `FadeBlack`. `dd`/`D` remove one and hand the frames it
+  trimmed back to its neighbours (only when they still line up); `i`/`o`/`s`/
+  `_` refuse.
 - **Effects:** a typed `Effect` enum (`Crop`/`Scale`/`Eq`/`Lut`) on
   `Clip.effects`, applied in the export chain after the retime and before
   the geometry normalize (so layers stay uniform for `overlay`); `:effect`
@@ -269,10 +271,10 @@ below.)
   matching effects; a paste carries them over.
 - **Proxy cache:** segments `edl://` can't express (effects, transitions)
   are rendered once into `~/.cache/nle/proxy/<hash>.mp4` and the monitor
-  plays the proxy; the hash covers the segment + geometry + each asset's
-  path **and mtime**. The render puts the segment on its own track and
-  reuses the export graph compiler, so there's no second filter-graph to
-  drift.
+  plays the proxy; the hash covers the segment + geometry + frame rate +
+  each asset's path **and mtime**. The render puts the segment on its own
+  track and reuses the export graph compiler, so there's no second
+  filter-graph to drift.
 - **Verified:** unit tests + real ffmpeg runs — a dissolve reads a ≈50%
   blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
   and `nle edl` renders and references the proxies.
