@@ -67,7 +67,9 @@ impl Effect {
                 contrast,
                 saturation,
             } => format!("eq=brightness={brightness}:contrast={contrast}:saturation={saturation}"),
-            Effect::Lut { path } => format!("lut3d=file={path}"),
+            // The path is quoted: `:`/`,` in it would otherwise split the
+            // filtergraph, and a literal `'` is escaped the ffmpeg way.
+            Effect::Lut { path } => format!("lut3d=file='{}'", path.replace('\'', r"'\''")),
         }
     }
 }
@@ -590,5 +592,25 @@ mod tests {
 
         t.tracks[0].segments = vec![trans(1, clip(0, 1))];
         assert!(t.validate().is_ok());
+    }
+
+    #[test]
+    fn a_lut_path_with_filter_metacharacters_is_quoted() {
+        assert_eq!(
+            Effect::Lut {
+                path: "/luts/a,b:c.cube".into()
+            }
+            .filter(),
+            "lut3d=file='/luts/a,b:c.cube'",
+            "a comma or colon must not split the graph"
+        );
+        assert_eq!(
+            Effect::Lut {
+                path: "/luts/it's.cube".into()
+            }
+            .filter(),
+            r"lut3d=file='/luts/it'\''s.cube'",
+            "a quote is escaped the ffmpeg way"
+        );
     }
 }

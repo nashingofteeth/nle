@@ -43,6 +43,8 @@ pub enum EditError {
     SegmentNotFound(usize),
     #[error("a transition can't be split or trimmed — remove it (dd) instead")]
     Transition,
+    #[error("effects apply to video clips — that track is audio")]
+    EffectsNeedVideo,
     #[error("playhead is not in a gap")]
     NoGap,
     #[error("no clip at that position — it is in a gap")]
@@ -1146,16 +1148,12 @@ pub fn add_transition(
     })
 }
 
-/// Append `effect` to clip `clip_id`'s effect list (on `track`).
-pub fn add_effect(
-    project: &Project,
-    track: usize,
-    clip_id: u32,
-    effect: Effect,
-) -> Result<Batch, EditError> {
-    add_effect_on(project, track, clip_id, effect)
+/// Append `effect` to clip `clip_id` on the first video track.
+pub fn add_effect(project: &Project, clip_id: u32, effect: Effect) -> Result<Batch, EditError> {
+    add_effect_on(project, video_track_index(project)?, clip_id, effect)
 }
 
+/// Append `effect` to clip `clip_id`'s effect list (on `track`).
 pub fn add_effect_on(
     project: &Project,
     track: usize,
@@ -1163,6 +1161,11 @@ pub fn add_effect_on(
     effect: Effect,
 ) -> Result<Batch, EditError> {
     let tr = track_at(project, track)?;
+    // Effects are video filters: on an audio track the model would hold an
+    // effect the export graph never applies, so refuse rather than no-op.
+    if tr.kind != TrackKind::Video {
+        return Err(EditError::EffectsNeedVideo);
+    }
     let si = tr
         .clip_index(clip_id)
         .ok_or(EditError::ClipNotFound(clip_id))?;
@@ -6024,6 +6027,27 @@ mod tests {
             Segment::Clip(c) => assert_eq!(c.effects, vec![eff.clone()], "purge"),
             s => panic!("expected a clip, got {s:?}"),
         }
+    }
+
+    // `add_effect` is the first-video-track wrapper; the `_on` form refuses a
+    // track whose clips the graph never applies effects to.
+    #[test]
+    fn effects_are_refused_on_an_audio_track() {
+        let mut p = fixture();
+        let batch = add_effect(&p, 1, Effect::Scale { w: 2, h: 2 }).unwrap();
+        assert!(batch.desc.contains("clip #1"), "{}", batch.desc);
+
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ai].segments = vec![Segment::Clip(Clip::new(
+            9,
+            1,
+            Seconds::from_integer(0),
+            Seconds::from_integer(2),
+        ))];
+        assert!(matches!(
+            add_effect_on(&p, ai, 9, Effect::Scale { w: 2, h: 2 }),
+            Err(EditError::EffectsNeedVideo)
+        ));
     }
 
     /// A straddled transition that would shrink to under a frame is dropped

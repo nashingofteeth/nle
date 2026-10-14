@@ -1005,17 +1005,31 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
     let need = |v: Option<u32>, n: &str| -> Result<u32, ParseError> {
         v.ok_or_else(|| ParseError::Invalid(format!("effect needs --{n}")))
     };
+    // A zero width or height is a broken filter (`crop=0:0:0:0` fails in
+    // ffmpeg), and it would be stored in the project — refuse it here.
+    let dims = |w: Option<u32>, h: Option<u32>| -> Result<(u32, u32), ParseError> {
+        let (w, h) = (need(w, "w")?, need(h, "h")?);
+        if w == 0 || h == 0 {
+            return Err(ParseError::Invalid(
+                "effect width and height must be at least 1".to_string(),
+            ));
+        }
+        Ok((w, h))
+    };
     match kind {
-        "crop" => Ok(Effect::Crop {
-            x: a.x.unwrap_or(0),
-            y: a.y.unwrap_or(0),
-            w: need(a.w, "w")?,
-            h: need(a.h, "h")?,
-        }),
-        "scale" => Ok(Effect::Scale {
-            w: need(a.w, "w")?,
-            h: need(a.h, "h")?,
-        }),
+        "crop" => {
+            let (w, h) = dims(a.w, a.h)?;
+            Ok(Effect::Crop {
+                x: a.x.unwrap_or(0),
+                y: a.y.unwrap_or(0),
+                w,
+                h,
+            })
+        }
+        "scale" => {
+            let (w, h) = dims(a.w, a.h)?;
+            Ok(Effect::Scale { w, h })
+        }
         // ffmpeg's `eq` is neutral at brightness 0 / contrast 1 /
         // saturation 1: 0 contrast and saturation mean flat and grey.
         "eq" => Ok(Effect::Eq {
@@ -1440,6 +1454,20 @@ mod tests {
             "eq=brightness=-0.2:contrast=1:saturation=1",
             "the neutral values reach the graph"
         );
+    }
+
+    #[test]
+    fn a_zero_sized_effect_is_refused() {
+        let d = ParseDefaults::default();
+        for spec in [
+            "effect crop --clip 1 --w 0 --h 10",
+            "effect scale --clip 1 --w 10 --h 0",
+        ] {
+            assert!(
+                matches!(parse(spec, &d), Err(ParseError::Invalid(_))),
+                "{spec:?} was accepted"
+            );
+        }
     }
 
     #[test]
