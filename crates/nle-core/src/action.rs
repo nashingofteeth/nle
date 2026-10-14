@@ -1107,9 +1107,13 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     h: need(&mut f, "h")?,
                 },
                 "eq" => Effect::Eq {
+                    // ffmpeg's `eq` is neutral at brightness 0 / contrast 1 /
+                    // saturation 1 — defaulting contrast and saturation to 0
+                    // (as this did) desaturated and flattened the clip even
+                    // when only `--brightness` was given.
                     brightness: opt_time(&mut f, "brightness")?.unwrap_or(0.0),
-                    contrast: opt_time(&mut f, "contrast")?.unwrap_or(0.0),
-                    saturation: opt_time(&mut f, "saturation")?.unwrap_or(0.0),
+                    contrast: opt_time(&mut f, "contrast")?.unwrap_or(1.0),
+                    saturation: opt_time(&mut f, "saturation")?.unwrap_or(1.0),
                 },
                 "lut" => Effect::Lut {
                     path: f
@@ -1376,6 +1380,31 @@ mod tests {
                 to: -1.5,
                 ripple: true,
             })
+        );
+    }
+
+    #[test]
+    fn effect_eq_defaults_to_a_neutral_filter() {
+        // ffmpeg's `eq` is neutral at contrast 1 / saturation 1. Defaulting
+        // them to 0 flattened and desaturated the clip even when only
+        // `--brightness` was asked for.
+        let Action::AddEffect { effect, .. } =
+            parse("effect --clip 1 eq --brightness -0.2", &defaults()).unwrap()
+        else {
+            panic!("expected an effect")
+        };
+        assert_eq!(
+            effect,
+            Effect::Eq {
+                brightness: -0.2,
+                contrast: 1.0,
+                saturation: 1.0
+            }
+        );
+        assert_eq!(
+            effect.filter(),
+            "eq=brightness=-0.2:contrast=1:saturation=1",
+            "the neutral values reach the graph"
         );
     }
 
