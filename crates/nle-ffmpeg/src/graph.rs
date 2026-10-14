@@ -21,7 +21,7 @@ use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::trim::{Encoder, FfmpegError, device_args, run_ffmpeg, video_encode_args};
+use crate::trim::{Encoder, FfmpegError, device_args, run_ffmpeg_opt, video_encode_args};
 
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_LAYOUT: &str = "stereo";
@@ -605,6 +605,17 @@ pub struct ExportSpec {
 
 /// Compile the graph and run the export. Returns the plan on success.
 pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
+    run_export(project, spec, true)
+}
+
+/// [`export`] for a caller whose stderr is a terminal UI: ffmpeg's chatter
+/// (and our own `$ ffmpeg …` line) is swallowed rather than painted over the
+/// screen. A failure still carries ffmpeg's reason.
+pub fn export_quiet(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
+    run_export(project, spec, false)
+}
+
+fn run_export(project: &Project, spec: &ExportSpec, echo: bool) -> Result<ExportPlan, ExportError> {
     let plan = compile_export(project)?;
     let (graph, vmap) = apply_encoder_tail(plan.graph.clone(), spec.encoder);
 
@@ -643,8 +654,10 @@ pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, Export
     args.push("--".into());
     args.push(spec.output.display().to_string());
 
-    eprintln!("$ ffmpeg {}", args.join(" "));
-    run_ffmpeg(&args)?;
+    if echo {
+        eprintln!("$ ffmpeg {}", args.join(" "));
+    }
+    run_ffmpeg_opt(&args, echo)?;
     Ok(plan) // script deleted on drop, after ffmpeg is done
 }
 

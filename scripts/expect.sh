@@ -14,6 +14,11 @@ DIR=expect-sandbox
 mkdir -p "$DIR"
 cd "$DIR"
 
+# Keep the generated-media caches (black filler, proxies) inside the sandbox:
+# a run must not read a warm cache from a previous one, and it must not write
+# into the user's ~/.cache. A render that should happen, happens.
+export XDG_CACHE_HOME="$PWD/.cache"
+
 FAIL=0
 check_px() { # check_px FILE TIME HEX LABEL
   ffmpeg -v error -y -ss "$2" -i "$1" -frames:v 1 -f rawvideo -pix_fmt rgb24 px.raw
@@ -364,6 +369,10 @@ $N --project b.json effect eq --clip 1 >/dev/null
 export_ b.json fx.mp4
 check_px fx.mp4 1 "$RED" "eq defaults to a neutral filter"
 # An effect clip can't be expressed by `edl://`: the preview plays its proxy.
+# The first call renders it — and must render it *quietly*, since the monitor
+# runs the same code with the TUI sitting on our stderr.
+err=$($N --project b.json edl --track 1 2>&1 >/dev/null)
+check_no "ffmpeg" "$err" "the proxy render is quiet"
 edl=$($N --project b.json edl --track 1)
 check_no "red.mp4" "$edl" "an effect clip plays its proxy"
 check_has "/proxy/" "$edl" "…from the proxy cache"

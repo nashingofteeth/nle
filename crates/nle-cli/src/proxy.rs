@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use nle_core::Project;
 use nle_core::timeline::{Segment, Track, TrackKind};
 use nle_ffmpeg::graph::ExportSpec;
-use nle_ffmpeg::{Encoder, ExportError, export};
+use nle_ffmpeg::{Encoder, ExportError, export_quiet};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -122,7 +122,9 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
         preset: "ultrafast".into(),
         bitrate: "8M".into(),
     };
-    if let Err(e) = export(&p, &spec) {
+    // Quiet: this runs from the monitor's reload, so ffmpeg's chatter would
+    // paint over the TUI. A failure still carries the reason.
+    if let Err(e) = export_quiet(&p, &spec) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }

@@ -412,7 +412,9 @@ pub fn ensure_black_file(
     let tmp = dir.join(format!("{name}.tmp-{}.mp4", std::process::id()));
     let fps_s = format!("{}/{}", fps.numer(), fps.denom());
     let len_s = BLACK_FILE_SECS.to_string();
-    let status = Command::new("ffmpeg")
+    // Captured, not inherited: this runs from the monitor's reload too, and
+    // ffmpeg must not paint over the TUI. The reason rides in the error.
+    let out = Command::new("ffmpeg")
         .args([
             "-v",
             "error",
@@ -442,12 +444,13 @@ pub fn ensure_black_file(
         ])
         .arg("--")
         .arg(&tmp)
-        .status()?;
-    if !status.success() {
+        .output()?;
+    if !out.status.success() {
         let _ = fs::remove_file(&tmp);
-        return Err(std::io::Error::other(
-            "ffmpeg failed to generate the black gap file",
-        ));
+        return Err(std::io::Error::other(format!(
+            "ffmpeg failed to generate the black gap file: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
     }
     fs::rename(&tmp, &path)?;
     Ok(path)

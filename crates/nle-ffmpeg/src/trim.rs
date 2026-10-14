@@ -153,6 +153,14 @@ pub fn video_encode_args(encoder: Encoder, crf: u8, preset: &str, bitrate: &str)
 /// while keeping the last few lines: when it fails, the error must name
 /// the cause — a bare exit status tells the user nothing.
 pub fn run_ffmpeg(args: &[String]) -> Result<(), FfmpegError> {
+    run_ffmpeg_opt(args, true)
+}
+
+/// [`run_ffmpeg`] with the live echo optional. A caller whose stderr is a
+/// terminal UI (the monitor's proxy render) must not have ffmpeg paint over
+/// the screen — the tail is still captured, so a failure still names the
+/// cause.
+pub fn run_ffmpeg_opt(args: &[String], echo: bool) -> Result<(), FfmpegError> {
     use std::io::{BufRead, BufReader, Write as _};
     use std::process::Stdio;
 
@@ -169,7 +177,9 @@ pub fn run_ffmpeg(args: &[String]) -> Result<(), FfmpegError> {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             // Live, like the old inherited stderr; a closed pipe is not a
             // reason to panic.
-            let _ = writeln!(std::io::stderr(), "{line}");
+            if echo {
+                let _ = writeln!(std::io::stderr(), "{line}");
+            }
             if tail.len() == TAIL {
                 tail.pop_front();
             }
