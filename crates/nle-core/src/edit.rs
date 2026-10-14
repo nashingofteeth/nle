@@ -1342,7 +1342,7 @@ pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
                 asset_in: c.asset_in,
                 asset_out: c.asset_in + dur * c.speed,
                 speed: c.speed,
-                effects: Vec::new(),
+                effects: c.effects.clone(),
             }),
             Segment::Gap(_) => Segment::Gap(Gap { duration: dur }),
             Segment::Transition(t) => {
@@ -1559,7 +1559,7 @@ pub fn trim_in_on(project: &Project, track: usize, playhead: f64) -> Result<Batc
             asset_in: c.asset_in + source_span(c, delta),
             asset_out: c.asset_out,
             speed: c.speed,
-            effects: Vec::new(),
+            effects: c.effects.clone(),
         };
         at_least_a_frame(project, &after.duration())?;
         let mut ops = vec![EditOp::Replace {
@@ -1676,7 +1676,7 @@ pub fn trim_out_on(project: &Project, track: usize, playhead: f64) -> Result<Bat
             asset_in: c.asset_in,
             asset_out: c.asset_in + source_span(c, new_len),
             speed: c.speed,
-            effects: Vec::new(),
+            effects: c.effects.clone(),
         };
         at_least_a_frame(project, &after.duration())?;
         let trimmed = seg_start + c.duration() - t;
@@ -1976,7 +1976,7 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
         asset_in: c.asset_in,
         asset_out: c.asset_in + source_span(&c, left_len),
         speed: c.speed,
-        effects: Vec::new(),
+        effects: c.effects.clone(),
     });
     let right = Segment::Clip(Clip {
         id: project.next_clip_id(),
@@ -1984,7 +1984,7 @@ pub fn split_on(project: &Project, track: usize, playhead: f64) -> Result<Batch,
         asset_in: c.asset_in + source_span(&c, t - seg_start),
         asset_out: c.asset_out,
         speed: c.speed,
-        effects: Vec::new(),
+        effects: c.effects.clone(),
     });
     Ok(Batch {
         ops: replace_with_many(ti, si, &Segment::Clip(c.clone()), vec![left, right]),
@@ -2331,7 +2331,7 @@ pub fn paste_on(
                             asset_in: c.asset_in + source_span(c, off),
                             asset_out: c.asset_out,
                             speed: c.speed,
-                            effects: Vec::new(),
+                            effects: c.effects.clone(),
                         }))
                     }
                 }
@@ -2494,7 +2494,7 @@ pub fn insert_gap_on(
                     asset_in: c.asset_in,
                     asset_out: c.asset_in + source_span(c, off),
                     speed: c.speed,
-                    effects: Vec::new(),
+                    effects: c.effects.clone(),
                 }));
             }
             pieces.push(gap);
@@ -2507,7 +2507,7 @@ pub fn insert_gap_on(
                     asset_in: c.asset_in + source_span(c, off),
                     asset_out: c.asset_out,
                     speed: c.speed,
-                    effects: Vec::new(),
+                    effects: c.effects.clone(),
                 }));
             }
             Ok(Batch {
@@ -2605,7 +2605,7 @@ pub fn paste_ripple_on(
                     asset_in: c.asset_in,
                     asset_out: c.asset_in + source_span(c, head_len),
                     speed: c.speed,
-                    effects: Vec::new(),
+                    effects: c.effects.clone(),
                 }));
             }
             pieces.push(pasted_piece(snapshot, pid));
@@ -2619,7 +2619,7 @@ pub fn paste_ripple_on(
                     asset_in: c.asset_in + source_span(c, head_len),
                     asset_out: c.asset_out,
                     speed: c.speed,
-                    effects: Vec::new(),
+                    effects: c.effects.clone(),
                 }));
             }
             pieces
@@ -5894,5 +5894,113 @@ mod tests {
             ),
             Err(EditError::NoClip)
         ));
+    }
+
+    /// Every edit that rebuilds a clip carries its effect list over —
+    /// trimming, splitting, gap-inserting and the paste sweep used to reset
+    /// it, so a `:effect` on a clip vanished on the next edit.
+    #[test]
+    fn edits_preserve_per_clip_effects() {
+        let eff = Effect::Scale { w: 10, h: 10 };
+        let set_effects = |p: &mut Project| {
+            for seg in &mut p.timeline.video_track_mut().unwrap().segments {
+                if let Segment::Clip(c) = seg {
+                    c.effects = vec![eff.clone()];
+                }
+            }
+        };
+        let clip_effects = |p: &Project| {
+            p.timeline
+                .video_track()
+                .unwrap()
+                .segments
+                .iter()
+                .filter_map(|s| match s {
+                    Segment::Clip(c) => Some(c.effects.clone()),
+                    Segment::Gap(_) | Segment::Transition(_) => None,
+                })
+                .collect::<Vec<Vec<Effect>>>()
+        };
+        let applied = |p: &Project, batch: Batch| {
+            let mut q = p.clone();
+            History::default().apply(&mut q, batch, 0).unwrap();
+            q
+        };
+        let only = vec![eff.clone()];
+
+        // `s` — both halves of the split keep the effect.
+        let mut p = fixture();
+        set_effects(&mut p);
+        let q = applied(&p, split(&p, 1.0).unwrap());
+        assert_eq!(
+            clip_effects(&q),
+            vec![only.clone(), only.clone(), only.clone()],
+            "split"
+        );
+
+        // `i` / `o` — the trimmed clip keeps it.
+        assert_eq!(
+            clip_effects(&applied(&p, trim_in(&p, 0.5).unwrap())),
+            vec![only.clone(), only.clone()],
+            "trim in"
+        );
+        assert_eq!(
+            clip_effects(&applied(&p, trim_out(&p, 1.0).unwrap())),
+            vec![only.clone(), only.clone()],
+            "trim out"
+        );
+
+        // `_` — the split head and tail both keep it.
+        let q = applied(&p, insert_gap(&p, 1.0, 3).unwrap());
+        assert_eq!(
+            clip_effects(&q),
+            vec![only.clone(), only.clone(), only.clone()],
+            "insert gap"
+        );
+
+        // `p` — the sweep leaves a pasted clip (its own list) and a remainder
+        // that keeps the target clip's effect.
+        let asset = match &p.timeline.video_track().unwrap().segments[0] {
+            Segment::Clip(c) => c.asset,
+            _ => unreachable!(),
+        };
+        let snapshot = Segment::Clip(Clip::new(
+            9,
+            asset,
+            Seconds::from_integer(0),
+            Seconds::new(1, 2),
+        ));
+        let q = applied(&p, paste(&p, &snapshot, 1.0).unwrap());
+        let got = clip_effects(&q);
+        assert_eq!(got.len(), 4, "left piece, paste, remainder, clip #2");
+        assert_eq!(got[0], only);
+        assert!(got[1].is_empty(), "the pasted clip carries its own list");
+        assert_eq!(got[2], vec![eff.clone()], "the swept remainder keeps it");
+        assert_eq!(got[3], vec![eff.clone()]);
+
+        // `:purge` — the snapped clip keeps it.
+        let track = Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![
+                Segment::Clip(Clip {
+                    id: 1,
+                    asset,
+                    asset_in: Seconds::from_integer(0),
+                    asset_out: Seconds::from_integer(2),
+                    speed: Seconds::from_integer(1),
+                    effects: vec![eff.clone()],
+                }),
+                Segment::Gap(Gap {
+                    duration: Seconds::new(1, 100), // a stump, dropped
+                }),
+            ],
+        };
+        let (cleaned, dropped) = purge_stumps(&track, Seconds::from_integer(30));
+        assert_eq!(dropped, 1);
+        match &cleaned[0] {
+            Segment::Clip(c) => assert_eq!(c.effects, vec![eff.clone()], "purge"),
+            s => panic!("expected a clip, got {s:?}"),
+        }
     }
 }
