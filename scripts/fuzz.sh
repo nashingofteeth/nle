@@ -12,6 +12,9 @@ N=$(readlink -f ./target/release/nle)
 DIR=fuzz-sandbox
 mkdir -p "$DIR"
 cd "$DIR"
+# Generated-media caches (black filler, proxies) live in the sandbox: a run
+# must not read a warm cache from a previous one, or write the user's.
+export XDG_CACHE_HOME="$PWD/.cache"
 
 FAIL=0
 gen() { # gen NAME COLOR RATE DUR
@@ -104,6 +107,62 @@ case_inv "speed abc"                   $N --project f.json speed 1 abc
 case_inv "speed 1/0"                   $N --project f.json speed 1 1/0
 case_inv "speed 0.000001"              $N --project f.json speed 1 0.000001
 case_inv "speed 100 (sub-frame)"       $N --project f.json speed 2 100
+case_inv "speed 1e18"                  $N --project f.json speed 1 1000000000000000000
+case_inv "speed i64::MAX/1"            $N --project f.json speed 1 9223372036854775807/1
+case_inv "speed 1/i64::MAX"            $N --project f.json speed 1 1/9223372036854775807
+
+echo "== transitions =="
+# base is red 0–3, gap 3–4, blue 4–7: 3.0 is a clip|gap seam.
+case_inv "transition frames 0"             $N --project f.json transition --at 3 --frames 0
+case_inv "transition frames -5"            $N --project f.json transition --at 3 --frames -5
+case_inv "transition frames i64::MAX"      $N --project f.json transition --at 3 --frames 9223372036854775807
+case_inv "transition dur 0"                $N --project f.json transition --at 3 --dur 0
+case_inv "transition dur -1"               $N --project f.json transition --at 3 --dur -1
+case_inv "transition --frames and --dur"   $N --project f.json transition --at 3 --frames 15 --dur 1
+case_inv "transition kind sideways"        $N --project f.json transition sideways --at 3 --frames 15
+case_inv "transition at 0"                 $N --project f.json transition --at 0 --frames 15
+case_inv "transition at the end"           $N --project f.json transition --at 7 --frames 15
+case_inv "transition at 1e18"              $N --project f.json transition --at 1000000000000000000 --frames 15
+case_inv "transition at 999"               $N --project f.json transition --at 999 --frames 15
+case_inv "transition mid-clip"             $N --project f.json transition --at 1.5 --frames 15
+case_inv "transition longer than the clip" $N --project f.json transition --at 3 --dur 99
+case_inv "transition at a clip|clip seam"  bash -c ''"$N"' --project f.json split --at 1 >/dev/null; '"$N"' --project f.json transition --at 1 --frames 15'
+case_inv "transition twice at one seam"    bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json transition --at 3 --frames 15'
+case_inv "transition then purge-stumps"    bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json purge-stumps'
+case_inv "transition then export"          bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json export -o tx.mp4'
+case_inv "transition then delete --seg"    bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json delete --seg 1'
+case_inv "transition then delete twice"    bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json delete --at 3.1 >/dev/null; '"$N"' --project f.json delete --at 3.1'
+case_inv "transition between two gaps"     bash -c ''"$N"' --project f.json delete --seg 0 >/dev/null; '"$N"' --project f.json delete --seg 1 >/dev/null; '"$N"' --project f.json transition --at 0 --frames 15'
+case_inv "transition on an empty timeline" $N --project empty.json transition --at 1 --frames 15
+
+echo "== effects =="
+case_inv "effect crop w 0"                $N --project f.json effect crop --clip 1 --w 0 --h 10
+case_inv "effect crop h 0"                $N --project f.json effect crop --clip 1 --w 10 --h 0
+case_inv "effect scale w -1"              $N --project f.json effect scale --clip 1 --w -1 --h 10
+case_inv "effect scale w 2^64"            $N --project f.json effect scale --clip 1 --w 18446744073709551616 --h 10
+case_inv "effect scale 1x1"               $N --project f.json effect scale --clip 1 --w 1 --h 1
+case_inv "effect eq brightness abc"       $N --project f.json effect eq --clip 1 --brightness abc
+case_inv "effect eq contrast 1e18"        $N --project f.json effect eq --clip 1 --contrast 1000000000000000000
+case_inv "effect lut a missing file"      $N --project f.json effect lut --clip 1 --path /nope.cube
+case_inv "effect lut an empty path"       $N --project f.json effect lut --clip 1 --path ""
+case_inv "effect lut a path with commas"  $N --project f.json effect lut --clip 1 --path "/tmp/a,b:c.cube"
+case_inv "effect unknown kind"            $N --project f.json effect bogus --clip 1
+case_inv "effect without a kind"          $N --project f.json effect --clip 1
+case_inv "effect clip 999"                $N --project f.json effect eq --clip 999
+case_inv "effect without --clip"          $N --project f.json effect eq
+case_inv "effect on an audio track"       bash -c ''"$N"' --project f.json track add audio >/dev/null; '"$N"' --project f.json effect eq --clip 1 --track 2'
+case_inv "effect then purge-stumps"       bash -c ''"$N"' --project f.json effect eq --clip 1 --saturation 0 >/dev/null; '"$N"' --project f.json purge-stumps'
+case_inv "effect then export a bad lut"   bash -c ''"$N"' --project f.json effect lut --clip 1 --path /nope.cube >/dev/null; '"$N"' --project f.json export -o lx.mp4'
+case_inv "effect then speed then delete"  bash -c ''"$N"' --project f.json effect eq --clip 1 >/dev/null; '"$N"' --project f.json speed 1 2 >/dev/null; '"$N"' --project f.json delete --clip 1'
+case_inv "effect on an empty timeline"    $N --project empty.json effect eq --clip 1
+
+echo "== speeds next to transitions =="
+# The retime has to retime the transition side it owns; the guards must hold
+# while it splits `dur × rate` out of the clip.
+case_inv "speed a transition's neighbour 1e6"  bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json speed 1 1000000'
+case_inv "speed a transition's neighbour 1e-6" bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json speed 1 0.000001'
+case_inv "speed the clip out of a transition"  bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json speed 2 2'
+case_inv "speed a transition id"               bash -c ''"$N"' --project f.json transition --at 3 --frames 15 >/dev/null; '"$N"' --project f.json speed 4 2'
 
 echo "== extend =="
 case_inv "extend to the same edge"     $N --project f.json extend --clip 1 --edge out --to 3
@@ -162,6 +221,86 @@ case_inv "show a corrupt project"       $N --project bad.json show
 printf '{"version": 3}' > old.json
 case_inv "show an old-version project"  $N --project old.json show
 case_inv "show a missing project"       $N --project nope.json show
+
+echo "== hostile projects (the transition model) =="
+# The loader validates, so each of these must be refused with a message — not
+# panic, and not divide by a zero `dur` somewhere downstream.
+python3 - <<'PY'
+import copy, json
+base = json.load(open('base.json'))
+
+def write(name, segs, media=None):
+    d = copy.deepcopy(base)
+    d['timeline']['tracks'][0]['segments'] = segs
+    if media is not None:
+        d['media'] = media
+    json.dump(d, open(name, 'w'))
+
+def tr(dur="1/1", kind="Dissolve", a=None, b="Black"):
+    return {"Transition": {"id": 9, "dur": dur, "kind": kind,
+                           "a": a or {"Clip": {"asset": 1, "src_in": "0/1", "src_out": "1/1"}},
+                           "b": b}}
+
+write('h_dur0.json', [tr(dur="0/1")])
+write('h_span.json', [tr(a={"Clip": {"asset": 1, "src_in": "2/1", "src_out": "1/1"}})])
+write('h_black.json', [tr(a="Black")])
+write('h_asset.json', [tr(a={"Clip": {"asset": 99, "src_in": "0/1", "src_out": "1/1"}})])
+write('h_media.json', [tr(a={"Clip": {"asset": 1, "src_in": "4/1", "src_out": "9/1"}})])
+write('h_kind.json', [tr(kind="Wipe")])
+write('h_speed0.json', [{"Clip": {"id": 1, "asset": 1, "asset_in": "0/1",
+                                  "asset_out": "3/1", "speed": "0/1", "effects": []}}])
+write('h_speed_tiny.json', [{"Clip": {"id": 1, "asset": 1, "asset_in": "0/1",
+                                      "asset_out": "3/1", "speed": "1/9223372036854775807",
+                                      "effects": []}}])
+write('h_speed_neg.json', [{"Clip": {"id": 1, "asset": 1, "asset_in": "0/1",
+                                     "asset_out": "3/1", "speed": "-1/1", "effects": []}}])
+write('h_len_overflow.json', [{"Clip": {"id": 1, "asset": 1, "asset_in": "0/1",
+                                        "asset_out": "9223372036854775807/1",
+                                        "speed": "1/1", "effects": []}},
+                               {"Clip": {"id": 2, "asset": 1, "asset_in": "0/1",
+                                         "asset_out": "9223372036854775807/1",
+                                         "speed": "1/1", "effects": []}}])
+# Two tiny values whose exact sum overflows the rational's numerator.
+write('h_len_frac.json', [{"Clip": {"id": 1, "asset": 1, "asset_in": "0/1",
+                                    "asset_out": "1/9223372036854775807",
+                                    "speed": "1/1", "effects": []}},
+                          {"Clip": {"id": 2, "asset": 1, "asset_in": "0/1",
+                                    "asset_out": "1/9223372036854775806",
+                                    "speed": "1/1", "effects": []}}])
+write('h_empty_pool.json', [tr()], media=[])
+PY
+case_inv "show a transition with dur 0"           $N --project h_dur0.json show
+case_inv "show a transition with a reversed side" $N --project h_span.json show
+case_inv "show a transition with no clip side"    $N --project h_black.json show
+case_inv "show a transition on a missing asset"   $N --project h_asset.json show
+case_inv "show a transition past its media"       $N --project h_media.json show
+case_inv "show a transition with an unknown kind" $N --project h_kind.json show
+case_inv "show a clip with speed 0"               $N --project h_speed0.json show
+case_inv "show a clip with a tiny speed"          $N --project h_speed_tiny.json show
+case_inv "show a clip with a negative speed"      $N --project h_speed_neg.json show
+case_inv "show a timeline whose length overflows" $N --project h_len_overflow.json show
+case_inv "show a timeline of huge-denominator slivers" $N --project h_len_frac.json show
+case_inv "show a transition with an empty pool"   $N --project h_empty_pool.json show
+case_inv "export a transition past its media"     $N --project h_media.json export -o hx.mp4
+case_inv "speed a project with a broken transition" $N --project h_span.json speed 1 2
+
+echo "== a truncated cached proxy or black file =="
+rm -f px.json px.history.json
+cp base.json px.json
+# A cache entry the hash will hit again: it must be a real file, not a stub
+# left behind by a full disk or an interrupted copy.
+$N --project px.json effect eq --clip 1 --saturation 0 >/dev/null
+$N --project px.json edl --track 1 >/dev/null
+find .cache/nle -name '*.mp4' -exec sh -c ': > "$1"' _ {} \;
+if ! out=$($N --project px.json edl --track 1 2>&1); then
+  echo "  ✗ edl failed on a truncated cache entry: $out"
+  FAIL=$((FAIL+1))
+elif find .cache/nle -name '*.mp4' -empty | grep -q .; then
+  echo "  ✗ a truncated cache entry is still served"
+  FAIL=$((FAIL+1))
+else
+  echo "  ✓ truncated cache entries are re-rendered"
+fi
 
 echo "== output plumbing =="
 rm -f p.json p.history.json

@@ -40,6 +40,23 @@ check_px_ne() { # check_px_ne FILE TIME NOTHEX LABEL
   local got; got=$(px_at "$1" "$2")
   if [ "$got" != "$3" ]; then echo "  ✓ $4"; else echo "  ✗ $4 — still pure $got"; FAIL=$((FAIL+1)); fi
 }
+check_eq_look() { # check_eq_look FILE TIME grey|hue LABEL — what `eq` did to the frame
+  local got; got=$(px_at "$1" "$2")
+  local ok; ok=$(python3 - "$got" "$3" <<'PY'
+import sys
+hex_, want = sys.argv[1], sys.argv[2]
+r, g, b = (int(hex_[i:i+2], 16) for i in (0, 2, 4))
+grey = max(r, g, b) - min(r, g, b) <= 8 and max(r, g, b) > 20
+print(grey if want == "grey" else not grey)
+PY
+)
+  if [ "$ok" = "True" ]; then
+    echo "  ✓ $4"
+  else
+    echo "  ✗ $4 — pixel $got"
+    FAIL=$((FAIL+1))
+  fi
+}
 check_edl_geometry() { # check_edl_geometry EDL WxH LABEL
   # mpv plays every EDL entry into one window: an entry at another size is
   # re-framed (bars), so the framing jumps when the monitor crosses into it.
@@ -386,14 +403,39 @@ check_dur t.mp4 6 "the timeline is whole again"
 check_px t.mp4 1 "$RED"   "red's tail is restored"
 check_px t.mp4 3 "$GREEN" "green's head is restored"
 check_px t.mp4 5 "$BLUE"  "blue is untouched"
+# The same by segment index (`nle show` prints [1] for the transition).
+base
+$N --project b.json transition --at 2 --frames 15 >/dev/null
+$N --project b.json delete --seg 1 >/dev/null
+export_ b.json t.mp4
+check_dur t.mp4 6 "delete --seg restores the neighbours too"
+check_px t.mp4 3 "$GREEN" "…green's head is back"
 
-echo "== effects =="
+echo "== effects: eq's neutral values =="
 base
 # No eq parameter given: contrast/saturation must stay neutral (this used to
 # come back flat and grey).
 $N --project b.json effect eq --clip 1 >/dev/null
 export_ b.json fx.mp4
-check_px fx.mp4 1 "$RED" "eq defaults to a neutral filter"
+check_px fx.mp4 1 "$RED" "eq with no arguments is a no-op"
+# Asking only for brightness must not desaturate either (the defaults for the
+# other two used to be 0 = flat grey).
+base
+$N --project b.json effect eq --clip 1 --brightness -0.2 >/dev/null
+export_ b.json fx.mp4
+check_eq_look fx.mp4 1 hue "brightness alone keeps the hue"
+# …and saturation 0 is the deliberate desaturation.
+base
+$N --project b.json effect eq --clip 1 --saturation 0 >/dev/null
+export_ b.json fx.mp4
+check_eq_look fx.mp4 1 grey "saturation 0 desaturates"
+# Effects and a retime compose: 2 s at 2x is 1 s, still grey.
+base
+$N --project b.json effect eq --clip 1 --saturation 0 >/dev/null
+$N --project b.json speed 1 2 >/dev/null
+export_ b.json fx.mp4
+check_dur fx.mp4 5 "an effect clip retimes (1 s + 2 s + 2 s)"
+check_eq_look fx.mp4 0.5 grey "…and the effect still applies"
 # An effect clip can't be expressed by `edl://`: the preview plays its proxy.
 # The first call renders it — and must render it *quietly*, since the monitor
 # runs the same code with the TUI sitting on our stderr.
@@ -402,6 +444,43 @@ check_no "ffmpeg" "$err" "the proxy render is quiet"
 edl=$($N --project b.json edl --track 1)
 check_no "red.mp4" "$edl" "an effect clip plays its proxy"
 check_has "/proxy/" "$edl" "…from the proxy cache"
+
+echo "== an effect survives the edits that rebuild a clip =="
+# trim/split/gap/paste rebuilt the clip with `effects: Vec::new()`, so the
+# next edit silently dropped it. Each case exports and checks the pixel.
+base
+$N --project b.json effect eq --clip 1 --saturation 0 >/dev/null
+$N --project b.json trim-out --at 1 >/dev/null
+export_ b.json fx.mp4
+check_eq_look fx.mp4 0.5 grey "the effect survives trim-out"
+
+base
+$N --project b.json effect eq --clip 1 --saturation 0 >/dev/null
+$N --project b.json split --at 1 >/dev/null
+export_ b.json fx.mp4
+check_eq_look fx.mp4 0.5 grey "the effect survives split (head)"
+check_eq_look fx.mp4 1.5 grey "…and the tail"
+
+base
+$N --project b.json effect eq --clip 1 --saturation 0 >/dev/null
+$N --project b.json trim-in --at 1 >/dev/null
+export_ b.json fx.mp4
+check_eq_look fx.mp4 1.5 grey "the effect survives trim-in"
+
+base
+$N --project b.json effect eq --clip 1 --saturation 0 >/dev/null
+$N --project b.json gap --at 1 --frames 15 >/dev/null
+export_ b.json fx.mp4
+check_eq_look fx.mp4 0.5 grey "the effect survives insert-gap (head)"
+check_eq_look fx.mp4 2 grey "…and the tail"
+
+# The paste sweep left the remainder past it without the effect.
+base
+$N --project b.json effect eq --clip 2 --saturation 0 >/dev/null
+$N --project b.json yank --clip 2 >/dev/null
+$N --project b.json paste --at 1 >/dev/null
+export_ b.json fx.mp4
+check_eq_look fx.mp4 3.5 grey "the remainder past a paste keeps its effect"
 
 echo "== a retimed clip previews from a proxy too =="
 base
@@ -469,10 +548,20 @@ check_edl_geometry "$edl" "320,240" "every entry is the sequence's 320x240"
 echo "== CLI-only guards =="
 out=$($N trim red.mp4 --in 0 --out 99 -o t.mp4 2>&1)
 check_has "beyond the file's duration" "$out" "trim refuses an --out past the end"
+base
+out=$($N --project b.json effect crop --clip 1 --w 0 --h 10 2>&1)
+check_has "at least 1" "$out" "a zero-size effect is refused"
+out=$($N --project b.json effect lut --clip 1 --path "" 2>&1)
+check_has "needs --path" "$out" "an empty LUT path is refused"
 out=$($N --project b.json export -o . 2>&1)
 check_has "Error opening output" "$out" "a failed export names the reason"
 out=$($N --project b.json media ls | head -1)
 check_has "asset(s)" "$out" "piped output survives an early-closed consumer"
+# Effects are video filters: on an audio track they would be stored but never
+# reach the graph, so the action refuses instead.
+$N --project b.json track add audio >/dev/null
+out=$($N --project b.json effect eq --clip 1 --track 2 2>&1)
+check_has "video clips" "$out" "an effect on an audio track is refused"
 
 echo
 if [ "$FAIL" -eq 0 ]; then echo "expect: ALL EXPECTATIONS HELD"; else echo "expect: $FAIL EXPECTATION(S) FAILED"; exit 1; fi
