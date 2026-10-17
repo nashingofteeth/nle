@@ -6,7 +6,8 @@ FFmpeg underneath. Built for this machine only.
 ## Status
 
 **M4 + EDL/OTIO import + clip speed + edit-detect + M5 (transitions,
-per-clip effects, proxy preview cache) complete — M6 next.** The
+per-clip effects, proxy preview cache, composited preview) complete — M6
+next.** The
 TUI drives the model directly: trim in/out, split, delete, yank/paste, insert
 gap, **extend mode**, a **media pool** with file preview, **multi-track
 editing** (track rows, active track, overlay video + mixed audio), and
@@ -141,7 +142,8 @@ $N export -o fast.mp4 --encoder vaapi  # GPU (also: qsv)
 # One-shot tools (no project needed)
 $N probe clip.mp4 [--json]
 $N trim clip.mp4 --in 2.5 --out 7 -o cut.mp4 [--encoder vaapi] [--copy]
-$N edl [--track N]                     # debug: print the preview EDL URL (1-based)
+$N edl                                 # the mpv EDL the monitor plays (composite)
+$N edl --track N                       # …or one track (1-based; debugging)
 
 # Debug log: with NLE_LOG set, every nle command appends a timestamped trail
 # (TUI notices, mpv errors, project saves, ffmpeg runs). Unset = silent.

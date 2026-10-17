@@ -215,12 +215,17 @@ plainly.
   counts, so track selection is `t`/`T` and `<N>t` — **bare `1..9` would
   break `3l`**.
 - **The monitor plays a composite, not a track:** `composite_segments`
-  walks the union of every unmuted video track's cut points and picks the
-  topmost track with a clip per interval; black only where all tracks are a
-  gap. mpv's EDL can pick only one source per span (no blending), so this is
-  fall-through, not `overlay` — real compositing is M5. Switching the active
-  track does not reload the monitor; `nle edl --track N` still previews a
-  single track for debugging.
+  walks the union of every unmuted track's cut points and picks the topmost
+  video track with material per interval; black only where all tracks are a
+  gap. mpv's EDL can pick only one source per span, so the video is
+  fall-through (opaque clips make that the export's `overlay`) — but **sound
+  is not**: a window where another track is audible needs the mix, so that
+  span is rendered as the export's composite (`overlay` + `amix`) through the
+  proxy cache and played as one entry (spans are widened to contain a
+  transition whole, since a partial crossfade isn't expressible). Switching
+  the active track does not reload the monitor; bare `nle edl` prints the
+  composite the monitor plays, and `nle edl --track N` a single track for
+  debugging.
 - **A track shorter than the timeline pads with a trailing gap** in both the
   timeline row and the preview (`track_parts` / `segments`), so the row reads
   "gap" and playback spans the whole timeline instead of stopping at the
@@ -244,15 +249,19 @@ plainly.
   conform* from an EDL/OTIO import is the other way round: `clamp_to_media`
   keeps its rate and nudges the span, because that rate is the source's
   timebase, not a request.
-- **The monitor proxies whatever `edl://` can't express.** `preview::needs_proxy`
-  (an effect, a non-1× retime, a transition, or a clip whose picture size isn't
-  the sequence's — mpv re-frames a raw file to *its* aspect while the export
-  scales it and the transition beside it is already scaled, so the framing would
-  jump at the seam) is the one list; the proxy is
-  rendered by the *export* graph, so there is no second filter chain to drift,
-  and cached under `~/.cache/nle/proxy` by a hash of the segment + geometry +
-  fps + each asset's path/mtime. The render is `export_quiet` — the monitor
-  calls it, so ffmpeg must never write to the TUI's stderr.
+- **The monitor proxies whatever `edl://` can't express.** Two kinds, both
+  rendered by the *export* graph (so there is no second filter chain to drift)
+  and cached under `~/.cache/nle/proxy`:
+  - a *segment* (`preview::needs_proxy`): an effect, a non-1× retime, a
+    transition, or a picture size that isn't the sequence's (mpv re-frames a
+    raw file to *its* aspect while the export scales it, so the framing would
+    jump at the seam); hashed by the segment + geometry + fps + the assets it
+    reads;
+  - a *span* where another track is audible (`proxy::composite_proxy`): every
+    unmuted track's slice of it, hashed the same way over the slices.
+  Each asset's **path and mtime** are in the hash, so a replaced file
+  re-renders. The render is `export_quiet`: the monitor calls it, so ffmpeg
+  must never write to the TUI's stderr.
 - **Any timeline↔source mapping must scale by `Clip.speed`.** Edits use
   `source_span` (`edit.rs`); anything outside it uses `Clip::source_at` /
   `Clip::timeline_offset_of`. The playhead anchor missed the factor and

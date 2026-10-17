@@ -450,11 +450,13 @@ enum Cmd {
     #[cfg(feature = "tui")]
     Edit {},
 
-    /// Print the mpv preview URL for the timeline (debugging)
+    /// Print the mpv preview URL the monitor plays (the composite), or one track's
+    /// with `--track N` (debugging)
     Edl {
-        /// Track number to preview (1-based; default 1)
-        #[arg(long, default_value_t = 1)]
-        track: usize,
+        /// Print one track instead of the composite the monitor plays
+        /// (1-based)
+        #[arg(long)]
+        track: Option<usize>,
     },
 
     /// Show what's inside a media file (streams, codecs, rates)
@@ -1036,10 +1038,15 @@ fn cmd_edit(project_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_edl(project_path: &Path, track: usize) -> Result<()> {
+/// Print the `edl://` URL the monitor plays (or one track's, for debugging).
+fn cmd_edl(project_path: &Path, track: Option<usize>) -> Result<()> {
+    let project = Project::load(project_path)?;
+    let Some(track) = track else {
+        say!("{}", preview::build_composite_edl(&project)?);
+        return Ok(());
+    };
     // 1-based, and 0 is not a track number (it used to mean "track 1").
     let ti = cli_index(track, "--track").map_err(anyhow::Error::msg)?;
-    let project = Project::load(project_path)?;
     if project.timeline.track(ti).is_none() {
         bail!("no track #{track}");
     }
@@ -2757,14 +2764,22 @@ mod tests {
         let path = dir.join("p.json");
         Project::new().save(&path).unwrap();
 
-        let err = cmd_edl(&path, 0).unwrap_err().to_string();
+        let err = cmd_edl(&path, Some(0)).unwrap_err().to_string();
         assert!(err.contains("1-based"), "{err}");
         let err = cmd_add(&path, Path::new("nope.mp4"), 0, None, None, None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("1-based"), "{err}");
-        // …and the valid path still works.
-        assert!(cmd_edl(&path, 1).is_err(), "an empty timeline has no EDL");
+        // …and the valid paths still work (the composite has nothing to play
+        // on an empty timeline either).
+        assert!(
+            cmd_edl(&path, Some(1)).is_err(),
+            "an empty timeline has no EDL"
+        );
+        assert!(
+            cmd_edl(&path, None).is_err(),
+            "an empty timeline has no EDL"
+        );
     }
 
     /// `nle seek` stores a snapped, clamped playhead — the TUI opens there.

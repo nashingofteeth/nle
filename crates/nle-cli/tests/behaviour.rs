@@ -629,6 +629,116 @@ fn an_off_sequence_clip_previews_at_the_sequence_size() {
 }
 
 #[test]
+fn a_multi_track_preview_renders_the_composite() {
+    // Two video layers, both with sound: `edl://` can carry only one source's
+    // audio per span, so the monitor plays the rendered composite (the export's
+    // own overlay + amix) where they overlap.
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "4"]);
+    s.ok(&["track", "add", "video"]);
+    s.ok(&[
+        "add",
+        "green.mp4",
+        "--track",
+        "2",
+        "--at",
+        "1",
+        "--in",
+        "0",
+        "--out",
+        "2",
+    ]);
+    let edl = s.edl();
+    assert!(
+        edl.contains("red.mp4"),
+        "the uncovered base plays straight from source:\n{edl}"
+    );
+    assert!(
+        edl.contains("/proxy/"),
+        "the overlap is a rendered composite:\n{edl}"
+    );
+    s.assert_edl_geometry(&edl, 320, 240, "every entry is the sequence's 320x240");
+
+    // The composite is the export's: the opaque overlay wins, and the mix
+    // carries both tracks' audio.
+    let proxies: Vec<_> = edl_paths(&edl)
+        .into_iter()
+        .filter(|p| p.to_string_lossy().contains("/proxy/"))
+        .collect();
+    assert_eq!(proxies.len(), 1, "one span, one render: {proxies:?}");
+    let proxy = proxies[0].display().to_string();
+    s.assert_px(&proxy, 1.0, GREEN, "the overlay is on top");
+    assert!(s.has_audio(&proxy), "the composite carries the mix");
+    s.assert_dur(&proxy, 2.0, "the span is [1,3)");
+}
+
+#[test]
+fn an_audio_track_is_mixed_into_the_preview() {
+    // The monitor used to play the video layer's audio and ignore a separate
+    // audio track entirely; its span is now rendered and mixed.
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["track", "add", "audio"]);
+    s.ok(&[
+        "add",
+        "green.mp4",
+        "--track",
+        "2",
+        "--in",
+        "0",
+        "--out",
+        "1",
+    ]);
+    let edl = s.edl();
+    let entries = edl_paths(&edl);
+    assert_eq!(entries.len(), 2, "one span + the plain tail:\n{edl}");
+    assert!(
+        entries[0].to_string_lossy().contains("/proxy/"),
+        "the audio track's span is rendered:\n{edl}"
+    );
+    assert!(
+        entries[1].ends_with("red.mp4"),
+        "the rest still plays from source:\n{edl}"
+    );
+    let mixed = entries[0].display().to_string();
+    assert!(s.has_audio(&mixed), "the mix carries the audio track");
+    s.assert_dur(&mixed, 1.0, "the span is [0,1)");
+    s.assert_edl_geometry(&edl, 320, 240, "every entry is the sequence's 320x240");
+}
+
+#[test]
+fn a_muted_layer_needs_no_composite() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "4"]);
+    s.ok(&["track", "add", "video"]);
+    s.ok(&[
+        "add",
+        "green.mp4",
+        "--track",
+        "2",
+        "--at",
+        "1",
+        "--in",
+        "0",
+        "--out",
+        "2",
+    ]);
+    s.ok(&["track", "mute", "2"]);
+    let edl = s.edl();
+    assert!(
+        !edl.contains("/proxy/"),
+        "a muted layer contributes neither picture nor sound:\n{edl}"
+    );
+    assert!(edl.contains("red.mp4"), "the base still shows:\n{edl}");
+}
+
+#[test]
 fn cli_only_guards() {
     let s = Sandbox::new();
     let out = s.err(&["trim", "red.mp4", "--in", "0", "--out", "99", "-o", "t.mp4"]);

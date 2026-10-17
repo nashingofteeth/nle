@@ -113,8 +113,9 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 - **Verified:** 183 tests, clippy clean, `./demo.sh` multi-track pixel +
   audio checks.
 
-**Deferred:** composite preview (M5); linked a/v detach; a muted sole video
-track is a no-op in the fast path.
+**Deferred:** linked a/v detach; a muted sole video track is a no-op in the
+fast path. (The composite preview — layer `overlay` + audio `amix` in the
+monitor — landed in M5 as a proxy span.)
 
 ## EDL (CMX3600) import — shipped
 
@@ -281,6 +282,14 @@ below.)
   each asset's path **and mtime**. The render puts the segment on its own
   track and reuses the export graph compiler, so there's no second
   filter-graph to drift.
+- **Composited preview:** mpv plays one source per EDL span and can't blend or
+  mix, so a window where another unmuted track is audible — a second video
+  layer under an overlapping clip, or a separate audio track — is rendered as
+  the export's own composite (video `overlay`ed, audio `amix`ed) over that
+  span, cached, and widened to contain any transition whole (a partial
+  crossfade isn't expressible). Elsewhere the monitor stays on raw sources:
+  with opaque clips, fall-through *is* `overlay`. Bare `nle edl` prints the
+  composite the monitor plays; `--track N` still previews one track.
 - **Verified:** unit tests + real ffmpeg runs — a dissolve reads a ≈50%
   blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
   and `nle edl` renders and references the proxies.

@@ -113,20 +113,30 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
     Ok(segs)
 }
 
-/// One interval of the composite: the topmost track's material covering it,
-/// at `offset` into that segment for `len`, or a gap where every track is a
-/// gap. Pure — the layering decision is settled here; resolving an asset path
-/// or rendering a proxy happens in [`composite_segments`].
+/// One interval of the composite: `[start, end)` and what plays there.
 #[derive(Debug)]
-enum Window<'a> {
-    Segment(&'a TimelineSegment, Seconds, Seconds),
-    Gap(Seconds),
+struct Window<'a> {
+    start: Seconds,
+    end: Seconds,
+    kind: WindowKind<'a>,
 }
 
-/// The composite plan: the union of every unmuted video track's cut points,
-/// with the topmost segment picked per interval. A clip **or a transition**
-/// wins over the layers below it — a transition is rendered material (its
-/// proxy), not a hole; a gap falls through.
+#[derive(Debug)]
+enum WindowKind<'a> {
+    /// One track's material: `edl://` plays the segment (or its proxy),
+    /// offset into it.
+    Segment(&'a TimelineSegment, Seconds),
+    /// More than one track contributes audio, so the window needs the rendered
+    /// composite — an EDL entry carries one source's sound, not a mix.
+    Mix,
+    /// Every track is a gap: black.
+    Gap,
+}
+
+/// The composite plan: the union of every unmuted track's cut points, with the
+/// topmost segment picked per interval. A clip **or a transition** wins over
+/// the layers below it — a transition is rendered material (its proxy), not a
+/// hole; a gap falls through.
 fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError> {
     let total = project.timeline.end();
     if total <= Seconds::from_integer(0) {
@@ -138,13 +148,20 @@ fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError>
         .video_tracks()
         .filter(|t| !t.muted)
         .collect();
+    let audio: Vec<&Track> = project
+        .timeline
+        .audio_tracks()
+        .filter(|t| !t.muted)
+        .collect();
     if video.is_empty() {
         return Err(PreviewError::NoVideoTrack);
     }
 
-    // Union of every video track's segment boundaries.
+    // Union of every unmuted track's segment boundaries. Audio tracks are in
+    // the cut set too: a composite span starts and ends where their material
+    // does.
     let mut cuts = vec![Seconds::from_integer(0), total];
-    for t in &video {
+    for t in video.iter().chain(audio.iter()) {
         let mut acc = Seconds::from_integer(0);
         for seg in &t.segments {
             cuts.push(acc);
@@ -163,21 +180,132 @@ fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError>
         }
         // The topmost track with material (a clip or a transition) covering
         // `[a, b)`; a gap falls through to the layer below.
-        let picked = video.iter().rev().find_map(|t| {
+        let picked = video.iter().enumerate().rev().find_map(|(vi, t)| {
             let si = t.index_at(a)?;
             match &t.segments[si] {
                 TimelineSegment::Clip(_) | TimelineSegment::Transition(_) => {
-                    Some((&t.segments[si], t.start_of(si)))
+                    Some((vi, &t.segments[si], t.start_of(si)))
                 }
                 TimelineSegment::Gap(_) => None,
             }
         });
-        windows.push(match picked {
-            Some((seg, seg_start)) => Window::Segment(seg, a - seg_start, b - a),
-            None => Window::Gap(b - a),
+        // The monitor's sound for a window is the picked source's own audio;
+        // the export sums every track's. A window where any *other* track is
+        // audible needs the rendered composite (or the mix is wrong — or, with
+        // an audio track, silent).
+        let mixed = other_track_has_audio(
+            project,
+            &video,
+            &audio,
+            a,
+            picked.as_ref().map(|(vi, ..)| *vi),
+        );
+        let kind = match picked {
+            _ if mixed => WindowKind::Mix,
+            Some((_, seg, seg_start)) => WindowKind::Segment(seg, a - seg_start),
+            None => WindowKind::Gap,
+        };
+        windows.push(Window {
+            start: a,
+            end: b,
+            kind,
         });
     }
     Ok(windows)
+}
+
+/// Does this segment carry sound? (A transition carries its sides'.)
+fn audible(project: &Project, seg: &TimelineSegment) -> bool {
+    let heard = |id: u32| project.asset(id).is_some_and(|a| a.probe.has_audio());
+    match seg {
+        TimelineSegment::Clip(c) => heard(c.asset),
+        TimelineSegment::Transition(t) => {
+            t.a.asset().is_some_and(heard) || t.b.asset().is_some_and(heard)
+        }
+        TimelineSegment::Gap(_) => false,
+    }
+}
+
+/// Is any track other than the picked video track audible at `at`? The picked
+/// one is what the cheap path already plays.
+fn other_track_has_audio(
+    project: &Project,
+    video: &[&Track],
+    audio: &[&Track],
+    at: Seconds,
+    picked: Option<usize>,
+) -> bool {
+    let audible_at = |t: &Track| {
+        t.index_at(at)
+            .is_some_and(|si| audible(project, &t.segments[si]))
+    };
+    video
+        .iter()
+        .enumerate()
+        .any(|(vi, t)| Some(vi) != picked && audible_at(t))
+        || audio.iter().any(|t| audible_at(t))
+}
+
+/// Spans that must be rendered as a composite: runs of `Mix` windows, widened
+/// to contain any transition they straddle — a partial crossfade isn't
+/// expressible (`xfade` always blends 0→1) — then merged.
+///
+/// Widening only moves a bound to a transition's edge, which is itself a cut
+/// point, so every span still starts and ends on a window boundary.
+fn composite_spans(
+    windows: &[Window<'_>],
+    transitions: &[(Seconds, Seconds)],
+) -> Vec<(Seconds, Seconds)> {
+    let mut spans: Vec<(Seconds, Seconds)> = Vec::new();
+    for w in windows {
+        if !matches!(w.kind, WindowKind::Mix) {
+            continue;
+        }
+        match spans.last_mut() {
+            Some(last) if last.1 == w.start => last.1 = w.end,
+            _ => spans.push((w.start, w.end)),
+        }
+    }
+    loop {
+        let mut grew = false;
+        for span in spans.iter_mut() {
+            for &(ts, te) in transitions {
+                if ts < span.1 && te > span.0 && (ts < span.0 || te > span.1) {
+                    span.0 = span.0.min(ts);
+                    span.1 = span.1.max(te);
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    spans.sort_by_key(|s| s.0);
+    let mut merged: Vec<(Seconds, Seconds)> = Vec::new();
+    for span in spans {
+        match merged.last_mut() {
+            Some(last) if span.0 <= last.1 => last.1 = last.1.max(span.1),
+            _ => merged.push(span),
+        }
+    }
+    merged
+}
+
+/// Every transition's `[start, end)` on an unmuted video track.
+fn transition_spans(project: &Project) -> Vec<(Seconds, Seconds)> {
+    let mut out = Vec::new();
+    for track in project.timeline.video_tracks().filter(|t| !t.muted) {
+        let mut pos = Seconds::from_integer(0);
+        for seg in &track.segments {
+            let end = pos + seg.duration();
+            if matches!(seg, TimelineSegment::Transition(_)) {
+                out.push((pos, end));
+            }
+            pos = end;
+        }
+    }
+    out
 }
 
 /// Flatten the video tracks into one preview sequence, topmost first: at
@@ -186,40 +314,77 @@ fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError>
 /// monitor plays, so a gap in an upper layer reveals the layer below rather
 /// than stopping playback.
 ///
-/// A segment with effects, a non-1× retime, or a transition can't be
-/// expressed by `edl://`:
-/// that window plays the rendered proxy (the same one `nle edl` uses),
-/// offset into it like any source.
+/// Two things `edl://` can't express go through the proxy cache:
+/// - a segment with effects, a non-1× retime, a transition, or an
+///   off-sequence picture size — that window plays the rendered segment,
+///   offset into it like any source;
+/// - a window where another track is audible — that span plays the rendered
+///   *composite* (video `overlay`ed, audio `amix`ed), merged with its
+///   neighbours so one render covers the run.
 pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
+    let windows = composite_windows(project)?;
+    let spans = composite_spans(&windows, &transition_spans(project));
     let mut segs: Vec<Segment> = Vec::new();
-    for w in composite_windows(project)? {
-        match w {
-            Window::Gap(len) => push_gap(&mut segs, len),
-            Window::Segment(seg, offset, len) => {
-                if crate::proxy::needs_proxy(project, seg) {
-                    let path = crate::proxy::proxy_for(project, seg)?;
-                    segs.push(Segment::Clip {
-                        path,
-                        start: offset,
-                        length: len,
-                    });
-                } else if let TimelineSegment::Clip(c) = seg {
-                    let asset = project
-                        .asset(c.asset)
-                        .ok_or(PreviewError::MissingAsset(c.asset))?;
-                    segs.push(Segment::Clip {
-                        path: asset.path.clone(),
-                        // `offset` is inside the clip: offset into its source.
-                        start: c.asset_in + offset,
-                        length: len,
-                    });
-                }
-                // Nothing else reaches here: only a clip gets through
-                // without a proxy, since every transition needs one.
-            }
+    let mut i = 0;
+    for (start, end) in spans {
+        while i < windows.len() && windows[i].start < start {
+            push_window(project, &windows[i], &mut segs)?;
+            i += 1;
+        }
+        let path = crate::proxy::composite_proxy(project, start, end)?;
+        segs.push(Segment::Clip {
+            path,
+            start: Seconds::from_integer(0),
+            length: end - start,
+        });
+        while i < windows.len() && windows[i].end <= end {
+            i += 1;
         }
     }
+    while i < windows.len() {
+        push_window(project, &windows[i], &mut segs)?;
+        i += 1;
+    }
     Ok(segs)
+}
+
+/// One non-composite window: its own source, its proxy, or black.
+fn push_window(
+    project: &Project,
+    window: &Window<'_>,
+    segs: &mut Vec<Segment>,
+) -> Result<(), PreviewError> {
+    let len = window.end - window.start;
+    match &window.kind {
+        WindowKind::Gap => push_gap(segs, len),
+        WindowKind::Segment(seg, offset) => {
+            if crate::proxy::needs_proxy(project, seg) {
+                let path = crate::proxy::proxy_for(project, seg)?;
+                segs.push(Segment::Clip {
+                    path,
+                    start: *offset,
+                    length: len,
+                });
+            } else if let TimelineSegment::Clip(c) = seg {
+                let asset = project
+                    .asset(c.asset)
+                    .ok_or(PreviewError::MissingAsset(c.asset))?;
+                segs.push(Segment::Clip {
+                    path: asset.path.clone(),
+                    // `offset` is inside the clip: offset into its source.
+                    start: c.asset_in + *offset,
+                    length: len,
+                });
+            }
+            // Nothing else reaches here: only a clip gets through without a
+            // proxy, since every transition needs one.
+        }
+        WindowKind::Mix => {
+            debug_assert!(false, "a mix window is always inside a composite span");
+            push_gap(segs, len);
+        }
+    }
+    Ok(())
 }
 
 /// Append a gap, fusing it with a preceding gap so a black span is one
@@ -329,8 +494,9 @@ pub fn build_black_preview(
 pub const EXTEND_PREVIEW_SECS: i64 = 3600;
 
 /// Build the full `edl://` URL for track `ti`, generating the black gap
-/// file if the timeline has gaps. Used by the CLI (`nle edl --track N`); the
-/// monitor plays the composite (see `build_composite_edl`).
+/// file if the timeline has gaps. A single track is the debugging view
+/// (`nle edl --track N`); the monitor — and bare `nle edl` — plays the
+/// composite (see `build_composite_edl`).
 pub fn build_edl(project: &Project, ti: usize) -> Result<String, PreviewError> {
     edl_from_segments(project, &segments(project, ti)?)
 }
@@ -454,6 +620,59 @@ mod tests {
         })
     }
 
+    #[test]
+    fn a_composite_span_never_cuts_a_transition() {
+        let secs = Seconds::from_integer;
+        let w = |start: Seconds, end: Seconds, mix: bool| Window {
+            start,
+            end,
+            kind: if mix {
+                WindowKind::Mix
+            } else {
+                WindowKind::Gap
+            },
+        };
+
+        // A mix run [1,3) with a transition [1.5,2.5) inside it: already
+        // contained, so the span is unchanged.
+        let windows = vec![
+            w(secs(0), secs(1), false),
+            w(secs(1), secs(2), true),
+            w(secs(2), secs(3), true),
+            w(secs(3), secs(4), false),
+        ];
+        assert_eq!(
+            composite_spans(&windows, &[(Seconds::new(3, 2), Seconds::new(5, 2))]),
+            vec![(secs(1), secs(3))]
+        );
+
+        // A transition straddling the run's edge widens it (the windows are
+        // cut at the transition's edges too, since those are cut points).
+        let windows = vec![
+            w(secs(0), Seconds::new(1, 2), false),
+            w(Seconds::new(1, 2), secs(1), false),
+            w(secs(1), secs(2), true),
+            w(secs(2), Seconds::new(5, 2), false),
+            w(Seconds::new(5, 2), secs(3), false),
+        ];
+        assert_eq!(
+            composite_spans(&windows, &[(Seconds::new(1, 2), Seconds::new(5, 2))]),
+            vec![(Seconds::new(1, 2), Seconds::new(5, 2))]
+        );
+
+        // One transition straddling two runs pulls them into a single span.
+        let windows = vec![
+            w(secs(0), secs(1), false),
+            w(secs(1), secs(2), true),
+            w(secs(2), secs(3), false),
+            w(secs(3), secs(4), true),
+        ];
+        assert_eq!(
+            composite_spans(&windows, &[(Seconds::new(3, 2), Seconds::new(7, 2))]),
+            vec![(secs(1), secs(4))]
+        );
+    }
+
     // The composite picks a transition over the layer below (it is rendered
     // material) and routes it through the proxy cache.
     #[test]
@@ -478,10 +697,17 @@ mod tests {
         let windows = composite_windows(&p).unwrap();
         assert_eq!(windows.len(), 2, "the transition's cuts split the low clip");
         match &windows[0] {
-            Window::Segment(seg, offset, len) => {
+            Window {
+                start,
+                end,
+                kind: WindowKind::Segment(seg, offset),
+            } => {
                 assert!(matches!(seg, TimelineSegment::Transition(_)));
+                assert_eq!(
+                    (*start, *end),
+                    (Seconds::from_integer(0), Seconds::from_integer(1))
+                );
                 assert_eq!(*offset, Seconds::from_integer(0));
-                assert_eq!(*len, Seconds::from_integer(1));
                 assert!(
                     crate::proxy::needs_proxy(&p, seg),
                     "a transition is rendered to a proxy"
@@ -491,11 +717,108 @@ mod tests {
         }
         // Below the top track's end, the low clip shows through.
         match &windows[1] {
-            Window::Segment(TimelineSegment::Clip(c), offset, len) => {
-                assert_eq!((c.asset, *offset, *len), (low, 1.into(), 3.into()));
+            Window {
+                kind: WindowKind::Segment(TimelineSegment::Clip(c), offset),
+                ..
+            } => {
+                assert_eq!((c.asset, *offset), (low, Seconds::from_integer(1)));
             }
             other => panic!("expected the low clip, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_window_with_another_audible_track_is_a_composite() {
+        // `probe_report` is video-only, so an overlap of two *video* layers is
+        // still one source's sound. Give the assets audio and the overlap needs
+        // the rendered mix.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let mut with_audio = probe_report("10");
+        with_audio.streams.push(RawStream {
+            index: 1,
+            codec_type: Some("audio".into()),
+            codec_name: Some("aac".into()),
+            ..Default::default()
+        });
+        let (low, _) = p.add_asset("/media/low.mp4".into(), with_audio.clone());
+        let (high, _) = p.add_asset("/media/high.mp4".into(), with_audio);
+        p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 4)];
+        let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        p.timeline.tracks[ti].segments = vec![
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(1),
+            }),
+            TimelineSegment::Clip(TimelineClip {
+                id: 2,
+                asset: high,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(2),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            }),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(1),
+            }),
+        ];
+        assert_eq!(low, 1);
+        let mixed: Vec<bool> = composite_windows(&p)
+            .unwrap()
+            .iter()
+            .map(|w| matches!(w.kind, WindowKind::Mix))
+            .collect();
+        assert_eq!(
+            mixed,
+            vec![false, true, false],
+            "[0,1) one source, [1,3) both layers audible, [3,4) one source"
+        );
+
+        // Muting the overlay leaves one audible track: the cheap path again.
+        p.timeline.tracks[ti].muted = true;
+        assert!(
+            composite_windows(&p)
+                .unwrap()
+                .iter()
+                .all(|w| !matches!(w.kind, WindowKind::Mix)),
+            "a muted layer is silent and invisible"
+        );
+    }
+
+    #[test]
+    fn an_audio_track_makes_its_span_a_composite() {
+        // A separate audio track is inaudible through `edl://` (one source per
+        // entry), so its span must be rendered and mixed.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        let mut with_audio = probe_report("10");
+        with_audio.streams.push(RawStream {
+            index: 1,
+            codec_type: Some("audio".into()),
+            codec_name: Some("aac".into()),
+            ..Default::default()
+        });
+        let (_a, _) = p.add_asset("/media/red.mp4".into(), with_audio);
+        p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 4)];
+        let ai = p.timeline.add_track(nle_core::timeline::TrackKind::Audio);
+        p.timeline.tracks[ai].segments = vec![
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(1),
+            }),
+            seg_clip(2, 0, 1),
+            TimelineSegment::Gap(TimelineGap {
+                duration: Seconds::from_integer(2),
+            }),
+        ];
+        let mixed: Vec<bool> = composite_windows(&p)
+            .unwrap()
+            .iter()
+            .map(|w| matches!(w.kind, WindowKind::Mix))
+            .collect();
+        assert_eq!(
+            mixed,
+            vec![false, true, false],
+            "[1,2) is where the audio track has material"
+        );
     }
 
     #[test]
@@ -507,7 +830,10 @@ mod tests {
         }
         let windows = composite_windows(&p).unwrap();
         match &windows[1] {
-            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
+            Window {
+                kind: WindowKind::Segment(seg, _),
+                ..
+            } => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
             other => panic!("expected the top clip window, got {other:?}"),
         }
 
@@ -518,7 +844,10 @@ mod tests {
         }
         let windows = composite_windows(&p).unwrap();
         match &windows[1] {
-            Window::Segment(seg, ..) => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
+            Window {
+                kind: WindowKind::Segment(seg, _),
+                ..
+            } => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
             other => panic!("expected the top clip window, got {other:?}"),
         }
     }

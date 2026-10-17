@@ -287,9 +287,14 @@ impl Sandbox {
         self.ok(&["show"])
     }
 
-    /// The EDL the monitor plays for track 1.
+    /// The EDL the monitor plays (the composite), via bare `nle edl`.
     pub fn edl(&self) -> String {
-        self.ok(&["edl", "--track", "1"])
+        self.ok(&["edl"])
+    }
+
+    /// One track's EDL, for the debugging view.
+    pub fn edl_track(&self, track: usize) -> String {
+        self.ok(&["edl", "--track", &track.to_string()])
     }
 
     /// Every `edl://` entry must be the sequence's size: mpv plays them all
@@ -415,7 +420,7 @@ pub fn merged(out: &Output) -> String {
 /// The paths in an `edl://` URL (`%len%path,start,length;…`). Walks the
 /// length prefixes rather than splitting on `;`, because a quoted path may
 /// contain one.
-fn edl_paths(edl: &str) -> Vec<PathBuf> {
+pub fn edl_paths(edl: &str) -> Vec<PathBuf> {
     let text = edl.strip_prefix("edl://").expect("an edl:// URL");
     let bytes = text.as_bytes();
     let mut paths = Vec::new();

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use nle_core::Project;
 use nle_core::Seconds;
-use nle_core::timeline::{Segment, Track, TrackKind};
+use nle_core::timeline::{Clip, Gap, Segment, Track, TrackKind};
 use nle_ffmpeg::graph::ExportSpec;
 use nle_ffmpeg::{Encoder, ExportError, export_quiet};
 use thiserror::Error;
@@ -110,6 +110,42 @@ fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     hasher.finish()
 }
 
+/// A cached entry is a hit only when it is a *complete* file: a zero-length
+/// one (a disk that filled, an interrupted copy) would otherwise be served
+/// forever — the hash never changes, so nothing would ever re-render it.
+fn complete(path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
+}
+
+/// Render `project` into the cache under `hash` (if it isn't there yet) and
+/// return the path. The render goes to a temp name (still ending in `.mp4` so
+/// ffmpeg can infer the muxer) and is renamed into place, so a crash mid-render
+/// can't leave a half-written file that a later run would serve.
+fn render_cached(project: &Project, hash: u64) -> Result<PathBuf, ProxyError> {
+    let dir = proxy_cache_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{hash:x}.mp4"));
+    if complete(&path) {
+        return Ok(path);
+    }
+    let tmp = dir.join(format!("{hash:x}.tmp-{}.mp4", std::process::id()));
+    let spec = ExportSpec {
+        output: tmp.clone(),
+        encoder: Encoder::Cpu,
+        crf: 18,
+        preset: "ultrafast".into(),
+        bitrate: "8M".into(),
+    };
+    // Quiet: this runs from the monitor's reload, so ffmpeg's chatter would
+    // paint over the TUI. A failure still carries the reason.
+    if let Err(e) = export_quiet(project, &spec) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
 /// The cached proxy for `seg`, rendering it on demand. The segment is put
 /// on a track of its own and handed to the export graph compiler — which
 /// already applies effects and blends transitions — so the proxy is the
@@ -123,15 +159,6 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
         return Err(ProxyError::NoSettings);
     }
     let hash = proxy_hash(project, seg, w, h);
-    let dir = proxy_cache_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{hash:x}.mp4"));
-    // A cache hit must be a *complete* file: a zero-length entry (a disk that
-    // filled, an interrupted copy) would otherwise be served forever — the
-    // hash never changes, so nothing would ever re-render it.
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
-        return Ok(path);
-    }
 
     let mut p = project.clone();
     p.timeline.tracks = vec![Track {
@@ -139,26 +166,135 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
         muted: false,
         segments: vec![seg.clone()],
     }];
-    // Write to a temp name (still ending in .mp4 so ffmpeg can infer the
-    // muxer) and rename into place: a crash mid-render must not leave a
-    // half-written file that `path.exists()` would then serve forever (the
-    // hash is stable, so it would never re-render).
-    let tmp = dir.join(format!("{hash:x}.tmp-{}.mp4", std::process::id()));
-    let spec = ExportSpec {
-        output: tmp.clone(),
-        encoder: Encoder::Cpu,
-        crf: 18,
-        preset: "ultrafast".into(),
-        bitrate: "8M".into(),
+    render_cached(&p, hash)
+}
+
+/// The cached composite of `[start, end)` — the span rendered the way the
+/// export renders it: every unmuted track's slice, video `overlay`ed and audio
+/// `amix`ed. The monitor plays this where more than one track contributes
+/// audio, which `edl://` (one source per span) cannot express.
+pub fn composite_proxy(
+    project: &Project,
+    start: Seconds,
+    end: Seconds,
+) -> Result<PathBuf, ProxyError> {
+    let (w, h) = match &project.video {
+        Some(v) => (v.width, v.height),
+        None => return Err(ProxyError::NoSettings),
     };
-    // Quiet: this runs from the monitor's reload, so ffmpeg's chatter would
-    // paint over the TUI. A failure still carries the reason.
-    if let Err(e) = export_quiet(&p, &spec) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
+    if project.fps.is_none() {
+        return Err(ProxyError::NoSettings);
     }
-    std::fs::rename(&tmp, &path)?;
-    Ok(path)
+    let tracks = slice_tracks(project, start, end);
+    let hash = span_hash(project, &tracks, w, h);
+    let mut p = project.clone();
+    p.timeline.tracks = tracks;
+    render_cached(&p, hash)
+}
+
+/// Every unmuted track's segments covering `[start, end)`, trimmed at the edges
+/// and padded to the span. A span's bounds are window boundaries, so no
+/// segment is cut *inside* — but a boundary from one track can fall inside
+/// another track's clip, so edge segments are trimmed to fit. Transitions are
+/// never cut: `composite_spans` widens a span to contain any it straddles.
+fn slice_tracks(project: &Project, start: Seconds, end: Seconds) -> Vec<Track> {
+    let span = end - start;
+    project
+        .timeline
+        .tracks
+        .iter()
+        .filter(|t| !t.muted)
+        .map(|track| {
+            let mut segments: Vec<Segment> = Vec::new();
+            let mut filled = Seconds::from_integer(0);
+            let mut pos = Seconds::from_integer(0);
+            for seg in &track.segments {
+                let seg_end = pos + seg.duration();
+                let (lo, hi) = (pos.max(start), seg_end.min(end));
+                if hi > lo {
+                    let at = lo - start;
+                    if at > filled {
+                        segments.push(Segment::Gap(Gap {
+                            duration: at - filled,
+                        }));
+                        filled = at;
+                    }
+                    let piece = trim_segment(seg, lo - pos, hi - lo);
+                    filled += piece.duration();
+                    segments.push(piece);
+                }
+                pos = seg_end;
+            }
+            // The export pads a short track out to the timeline length; do the
+            // same so the slice spans exactly `[start, end)` (a track with
+            // nothing in the span becomes one gap).
+            if filled < span {
+                segments.push(Segment::Gap(Gap {
+                    duration: span - filled,
+                }));
+            }
+            Track {
+                kind: track.kind,
+                muted: false,
+                segments,
+            }
+        })
+        .collect()
+}
+
+/// The `[offset, offset + len)` part of `seg`, in span-relative time. Clips and
+/// gaps only: a span is widened to contain a transition whole, because a
+/// partial crossfade isn't expressible.
+fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
+    match seg {
+        Segment::Gap(_) => Segment::Gap(Gap { duration: len }),
+        Segment::Clip(c) => Segment::Clip(Clip {
+            asset_in: c.source_at(offset),
+            asset_out: c.source_at(offset + len),
+            ..c.clone()
+        }),
+        Segment::Transition(_) => unreachable!("a composite span never cuts a transition"),
+    }
+}
+
+/// The cache key for a composite span: every sliced track (kinds, effects,
+/// transitions, speeds), the output geometry and rate, and each asset the
+/// slice reads (path + mtime, so replacing a file invalidates).
+fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for track in tracks {
+        if let Ok(json) = serde_json::to_string(track) {
+            json.hash(&mut hasher);
+        }
+    }
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    project.fps.hash(&mut hasher);
+    for track in tracks {
+        for seg in &track.segments {
+            let mut assets: Vec<u32> = Vec::new();
+            match seg {
+                Segment::Clip(c) => assets.push(c.asset),
+                Segment::Transition(t) => {
+                    assets.extend(t.a.asset());
+                    assets.extend(t.b.asset());
+                }
+                Segment::Gap(_) => {}
+            }
+            for id in assets {
+                id.hash(&mut hasher);
+                if let Some(a) = project.asset(id) {
+                    a.path.hash(&mut hasher);
+                    if let Ok(m) = std::fs::metadata(&a.path)
+                        && let Ok(t) = m.modified()
+                    {
+                        t.hash(&mut hasher);
+                    }
+                }
+            }
+        }
+    }
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -248,6 +384,68 @@ mod tests {
             !needs_proxy(&p, &clip_of(same)),
             "the sequence size plays raw"
         );
+    }
+
+    /// A span boundary from one track can fall inside another track's clip, so
+    /// the slice trims the edges — and a sped-up clip's source span follows its
+    /// rate, not the timeline delta. Muted tracks drop out (the export drops
+    /// them too).
+    #[test]
+    fn slice_tracks_trims_edges_and_pads() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        // v1: a 2× clip reading source 0..8 → timeline [0,4).
+        p.timeline.tracks[0].segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: secs(0),
+            asset_out: secs(8),
+            speed: Seconds::from_integer(2),
+            effects: Vec::new(),
+        })];
+        // v2: a clip at [1,3), and nothing after it.
+        let vi = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
+        p.timeline.tracks[vi].segments = vec![
+            Segment::Gap(Gap { duration: secs(1) }),
+            Segment::Clip(Clip::new(2, a, secs(0), secs(2))),
+            Segment::Gap(Gap { duration: secs(1) }),
+        ];
+
+        let slice = slice_tracks(&p, secs(1), secs(3));
+        assert_eq!(slice.len(), 2);
+        // v1: trimmed to [1,3) → source 2..6 (2 s).
+        match &slice[0].segments[..] {
+            [Segment::Clip(c)] => {
+                assert_eq!((c.asset_in, c.asset_out), (secs(2), secs(6)));
+                assert_eq!(c.duration(), secs(2));
+            }
+            other => panic!("expected one trimmed clip, got {other:?}"),
+        }
+        // v2: the leading gap is dropped, the clip is whole.
+        match &slice[1].segments[..] {
+            [Segment::Clip(c)] => assert_eq!((c.asset_in, c.asset_out), (secs(0), secs(2))),
+            other => panic!("expected the whole clip, got {other:?}"),
+        }
+        for track in &slice {
+            assert_eq!(track.end(), secs(2), "every slice spans the span");
+        }
+
+        // A track that has nothing in the span becomes one gap of the span.
+        let short = slice_tracks(&p, secs(3), secs(4));
+        match &short[1].segments[..] {
+            [Segment::Gap(g)] => assert_eq!(g.duration, secs(1)),
+            other => panic!("expected a gap, got {other:?}"),
+        }
+
+        // Muted tracks are not part of the export (or the composite).
+        p.timeline.tracks[1].muted = true;
+        assert_eq!(slice_tracks(&p, secs(1), secs(3)).len(), 1);
     }
 
     #[test]
