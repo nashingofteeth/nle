@@ -210,6 +210,43 @@ pub fn frames_to_seconds(frames: i64, fps: Seconds) -> Seconds {
     Seconds::new(frames, 1) / fps
 }
 
+// ----------------------------------------------------------- checked rationals
+//
+// `num-rational`'s operators panic on overflow (and wrap in release builds);
+// its `checked_*` are `num-traits` methods, which is not a direct dependency.
+// These are the exact checked ops the model needs so that a hand-edited
+// project or an extreme rate is *refused*, never wrapped or panicked on.
+
+/// `a + b`, or `None` on overflow.
+pub(crate) fn checked_add(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+    ratio_op(a, b, i64::checked_add)
+}
+
+/// `a - b`, or `None` on overflow.
+pub(crate) fn checked_sub(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+    ratio_op(a, b, i64::checked_sub)
+}
+
+/// `a / b`, or `None` on overflow (or a zero divisor).
+pub(crate) fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+    if *b.numer() == 0 {
+        return None;
+    }
+    Some(Seconds::new(
+        a.numer().checked_mul(*b.denom())?,
+        a.denom().checked_mul(*b.numer())?,
+    ))
+}
+
+fn ratio_op(a: &Seconds, b: &Seconds, op: fn(i64, i64) -> Option<i64>) -> Option<Seconds> {
+    let n = op(
+        a.numer().checked_mul(*b.denom())?,
+        b.numer().checked_mul(*a.denom())?,
+    )?;
+    let d = a.denom().checked_mul(*b.denom())?;
+    Some(Seconds::new(n, d))
+}
+
 /// Serde glue: Seconds ↔ "numerator/denominator" strings ("25/2").
 /// The project file stays human-readable AND exact — no floats anywhere.
 pub mod rational_ser {

@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::time::{Seconds, format_seconds, rational_ser};
+use crate::time::{Seconds, checked_add, checked_div, checked_sub, format_seconds, rational_ser};
 
 #[derive(Debug, Error)]
 pub enum TimelineError {
@@ -217,38 +217,6 @@ impl Segment {
             Segment::Transition(t) => Some(t.dur),
         }
     }
-}
-
-/// Exact `a + b`, `a - b` and `a / b`, or `None` on overflow (or a zero
-/// divisor). `num-rational`'s operators panic on overflow and its `checked_*`
-/// are `num-traits` methods (not a direct dependency), so `validate` carries
-/// its own: a hand-edited project — two clips with huge denominators, say —
-/// must be rejected, not crash the loader.
-fn checked_add(a: &Seconds, b: &Seconds) -> Option<Seconds> {
-    ratio_op(a, b, i64::checked_add)
-}
-
-fn checked_sub(a: &Seconds, b: &Seconds) -> Option<Seconds> {
-    ratio_op(a, b, i64::checked_sub)
-}
-
-fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
-    if *b.numer() == 0 {
-        return None;
-    }
-    Some(Seconds::new(
-        a.numer().checked_mul(*b.denom())?,
-        a.denom().checked_mul(*b.numer())?,
-    ))
-}
-
-fn ratio_op(a: &Seconds, b: &Seconds, op: fn(i64, i64) -> Option<i64>) -> Option<Seconds> {
-    let n = op(
-        a.numer().checked_mul(*b.denom())?,
-        b.numer().checked_mul(*a.denom())?,
-    )?;
-    let d = a.denom().checked_mul(*b.denom())?;
-    Some(Seconds::new(n, d))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

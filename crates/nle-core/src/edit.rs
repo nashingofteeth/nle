@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::media::RawProbe;
 use crate::project::{Asset, Project, ProjectError};
-use crate::time::{Seconds, format_seconds, frames_to_seconds};
+use crate::time::{Seconds, checked_div, format_seconds, frames_to_seconds};
 use crate::timeline::{
     Clip, Effect, Gap, MAX_TIMELINE_SECONDS, Segment, TimelineError, Track, TrackKind, Transition,
     TransitionKind, TransitionSource,
@@ -1082,7 +1082,19 @@ pub fn set_speed_on(
     // fit instead reads one extra source frame, and the render grows a frame
     // per retimed clip — measured 87, 174 against the model's 86, 172.)
     let fps = project.fps.ok_or(EditError::NoFps)?;
-    let want = (src_hi - src_lo) / requested;
+    let limit = Seconds::from_integer(MAX_TIMELINE_SECONDS);
+    let span = src_hi - src_lo;
+    // A rate so slow that the contribution can't fit the timeline limit
+    // overflows the rational long before the limit check below could see it
+    // (`num-rational`'s `Div` panics in debug and wraps in release). Divide
+    // checked, and refuse anything past the limit before the frame arithmetic
+    // multiplies it.
+    let Some(want) = checked_div(&span, &requested) else {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    };
+    if want > limit {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
     // A fast retime can shrink the span below a frame (a 1-frame clip at 2×):
     // refuse rather than round the *request* up to a frame, which would apply
     // a rate nobody asked for (3 s at "100×" must not quietly become 90×).
@@ -1090,7 +1102,9 @@ pub fn set_speed_on(
     let total = Seconds::from_integer((want * fps).round().to_integer()) / fps;
     let mine_dur = total - owned;
     at_least_a_frame(project, &mine_dur)?;
-    let speed = (src_hi - src_lo) / total;
+    let Some(speed) = checked_div(&span, &total) else {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    };
 
     let mut after = c.clone();
     after.speed = speed;
@@ -5873,6 +5887,18 @@ mod tests {
         assert!(matches!(
             set_speed(&p, 1, Seconds::new(-1, 2)),
             Err(EditError::BadSpeed(_))
+        ));
+    }
+
+    /// A rate so small that the quotient overflows the i64 rational is
+    /// refused — not wrapped (release) or panicked on (debug). The hostile
+    /// battery's `speed 1/i64::MAX` case found this.
+    #[test]
+    fn set_speed_refuses_a_rate_it_cannot_represent() {
+        let p = clip_pair(); // a 3 s clip
+        assert!(matches!(
+            set_speed(&p, 1, Seconds::new(1, i64::MAX)),
+            Err(EditError::TooLong(_))
         ));
     }
 
