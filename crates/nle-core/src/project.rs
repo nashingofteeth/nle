@@ -184,23 +184,40 @@ impl Project {
         self.timeline.validate()?;
         for track in &self.timeline.tracks {
             for seg in &track.segments {
-                let Segment::Clip(clip) = seg else { continue };
-                let Some(asset) = self.media.iter().find(|a| a.id == clip.asset) else {
-                    return Err(ProjectError::Asset(
-                        clip.asset,
-                        "not in the media pool".into(),
-                    ));
-                };
-                // A clip must carry the track's kind of stream, or export
-                // can't build the graph (an audio-only asset on a video
-                // track failed deep inside ffmpeg; a video-only asset on an
-                // audio track exported silence).
-                if let Some(reason) = asset.wrong_kind(track.kind) {
-                    return Err(ProjectError::Asset(clip.asset, reason));
+                match seg {
+                    Segment::Gap(_) => {}
+                    Segment::Clip(clip) => {
+                        let asset = self.pooled(clip.asset)?;
+                        // A clip must carry the track's kind of stream, or
+                        // export can't build the graph (an audio-only asset on
+                        // a video track failed deep inside ffmpeg; a video-only
+                        // asset on an audio track exported silence).
+                        if let Some(reason) = asset.wrong_kind(track.kind) {
+                            return Err(ProjectError::Asset(clip.asset, reason));
+                        }
+                    }
+                    // A transition owns its source spans too, so its assets
+                    // must be pooled exactly like a clip's (`remove_asset`
+                    // already refuses to strand one).
+                    Segment::Transition(tr) => {
+                        for side in [&tr.a, &tr.b] {
+                            if let Some(asset) = side.asset() {
+                                self.pooled(asset)?;
+                            }
+                        }
+                    }
                 }
             }
         }
         Ok(())
+    }
+
+    /// The pooled asset with `id`, or the error `validate` reports.
+    fn pooled(&self, id: u32) -> Result<&Asset, ProjectError> {
+        self.media
+            .iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| ProjectError::Asset(id, "not in the media pool".into()))
     }
 
     /// Add an asset, or return the existing one. Returns (id, was_new).
@@ -555,6 +572,33 @@ mod tests {
         // not a stale hardcoded one.
         assert!(msg.contains(&format!("v{PROJECT_VERSION}")), "{msg}");
         assert!(msg.contains("version 1"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_a_transition_on_a_missing_asset() {
+        // A transition owns its spans, so a hand-edited/corrupt reference to an
+        // unpooled asset must be refused like a clip's (`remove_asset` cannot
+        // strand one).
+        let mut p = sample_project();
+        p.timeline
+            .video_track_mut()
+            .unwrap()
+            .segments
+            .push(Segment::Transition(Transition {
+                id: 99,
+                dur: Seconds::from_integer(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: 999,
+                    src_in: Seconds::from_integer(0),
+                    src_out: Seconds::from_integer(1),
+                },
+                b: TransitionSource::Black,
+            }));
+        assert!(matches!(
+            p.validate(),
+            Err(ProjectError::Asset(999, ref why)) if why.contains("media pool")
+        ));
     }
 
     #[test]

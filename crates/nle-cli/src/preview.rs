@@ -378,7 +378,9 @@ pub fn ensure_black_file(
     fs::create_dir_all(&dir)?;
     let name = format!("{width}x{height}_{}_{}.mp4", fps.numer(), fps.denom());
     let path = dir.join(name.clone());
-    if path.is_file() {
+    // A cache hit must be a *complete* file (see the proxy cache): a
+    // zero-length one would be served forever.
+    if fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
         return Ok(path);
     }
     // Write to a temp name (still ending in .mp4 so ffmpeg can infer the

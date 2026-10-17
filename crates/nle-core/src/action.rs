@@ -1040,6 +1040,7 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
         "lut" => Ok(Effect::Lut {
             path: a
                 .path
+                .filter(|p| !p.trim().is_empty())
                 .ok_or_else(|| ParseError::Invalid("effect needs --path".to_string()))?,
         }),
         _ => Err(ParseError::Invalid(EFFECT_USAGE.to_string())),

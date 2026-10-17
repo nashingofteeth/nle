@@ -126,7 +126,10 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
     let dir = proxy_cache_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{hash:x}.mp4"));
-    if path.exists() {
+    // A cache hit must be a *complete* file: a zero-length entry (a disk that
+    // filled, an interrupted copy) would otherwise be served forever — the
+    // hash never changes, so nothing would ever re-render it.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 0) {
         return Ok(path);
     }
 
