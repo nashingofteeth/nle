@@ -251,7 +251,8 @@ below.)
   media, a timeline that wrapped negative on absurd input, sub-frame clips
   from `speed`, kind-mismatched exports, a byte-unstable project file, and a
   handful of misleading errors. Both sweeps are in the repo
-  (`scripts/expect.sh`, `scripts/fuzz.sh`) and run in `scripts/check.sh`.
+  (`crates/nle-cli/tests/behaviour.rs`, `tests/hostile.rs`) and run under
+  `cargo test`.
 
 **Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
 

@@ -59,12 +59,10 @@ Run `scripts/check.sh`; do not commit otherwise. It is:
 ```sh
 cargo fmt --all --check                      # formatting is enforced
 cargo clippy --all-targets -- -D warnings    # warnings are errors
-cargo test                                   # full workspace, must be green
+cargo test                                   # unit + behaviour + hostile batteries
 cargo build --release
 cargo install --path crates/nle-cli
-./demo.sh                                    # end-to-end pixel checks
-./scripts/expect.sh                          # expected behaviours, asserted
-./scripts/fuzz.sh                            # hostile input: no panic, no corruption
+./demo.sh                                    # end-to-end pixel checks (release binary)
 ```
 
 Commit one logical change at a time (`feat:`/`fix:`/`refactor:`/`docs:`),
@@ -73,15 +71,21 @@ plainly.
 
 ## Testing procedures learned here
 
-- **Two behaviour scripts back the unit tests.** `scripts/expect.sh` asserts
-  *results* — export pixels, durations, structure — for normal workflows
+- **Two integration-test batteries back the unit tests.**
+  `crates/nle-cli/tests/behaviour.rs` asserts *results* — export pixels,
+  durations, frame counts, structure — for normal workflows
   (overwrite-vs-ripple lengths, the speed↔source math, audio retiming,
   multi-track overlay/mute, undo/redo byte-identity, EDL/OTIO round trips);
-  `scripts/fuzz.sh` holds hostile input to *invariants* — never panic, exit
-  0/1/2 only, and leave a project that loads with a finite non-negative
-  length — rather than exact messages. A new end-to-end behaviour belongs in
-  `expect.sh`; a new "garbage in" case belongs in `fuzz.sh`. Both are in
-  `scripts/check.sh` (~30 s).
+  `crates/nle-cli/tests/hostile.rs` holds hostile input to *invariants* —
+  never panic, exit 0/1/2 only, and leave a project that loads with a finite
+  non-negative length — rather than exact messages. A new end-to-end
+  behaviour belongs in `behaviour.rs`; a new "garbage in" case belongs in
+  `hostile.rs` (a case is a list of argv sequences). Both run under
+  `cargo test` (~10 s) against the *debug* binary, so integer overflow panics
+  there where release wraps; `cargo test -p nle-core` stays the sub-second
+  loop. `tests/common` generates media once into `CARGO_TARGET_TMPDIR` and
+  rebuilds the project templates every run — a stale template poisons every
+  case.
 - **Split "decide" from "apply" so logic is testable without mpv/ffmpeg.**
   Functions that need a live `MpvPlayer` can't be unit-tested, so extract
   the pure decision and test that: `plan_for_armed`/`apply_extend_plan`,
