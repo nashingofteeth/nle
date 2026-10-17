@@ -206,6 +206,49 @@ impl Segment {
             Segment::Transition(t) => t.dur,
         }
     }
+
+    /// [`Segment::duration`], or `None` if the arithmetic would overflow.
+    /// `validate` sums with this: a hand-edited project (a speed near zero, an
+    /// extreme span) must be rejected, not panic the caller.
+    fn checked_duration(&self) -> Option<Seconds> {
+        match self {
+            Segment::Clip(c) => checked_div(&checked_sub(&c.asset_out, &c.asset_in)?, &c.speed),
+            Segment::Gap(g) => Some(g.duration),
+            Segment::Transition(t) => Some(t.dur),
+        }
+    }
+}
+
+/// Exact `a + b`, `a - b` and `a / b`, or `None` on overflow (or a zero
+/// divisor). `num-rational`'s operators panic on overflow and its `checked_*`
+/// are `num-traits` methods (not a direct dependency), so `validate` carries
+/// its own: a hand-edited project — two clips with huge denominators, say —
+/// must be rejected, not crash the loader.
+fn checked_add(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+    ratio_op(a, b, i64::checked_add)
+}
+
+fn checked_sub(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+    ratio_op(a, b, i64::checked_sub)
+}
+
+fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
+    if *b.numer() == 0 {
+        return None;
+    }
+    Some(Seconds::new(
+        a.numer().checked_mul(*b.denom())?,
+        a.denom().checked_mul(*b.numer())?,
+    ))
+}
+
+fn ratio_op(a: &Seconds, b: &Seconds, op: fn(i64, i64) -> Option<i64>) -> Option<Seconds> {
+    let n = op(
+        a.numer().checked_mul(*b.denom())?,
+        b.numer().checked_mul(*a.denom())?,
+    )?;
+    let d = a.denom().checked_mul(*b.denom())?;
+    Some(Seconds::new(n, d))
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -356,17 +399,8 @@ impl Timeline {
         }
         let limit = Seconds::from_integer(MAX_TIMELINE_SECONDS);
         for (ti, track) in self.tracks.iter().enumerate() {
-            // A length that summed *past* the limit wrapped negative; one
-            // that merely grew too long is caught here too.
-            let end = track.end();
-            if end < Seconds::from_integer(0) || end > limit {
-                // Not "corrupt": an edit simply asked for too much. (A
-                // wrapped-negative end lands here too.)
-                return Err(TimelineError::TooLong {
-                    len: format_seconds(&end),
-                    limit: MAX_TIMELINE_SECONDS,
-                });
-            }
+            // Each segment's own invariants first: a zero `speed` must not
+            // reach the length arithmetic below (it divides by it).
             for (si, seg) in track.segments.iter().enumerate() {
                 let bad =
                     |what: &str| TimelineError::Corrupt(format!("track {ti} segment {si}: {what}"));
@@ -402,6 +436,27 @@ impl Timeline {
                         }
                     }
                 }
+            }
+            // Now the length. The durations and their sum are exact rationals,
+            // so a hand-edited value that overflows either is corrupt — not
+            // "long", and certainly not a panic.
+            let mut end = Seconds::from_integer(0);
+            for (si, seg) in track.segments.iter().enumerate() {
+                let Some(d) = seg.checked_duration() else {
+                    return Err(TimelineError::Corrupt(format!(
+                        "track {ti} segment {si}: duration overflows"
+                    )));
+                };
+                end = checked_add(&end, &d).ok_or_else(|| {
+                    TimelineError::Corrupt(format!("track {ti}: length overflows"))
+                })?;
+            }
+            if end > limit {
+                // Not "corrupt": an edit simply asked for too much.
+                return Err(TimelineError::TooLong {
+                    len: format_seconds(&end),
+                    limit: MAX_TIMELINE_SECONDS,
+                });
             }
         }
         Ok(())
@@ -592,6 +647,49 @@ mod tests {
 
         t.tracks[0].segments = vec![trans(1, clip(0, 1))];
         assert!(t.validate().is_ok());
+    }
+
+    /// Hand-edited arithmetic that the rational can't hold is rejected, not a
+    /// panic: `validate` used to sum durations before checking them (a zero
+    /// `speed` divided by zero) and to add with the panicking operator.
+    #[test]
+    fn validate_rejects_arithmetic_it_cannot_hold() {
+        let mut t = Timeline::new();
+        let clip = |id, out: Seconds, speed: Seconds| {
+            Segment::Clip(Clip {
+                id,
+                asset: 1,
+                asset_in: Seconds::from_integer(0),
+                asset_out: out,
+                speed,
+                effects: Vec::new(),
+            })
+        };
+        let one = Seconds::from_integer(1);
+        let zero = Seconds::from_integer(0);
+
+        t.tracks[0].segments = vec![clip(1, Seconds::from_integer(3), zero)];
+        assert!(
+            matches!(t.validate(), Err(TimelineError::Corrupt(ref m)) if m.contains("speed")),
+            "a zero speed is caught before the length sums"
+        );
+
+        // Two tiny slivers whose exact sum overflows the numerator.
+        t.tracks[0].segments = vec![
+            clip(1, Seconds::new(1, i64::MAX), one),
+            clip(2, Seconds::new(1, i64::MAX - 1), one),
+        ];
+        assert!(
+            matches!(t.validate(), Err(TimelineError::Corrupt(ref m)) if m.contains("overflows")),
+            "an overflowing sum is corrupt, not a panic"
+        );
+
+        // A single duration that can't be represented at all.
+        t.tracks[0].segments = vec![clip(1, Seconds::from_integer(3), Seconds::new(1, i64::MAX))];
+        assert!(
+            matches!(t.validate(), Err(TimelineError::Corrupt(ref m)) if m.contains("overflows")),
+            "an overflowing duration is corrupt, not a panic"
+        );
     }
 
     #[test]
