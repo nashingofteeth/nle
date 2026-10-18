@@ -509,6 +509,12 @@ impl App {
         secs(&self.project.timeline.end())
     }
 
+    /// The last representable playhead position — a timeline of `dur` spans
+    /// `[0, dur)`, so `dur` itself is past the final frame.
+    fn last_frame(&self) -> f64 {
+        secs(&self.project.last_frame())
+    }
+
     fn guard_loaded(&mut self) -> bool {
         if self.loaded {
             true
@@ -523,13 +529,15 @@ impl App {
             player.seek_relative(delta);
             // Model-authoritative while paused: h/l moves the playhead by
             // the same arithmetic the display uses.
-            self.playhead = (self.playhead + delta).clamp(0.0, self.total());
+            self.playhead = (self.playhead + delta).clamp(0.0, self.last_frame());
         }
     }
 
     fn seek_to(&mut self, player: &dyn Mpv, t: f64) {
         if self.guard_loaded() {
-            let target = t.max(0.0);
+            // A timeline of `dur` spans `[0, dur)`: clamp onto its last frame,
+            // not the end boundary.
+            let target = t.clamp(0.0, self.last_frame());
             // Model position is authoritative when paused: set it now.
             self.playhead = target;
             // Nudge a few ms INTO the target instant: EDL segment
@@ -1288,8 +1296,8 @@ fn seek_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Optio
         Ok(t) => secs(&t),
         Err(e) => return Some(format!("invalid time {at:?} ({e})")),
     };
-    // Same clamp as every other seek: into the timeline.
-    app.seek_to(player, t.clamp(0.0, app.total()));
+    // Same clamp as every other seek: onto the timeline's last frame.
+    app.seek_to(player, t.clamp(0.0, app.last_frame()));
     match persist_playhead(app) {
         Ok(true) => {}
         Ok(false) => {
@@ -4577,9 +4585,10 @@ mod tests {
             Project::load(&path).unwrap().playhead,
             Seconds::from_integer(2)
         );
-        // Past the end clamps, like every other seek.
+        // Past the end clamps onto the last frame, like every other seek.
         cmd(&mut app, "seek 999");
-        assert_eq!(app.playhead, app.total());
+        assert_eq!(app.playhead, app.last_frame(), "not the end boundary");
+        assert!(app.playhead < app.total());
         // An edit re-saves the cursor with the session position.
         cmd(&mut app, "seek 2");
         cmd(&mut app, "split");

@@ -2822,11 +2822,12 @@ mod tests {
             Project::load(&path).unwrap().playhead,
             Seconds::from_integer(2)
         );
-        // Past the end clamps into the timeline…
+        // Past the end clamps onto the last frame: 4 s spans [0, 4), so the
+        // final frame is 119/30, not the 4 s boundary.
         cmd_seek(&path, Some("99")).unwrap();
         assert_eq!(
             Project::load(&path).unwrap().playhead,
-            Seconds::from_integer(4)
+            Seconds::new(119, 30)
         );
         // …and an off-grid request snaps to a frame (1.02 s @ 30 = f30.6).
         cmd_seek(&path, Some("1.02")).unwrap();

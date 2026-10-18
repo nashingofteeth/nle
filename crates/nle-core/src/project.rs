@@ -137,13 +137,23 @@ impl Project {
         }
     }
 
+    /// The last representable playhead position: a timeline of `dur` spans
+    /// `[0, dur)`, so its final frame is `dur - 1/fps` (0 on an empty one).
+    pub fn last_frame(&self) -> Seconds {
+        let end = self.timeline.end();
+        match self.fps.as_ref() {
+            Some(f) if *f > Seconds::from_integer(0) => {
+                (end - Seconds::from_integer(1) / *f).max(Seconds::from_integer(0))
+            }
+            _ => end,
+        }
+    }
+
     /// Move the stored playhead to `at`: snapped onto the frame grid and
-    /// clamped into the timeline (the last representable position is
-    /// `end - 1/fps`, but `end` is a valid parking spot for an empty tail).
-    /// Returns where it landed, in seconds.
+    /// clamped into the timeline. Returns where it landed, in seconds.
     pub fn set_playhead(&mut self, at: f64) -> f64 {
         let grid = grid_time(self.fps.as_ref(), at);
-        let landed = grid.clamp(Seconds::from_integer(0), self.timeline.end());
+        let landed = grid.clamp(Seconds::from_integer(0), self.last_frame());
         self.playhead = landed;
         secs_f64(&landed)
     }
@@ -462,8 +472,12 @@ mod tests {
         let mut p = sample_project();
         p.fps = Some(Seconds::new(30000, 1001));
         assert_eq!(p.set_playhead(-5.0), 0.0, "never before the start");
-        let total = secs_f64(&p.timeline.end());
-        assert_eq!(p.set_playhead(total + 10.0), total, "never past the end");
+        let last = secs_f64(&p.last_frame());
+        assert_eq!(
+            p.set_playhead(last + 10.0),
+            last,
+            "never past the last frame"
+        );
         // An off-grid request lands on the project's frame grid.
         let landed = p.set_playhead(1.0005);
         let fps = secs_f64(&p.fps.unwrap());
