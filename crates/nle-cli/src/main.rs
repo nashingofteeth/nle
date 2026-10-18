@@ -1687,6 +1687,11 @@ fn import_edl_work(
         resolve_reel(&project, &map, ev)
     })?;
     project.timeline = timeline;
+    // A non-cut event (a dissolve, wipe, key) was imported as a cut: say so,
+    // rather than silently dropping what the EDL asked for.
+    for w in &doc.warnings {
+        notes.push(format!("warning: {w}"));
+    }
     // Keep every clip inside its media and on the frame grid: an EDL's source
     // out-point can run past the file, and the model must not disagree with
     // what export can render (see `clamp_project_to_media`).

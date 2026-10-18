@@ -3,7 +3,9 @@
 //! An EDL is a text list of events (`NNN  REEL  TRK  TRANS  SRC_IN SRC_OUT
 //! REC_IN REC_OUT`) plus `TITLE:` / `FCM:` headers and `*` comment lines
 //! (which usually carry `FROM CLIP NAME:` / `SOURCE FILE:` — the best
-//! asset-matching hints). Cuts only: dissolves and wipes are rejected.
+//! asset-matching hints). Cuts only: a non-cut event (`D`, `W001`, `K`, …) is
+//! imported as a cut and reported in [`EdlDoc::warnings`] — a transition is
+//! never silently invented, and the transition field is otherwise ignored.
 
 use thiserror::Error;
 
@@ -16,8 +18,6 @@ pub enum EdlError {
     NoEvents,
     #[error("event {event}: malformed line: {line:?}")]
     Malformed { event: usize, line: String },
-    #[error("event {event}: unsupported transition {transition:?} (cuts only)")]
-    Transition { event: usize, transition: String },
     #[error("event {event}: bad timecode {value:?}")]
     Timecode { event: usize, value: String },
 }
@@ -30,8 +30,9 @@ pub struct EdlEvent {
     pub reel: String,
     /// Channel: `V`, `A`, `A2`, `B`, `AA`, …
     pub channel: String,
-    /// Transition code; only `C` (cut) is supported.
-    pub transition: char,
+    /// Transition token as written (`C`, `D`, `W001`, `K`, …). Only `C` is a
+    /// real cut; anything else is imported as one and warned about.
+    pub transition: String,
     pub src_in: Timecode,
     pub src_out: Timecode,
     pub rec_in: Timecode,
@@ -48,6 +49,8 @@ pub struct EdlDoc {
     pub title: Option<String>,
     pub drop_frame: bool,
     pub events: Vec<EdlEvent>,
+    /// Non-fatal notes: a non-cut event imported as a cut, etc.
+    pub warnings: Vec<String>,
 }
 
 /// Parse CMX3600 text into an `EdlDoc`.
@@ -55,6 +58,7 @@ pub fn parse(input: &str) -> Result<EdlDoc, EdlError> {
     let mut title = None;
     let mut drop_frame = false;
     let mut events: Vec<EdlEvent> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for line in input.lines() {
         let trimmed = line.trim();
@@ -86,7 +90,16 @@ pub fn parse(input: &str) -> Result<EdlDoc, EdlError> {
         if !trimmed.as_bytes()[0].is_ascii_digit() {
             continue;
         }
-        events.push(parse_event(trimmed, events.len() + 1)?);
+        let ev = parse_event(trimmed, events.len() + 1)?;
+        // Cuts only: a dissolve/wipe/key is imported as a cut rather than
+        // sinking the whole list — real conform EDLs are full of them.
+        if !ev.transition.eq_ignore_ascii_case("C") {
+            warnings.push(format!(
+                "event {}: transition {:?} imported as a cut (transitions are not imported)",
+                ev.num, ev.transition
+            ));
+        }
+        events.push(ev);
     }
 
     if events.is_empty() {
@@ -96,6 +109,7 @@ pub fn parse(input: &str) -> Result<EdlDoc, EdlError> {
         title,
         drop_frame,
         events,
+        warnings,
     })
 }
 
@@ -114,13 +128,7 @@ fn parse_event(line: &str, event: usize) -> Result<EdlEvent, EdlError> {
     let num: u32 = tokens[0].parse().map_err(|_| bad())?;
     let reel = tokens[1].to_string();
     let channel = tokens[2].to_string();
-    let transition = tokens[3].chars().next().ok_or_else(bad)?;
-    if transition != 'C' {
-        return Err(EdlError::Transition {
-            event,
-            transition: tokens[3].to_string(),
-        });
-    }
+    let transition = tokens[3].to_string();
     let tc = |i: usize| -> Result<Timecode, EdlError> {
         let v = tokens[tokens.len() - 4 + i];
         parse_timecode(v).map_err(|_| EdlError::Timecode {
@@ -333,7 +341,7 @@ FCM: NON-DROP FRAME
         assert_eq!(e.num, 1);
         assert_eq!(e.reel, "AX");
         assert_eq!(e.channel, "V");
-        assert_eq!(e.transition, 'C');
+        assert_eq!(e.transition, "C");
         assert_eq!(e.src_in, parse_timecode("00:00:00:00").unwrap());
         assert_eq!(e.rec_out, parse_timecode("01:00:02:00").unwrap());
         assert_eq!(e.clip_name.as_deref(), Some("red.mp4"));
@@ -353,13 +361,27 @@ FCM: NON-DROP FRAME
         assert_eq!(doc.events.len(), 1);
     }
 
+    // Cuts only: a dissolve, a wipe and a key are each imported as a cut and
+    // reported — a real conform EDL is full of them, and sinking the whole
+    // list on one is the wrong trade.
     #[test]
-    fn rejects_dissolves() {
-        let edl = "001  AX  V  D  024  00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n";
-        assert!(matches!(
-            parse(edl),
-            Err(EdlError::Transition { event: 1, .. })
-        ));
+    fn non_cut_events_become_cuts() {
+        let edl = "\
+001  AX  V  D  024  00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+002  AX  V  W001 012  00:00:00:00 00:00:02:00 01:00:02:00 01:00:04:00
+003  AX  V  K        00:00:00:00 00:00:02:00 01:00:04:00 01:00:06:00
+";
+        let doc = parse(edl).unwrap();
+        assert_eq!(doc.events.len(), 3);
+        assert_eq!(doc.events[0].transition, "D");
+        assert_eq!(doc.events[1].transition, "W001");
+        assert_eq!(doc.events[2].transition, "K");
+        assert_eq!(doc.warnings.len(), 3, "{:?}", doc.warnings);
+        assert!(
+            doc.warnings[0].contains("imported as a cut"),
+            "{}",
+            doc.warnings[0]
+        );
     }
 
     #[test]

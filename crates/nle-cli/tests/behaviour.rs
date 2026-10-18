@@ -373,6 +373,38 @@ fn edl_import_clamps_to_the_media() {
     s.assert_dur("edl-clamp.mp4", 5.0, "the export matches the clamped model");
 }
 
+/// A conform EDL with a dissolve and a wipe imports as hard cuts (each
+/// reported), rather than sinking the whole list.
+#[test]
+fn edl_import_degrades_transitions_to_cuts() {
+    let s = Sandbox::new();
+    s.write(
+        "e.edl",
+        "TITLE: t\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C       00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n\
+         * FROM CLIP NAME: red.mp4\n\
+         002  AX  V  D  030  00:00:00:00 00:00:02:00 01:00:02:00 01:00:04:00\n\
+         * FROM CLIP NAME: blue.mp4\n\
+         003  AX  V  W001 030  00:00:00:00 00:00:02:00 01:00:04:00 01:00:06:00\n\
+         * FROM CLIP NAME: green.mp4\n",
+    );
+    let out = s.run(&["import-edl", "e.edl", "--media", ".", "--force"]);
+    let text = merged(&out);
+    assert!(out.status.success(), "the import should succeed:\n{text}");
+    assert!(
+        text.contains("imported as a cut"),
+        "the non-cut events are reported:\n{text}"
+    );
+    // The record span is kept whole: three adjacent 2 s cuts.
+    let show = s.show();
+    assert!(show.contains("6 s"), "the timeline is 6 s: {show}");
+    s.export("edl-degrade.mp4");
+    s.assert_dur("edl-degrade.mp4", 6.0, "three 2 s cuts");
+    s.assert_px("edl-degrade.mp4", 1.0, RED, "event 1");
+    s.assert_px("edl-degrade.mp4", 3.0, BLUE, "the dissolve, now a cut");
+    s.assert_px("edl-degrade.mp4", 5.0, GREEN, "the wipe, now a cut");
+}
+
 const OTIO: &str = r#"{
   "OTIO_SCHEMA": "Timeline.1",
   "tracks": {
