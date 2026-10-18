@@ -483,7 +483,8 @@ impl App {
                     // material preview can't drive the playhead past the
                     // segment's end (or before its start).
                     Mode::Extend(st) => clamp_extend(st, snapped),
-                    _ => snap_to_cut(snapped, &self.project, self.active()),
+                    _ => snap_to_cut(snapped, &self.project, self.active())
+                        .clamp(0.0, self.last_frame()),
                 };
             }
         }
@@ -2367,8 +2368,21 @@ fn reanchor_playhead(app: &mut App, anchor: Option<Anchor>) {
             }
         }
     };
-    let total = app.total();
+    let total = app.last_frame();
     app.playhead = pos.clamp(0.0, total);
+}
+
+/// Does this action move the active track's media? If not, the playhead stays
+/// where it is — an anchor taken against the old active track would otherwise
+/// resolve against the wrong one (`track rm` re-indexes).
+fn reanchors(action: &Action) -> bool {
+    !matches!(
+        action,
+        Action::TrackAdd { .. }
+            | Action::TrackMute { .. }
+            | Action::TrackRm { .. }
+            | Action::AssetRm { .. }
+    )
 }
 
 /// Where the playhead lands when the anchored clip is gone. A plain
@@ -2430,11 +2444,23 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
     ) {
         Ok(outcome) => {
             match outcome.playhead {
-                Some(frame) => app.playhead = frame_to_secs(app.project.fps.as_ref(), frame),
+                Some(frame) => {
+                    // Clamp: a redo can restore a position into a shorter
+                    // timeline.
+                    app.playhead =
+                        frame_to_secs(app.project.fps.as_ref(), frame).clamp(0.0, app.last_frame());
+                }
                 // A no-op (a yank) must not move the playhead: the anchor
                 // maps a transition to its *end*, so reanchoring a yank out
                 // of a blend would slide the playhead — and `dd` yanks first.
-                None if outcome.changed => reanchor_playhead(app, anchor),
+                None if outcome.changed && reanchors(action) => reanchor_playhead(app, anchor),
+                // A track or pool change doesn't move the active track's
+                // media, so leave the playhead where it is (just clamped): a
+                // `track rm` re-indexes, and an anchor taken against the old
+                // active would resolve against the wrong track.
+                None if outcome.changed => {
+                    app.playhead = app.playhead.clamp(0.0, app.last_frame());
+                }
                 None => {}
             }
             app.set_message(&outcome.desc);
@@ -4297,6 +4323,118 @@ mod tests {
         // Keys reach a state first.
         let out = dump(asset_project(), PathBuf::from("t.json"), (40, 8), "ll");
         assert!(out.contains("playhead: 2 s"), "{out}");
+    }
+
+    // Post-action playhead placement, one row per settled rule. Each case
+    // starts fresh, seeks with `l`, presses the keys, and asserts where the
+    // playhead lands.
+    #[test]
+    fn playhead_placement_after_each_action() {
+        let cases: &[(&str, &str, f64, &str)] = &[
+            ("ll", "dd", 2.0, "plain delete keeps the offset in the gap"),
+            ("ll", "D", 0.0, "ripple delete lands on the seam"),
+            ("ll", "s", 2.0, "split leaves it"),
+            ("ll", "_", 2.0, "insert gap leaves it"),
+            ("ll", "i", 2.0, "a gap-left head trim leaves it"),
+            (
+                "ll",
+                "I",
+                0.0,
+                "a ripple head trim moves it back by the trim",
+            ),
+            ("ll", "o", 2.0, "a tail trim leaves it"),
+            ("ll", "O", 2.0, "a ripple tail trim leaves it"),
+            ("ll", "yy", 2.0, "a yank is a read"),
+            ("ll", "yyp", 2.0, "paste lands on the pasted clip's start"),
+            (
+                "ll",
+                "yyP",
+                2.0,
+                "a ripple paste lands on the pasted clip's start",
+            ),
+            (
+                "lll",
+                "x",
+                2.0,
+                "a transition lands on the blend's first frame",
+            ),
+            ("lll", "dd", 3.0, "deleting the gap lands on the seam"),
+            ("ll", "u", 2.0, "undo restores the pre-edit position"),
+        ];
+        for (seek, keys, want, why) in cases {
+            let mut app = App::new(asset_project(), temp_project_path("place"));
+            app.loaded = true;
+            let fake = FakeMpv::new();
+            for k in seek.chars() {
+                handle_key(&mut app, &fake, key(k));
+            }
+            for k in keys.chars() {
+                handle_key(&mut app, &fake, key(k));
+            }
+            assert!(
+                (app.playhead - want).abs() < 1e-9,
+                "{keys:?} from {seek} → {} (want {want}) — {why}",
+                app.playhead
+            );
+        }
+    }
+
+    // The playhead never lands on the `end` boundary — a timeline of `dur`
+    // spans `[0, dur)` — so a trim that leaves its clip last clamps onto the
+    // clip's final frame.
+    #[test]
+    fn the_playhead_clamps_to_the_last_frame_after_a_trim() {
+        let mut p = asset_project();
+        let a = p.media[0].id;
+        p.timeline.tracks[0].segments = vec![TimelineSegment::Clip(nle_core::Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(1),
+            asset_out: Seconds::from_integer(5),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })];
+        let mut app = App::new(p, temp_project_path("clamp"));
+        app.loaded = true;
+        app.playhead = 2.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('O')); // ripple trim out to 2.0
+        assert_eq!(app.total(), 2.0, "the timeline shrank to the clip");
+        assert_eq!(app.playhead, app.last_frame(), "on the final frame");
+        assert!(app.playhead < app.total());
+    }
+
+    // A track change doesn't move the active track's media: the playhead stays
+    // put (`track rm` re-indexes, so an anchor against the old active would
+    // resolve against the wrong track).
+    #[test]
+    fn a_track_removal_leaves_the_playhead_put() {
+        let mut p = asset_project();
+        p.timeline.add_track(TrackKind::Video);
+        let a = p.media[0].id;
+        p.timeline.tracks[1].segments = vec![TimelineSegment::Clip(nle_core::Clip {
+            id: 9,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(4),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })];
+        let mut app = App::new(p, temp_project_path("track-rm"));
+        app.loaded = true;
+        app.active_track = 1;
+        app.playhead = 2.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key(':'));
+        for c in "track rm 2".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert_eq!(app.playhead, 2.0, "the playhead stays put");
     }
 
     #[test]

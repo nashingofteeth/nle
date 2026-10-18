@@ -134,6 +134,16 @@ the identical grid.
   `edit_anchor` maps a transition to its end (the seam a removal leaves), but
   the seam is used only once the segment under the playhead is gone — an
   insert, a trim, or an effect elsewhere over a gap must not slide it.
+- **Every playhead write clamps to `last_frame`** (`dur - 1/fps`), never
+  `end`: an edit that shortens the timeline — or a redo restoring a pre-edit
+  position into a shorter one — must not park the playhead past the final
+  frame (`Project::last_frame`; the same rule as a seek).
+- **A track or pool change leaves the playhead put** (`reanchors`): it doesn't
+  move the active track's media, and `track rm` re-indexes — an anchor taken
+  against the old active track would resolve against the wrong one.
+- `playhead_placement_after_each_action` is the audit table (one row per rule);
+  `the_playhead_clamps_to_the_last_frame_after_a_trim` and
+  `a_track_removal_leaves_the_playhead_put` guard the two clamps above.
 - Implemented by capturing an anchor **before** `history.apply` and
   resolving it after; `run.resume` for the pool.
 
