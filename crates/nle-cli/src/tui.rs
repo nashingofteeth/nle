@@ -347,6 +347,10 @@ pub struct App {
     pub reload_requested: bool,
     pub quit: bool,
     pub message: String,
+    /// The `:` line was opened from the pool (`i`): leaving it must put the
+    /// timeline back on the monitor, or the monitor keeps playing the pooled
+    /// file while the UI shows the timeline.
+    command_from_pool: bool,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -385,6 +389,7 @@ impl App {
             reload_requested: false,
             quit: false,
             message: String::new(),
+            command_from_pool: false,
             paused: true,
             loaded: false,
             dead: false,
@@ -849,7 +854,10 @@ fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Enter | KeyCode::Char('P') => insert_from_pool(app, player),
         KeyCode::Char('d') => remove_from_pool(app, player),
         // Import a file into the pool: opens the command line pre-filled.
-        KeyCode::Char('i') => app.mode = Mode::Command("import ".to_string()),
+        KeyCode::Char('i') => {
+            app.command_from_pool = true;
+            app.mode = Mode::Command("import ".to_string());
+        }
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         // Preview transport (asset seconds).
@@ -961,6 +969,16 @@ fn open_pool(app: &mut App, player: &dyn Mpv) {
 }
 
 /// Close the pool: reload the project timeline at the remembered playhead.
+/// A `:` line opened from the pool (`i`) leaves the monitor on the pooled
+/// file: put the timeline back on it, as `close_pool` does.
+fn leave_pool_command(app: &mut App, _player: &dyn Mpv) {
+    if !app.command_from_pool {
+        return;
+    }
+    app.command_from_pool = false;
+    app.reload_requested = true;
+}
+
 fn close_pool(app: &mut App, player: &dyn Mpv) {
     let resume = pool_resume(app);
     if let Some(sel) = pool_sel(app) {
@@ -1564,10 +1582,14 @@ fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
             }
             if !quitting {
                 app.mode = Mode::Normal;
+                leave_pool_command(app, player);
             }
             // else: keep the command text visible while exiting
         }
-        KeyCode::Esc => app.mode = Mode::Normal,
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            leave_pool_command(app, player);
+        }
         KeyCode::Backspace => {
             let mut b = buf;
             b.pop();
@@ -6981,6 +7003,40 @@ mod tests {
             before,
             "the stray `d` did not delete"
         );
+    }
+
+    // A command line opened from the pool (`i`) puts the timeline back on the
+    // monitor when it closes, or the monitor keeps playing the pooled file
+    // while the UI shows the timeline.
+    #[test]
+    fn a_command_from_the_pool_restores_the_timeline() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("pool-cmd"));
+        app.loaded = true;
+        handle_key(&mut app, &fake, key('m')); // open the pool
+        handle_key(&mut app, &fake, key('i')); // …and its `:import` line
+        assert!(matches!(app.mode, Mode::Command(_)));
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(
+            app.reload_requested,
+            "the timeline goes back on the monitor"
+        );
+
+        // A `:` line opened from Normal does not force a reload.
+        let mut app = App::new(asset_project(), temp_project_path("pool-cmd2"));
+        app.loaded = true;
+        handle_key(&mut app, &fake, key(':'));
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert!(!app.reload_requested);
     }
 
     // Entering extend mode at a clip|transition cut hops to the blend's far
