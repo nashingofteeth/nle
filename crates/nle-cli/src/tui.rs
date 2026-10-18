@@ -2650,9 +2650,10 @@ fn blend_far_end(
 }
 
 fn side_hint(side: Side) -> &'static str {
+    // Name the *other* bracket: the hint fires on the key that just failed.
     match side {
-        Side::Left => "no clip ends here — ] works the clip on the left",
-        Side::Right => "no clip starts here — [ works the clip on the right",
+        Side::Left => "no clip ends here — [ works the clip on the right",
+        Side::Right => "no clip starts here — ] works the clip on the left",
     }
 }
 
@@ -6947,6 +6948,30 @@ mod tests {
             track.segments
         );
         assert_eq!(app.playhead, 3.0, "back on the seam the restore leaves");
+    }
+
+    // A pending `d` is cancelled by any non-starter key, so `d`, `:`, Esc, `d`
+    // must not delete.
+    #[test]
+    fn a_pending_delete_is_cancelled_by_a_mode_change() {
+        let mut app = App::new(asset_project(), temp_project_path("pending"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        let fake = FakeMpv::new();
+        let before = app.project.timeline.video_track().unwrap().segments.len();
+        handle_key(&mut app, &fake, key('d')); // arms the sequence
+        handle_key(&mut app, &fake, key(':')); // …and the command line cancels it
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        handle_key(&mut app, &fake, key('d'));
+        assert_eq!(
+            app.project.timeline.video_track().unwrap().segments.len(),
+            before,
+            "the stray `d` did not delete"
+        );
     }
 
     // Entering extend mode at a clip|transition cut hops to the blend's far
