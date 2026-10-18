@@ -253,7 +253,14 @@ fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
             asset_out: c.source_at(offset + len),
             ..c.clone()
         }),
-        Segment::Transition(_) => unreachable!("a composite span never cuts a transition"),
+        Segment::Transition(t) => {
+            // `composite_spans` widens a span to contain any transition whole,
+            // so it arrives uncut (`offset == 0`, `len == dur`); keep it as-is
+            // and let the export graph render the crossfade.
+            debug_assert_eq!(offset, Seconds::from_integer(0));
+            debug_assert_eq!(len, t.dur);
+            seg.clone()
+        }
     }
 }
 
@@ -446,6 +453,49 @@ mod tests {
         // Muted tracks are not part of the export (or the composite).
         p.timeline.tracks[1].muted = true;
         assert_eq!(slice_tracks(&p, secs(1), secs(3)).len(), 1);
+    }
+
+    /// A span is widened to contain a transition whole, so the slice must keep
+    /// it as-is — not try to cut a crossfade (the monitor used to panic here).
+    #[test]
+    fn slice_tracks_keeps_a_transition_whole() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_size(320, 240));
+        // [clip 0..1][transition 1..2][clip 2..3]
+        p.timeline.tracks[0].segments = vec![
+            Segment::Clip(Clip::new(1, a, secs(0), secs(1))),
+            Segment::Transition(Transition {
+                id: 3,
+                dur: secs(1),
+                kind: TransitionKind::Dissolve,
+                a: TransitionSource::Clip {
+                    asset: a,
+                    src_in: secs(0),
+                    src_out: secs(1),
+                },
+                b: TransitionSource::Clip {
+                    asset: a,
+                    src_in: secs(0),
+                    src_out: secs(1),
+                },
+            }),
+            Segment::Clip(Clip::new(2, a, secs(0), secs(1))),
+        ];
+        let slice = slice_tracks(&p, secs(0), secs(3));
+        assert!(
+            slice[0]
+                .segments
+                .iter()
+                .any(|s| matches!(s, Segment::Transition(_))),
+            "the blend is kept whole: {:?}",
+            slice[0].segments
+        );
     }
 
     #[test]
