@@ -91,6 +91,13 @@ pub fn parse(input: &str) -> Result<EdlDoc, EdlError> {
             continue;
         }
         let ev = parse_event(trimmed, events.len() + 1)?;
+        // A zero-length event contributes nothing — a marker line, or the
+        // outgoing half of a dissolve some writers emit. Drop it rather than
+        // sinking the import; a *negative* span is still an error (`build`).
+        if ev.src_out == ev.src_in || ev.rec_out == ev.rec_in {
+            warnings.push(format!("event {}: zero-length event skipped", ev.num));
+            continue;
+        }
         // Cuts only: a dissolve/wipe/key is imported as a cut rather than
         // sinking the whole list — real conform EDLs are full of them.
         if !ev.transition.eq_ignore_ascii_case("C") {
@@ -402,6 +409,28 @@ FCM: NON-DROP FRAME
             "{}",
             doc.warnings[0]
         );
+    }
+
+    // A zero-length event (a marker line, or the outgoing half of a dissolve
+    // some writers emit) is dropped with a warning, not a fatal error.
+    #[test]
+    fn a_zero_length_event_is_skipped() {
+        let edl = "\
+001 AX V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+002 AX V C 00:00:00:00 00:00:00:00 01:00:02:00 01:00:02:00
+003 AX V C 00:00:00:00 00:00:02:00 01:00:02:00 01:00:04:00
+";
+        let doc = parse(edl).unwrap();
+        assert_eq!(doc.events.len(), 2, "the marker is dropped");
+        assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
+        assert!(
+            doc.warnings[0].contains("zero-length"),
+            "{}",
+            doc.warnings[0]
+        );
+        // The timeline is the two real events, adjacent.
+        let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
+        assert_eq!(tl.tracks[0].segments.len(), 2);
     }
 
     #[test]
