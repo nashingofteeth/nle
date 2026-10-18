@@ -3233,13 +3233,37 @@ pub fn extend_edge_on(
         }
     };
     let side = if head { "head" } else { "tail" };
-    Ok(Batch {
-        ops: vec![EditOp::Replace {
+    let mut ops = vec![EditOp::Replace {
+        track: ti,
+        index: si,
+        before: Segment::Clip(c),
+        after: Segment::Clip(after.clone()),
+    }];
+    // A ripple extend shifts the blend beside the moved edge: its side follows
+    // the clip's new edge, or the clip's material would play twice (once in its
+    // own span, once inside the crossfade).
+    let neighbour = if head {
+        si.checked_sub(1)
+    } else {
+        Some(si + 1)
+    };
+    if let Some(ni) = neighbour
+        && let Some(Segment::Transition(t)) = track.segments.get(ni)
+    {
+        let edge_source = if head {
+            after.asset_in
+        } else {
+            after.asset_out
+        };
+        ops.push(EditOp::Replace {
             track: ti,
-            index: si,
-            before: Segment::Clip(c),
-            after: Segment::Clip(after),
-        }],
+            index: ni,
+            before: Segment::Transition(t.clone()),
+            after: Segment::Transition(shift_blend_side(t, !head, edge_source)),
+        });
+    }
+    Ok(Batch {
+        ops,
         desc: format!("extend {side} of clip #{clip_id} to {}", stamp(project, &t)),
     })
 }
@@ -3687,6 +3711,97 @@ struct Straddle {
 /// Trim a straddled follower's head to `t`, or absorb it whole when under
 /// a frame would remain. A straddled gap simply shrinks to its uncovered
 /// remainder. Appends to `ops`/`absorbed`.
+/// A transition side's source span, or `None` for black.
+fn side_span(side: &TransitionSource) -> Option<Seconds> {
+    match side {
+        TransitionSource::Clip {
+            src_in, src_out, ..
+        } => Some(*src_out - *src_in),
+        TransitionSource::Black => None,
+    }
+}
+
+/// The blend after one edge moves to `[new_start, new_end)`. `dur` follows the
+/// new span and each clip side keeps its own rate (`span / dur`), so the
+/// crossfade stays whole at the neighbours' speed instead of playing faster —
+/// `left` says which edge moved, which is which side's outer source stays put.
+/// A black side has no span to adjust.
+fn move_blend_edge(
+    tr: &Transition,
+    start: Seconds,
+    new_start: Seconds,
+    new_end: Seconds,
+    left: bool,
+) -> Transition {
+    let dur = new_end - new_start;
+    let a_rate = side_span(&tr.a).map(|s| s / tr.dur);
+    let b_rate = side_span(&tr.b).map(|s| s / tr.dur);
+    let a = match (tr.a.clone(), a_rate) {
+        (
+            TransitionSource::Clip {
+                asset,
+                src_in,
+                src_out,
+            },
+            Some(rate),
+        ) => TransitionSource::Clip {
+            asset,
+            src_in: if left {
+                src_in + (new_start - start) * rate
+            } else {
+                src_in
+            },
+            src_out: if left { src_out } else { src_in + dur * rate },
+        },
+        (side, _) => side,
+    };
+    let b = match (tr.b.clone(), b_rate) {
+        (
+            TransitionSource::Clip {
+                asset,
+                src_in,
+                src_out,
+            },
+            Some(rate),
+        ) => TransitionSource::Clip {
+            asset,
+            src_in: if left { src_out - dur * rate } else { src_in },
+            src_out: if left { src_out } else { src_in + dur * rate },
+        },
+        (side, _) => side,
+    };
+    Transition {
+        dur,
+        a,
+        b,
+        ..tr.clone()
+    }
+}
+
+/// A blend whose neighbouring clip's edge moved *outward* (a ripple extend):
+/// the span is unchanged, so the side on that neighbour follows its new edge
+/// and keeps its rate — otherwise the clip's material would play twice.
+fn shift_blend_side(tr: &Transition, a_side: bool, edge_source: Seconds) -> Transition {
+    let rate = |s: &TransitionSource| side_span(s).map(|span| span / tr.dur);
+    let mut out = tr.clone();
+    if a_side {
+        if let (TransitionSource::Clip { asset, .. }, Some(r)) = (&tr.a, rate(&tr.a)) {
+            out.a = TransitionSource::Clip {
+                asset: *asset,
+                src_in: edge_source,
+                src_out: edge_source + tr.dur * r,
+            };
+        }
+    } else if let (TransitionSource::Clip { asset, .. }, Some(r)) = (&tr.b, rate(&tr.b)) {
+        out.b = TransitionSource::Clip {
+            asset: *asset,
+            src_in: edge_source - tr.dur * r,
+            src_out: edge_source,
+        };
+    }
+    out
+}
+
 fn trim_or_absorb_head(
     project: &Project,
     ti: usize,
@@ -3709,9 +3824,10 @@ fn trim_or_absorb_head(
             });
             Ok(())
         }
-        // A straddled transition shrinks to its uncovered tail (like a gap);
-        // its sources stay, so a shorter `dur` just means a faster crossfade.
-        // Under a frame is a sliver, not a transition: drop it whole.
+        // A straddled transition shrinks to its uncovered tail: the blend's
+        // left edge moves to `t` and each side follows its neighbour, so the
+        // crossfade stays whole at the neighbours' rate. Under a frame is a
+        // sliver, not a transition: drop it whole.
         Segment::Transition(tr) => {
             let remainder = start + tr.dur - t;
             if at_least_a_frame(project, &remainder).is_err() {
@@ -3727,10 +3843,7 @@ fn trim_or_absorb_head(
                 track: ti,
                 index,
                 before: Segment::Transition(tr.clone()),
-                after: Segment::Transition(Transition {
-                    dur: remainder,
-                    ..tr.clone()
-                }),
+                after: Segment::Transition(move_blend_edge(&tr, start, t, start + tr.dur, true)),
             });
             Ok(())
         }
@@ -3785,9 +3898,9 @@ fn trim_or_absorb_tail(
             });
             Ok(())
         }
-        // A straddled transition shrinks to its uncovered head (like a gap);
-        // its sources stay, so a shorter `dur` just means a faster crossfade.
-        // Under a frame is a sliver, not a transition: drop it whole.
+        // A straddled transition shrinks to its uncovered head: the blend's
+        // right edge moves to `t`, each side following its neighbour. Under a
+        // frame is a sliver, not a transition: drop it whole.
         Segment::Transition(tr) => {
             let remainder = tr.dur - (t - start);
             if at_least_a_frame(project, &remainder).is_err() {
@@ -3803,10 +3916,7 @@ fn trim_or_absorb_tail(
                 track: ti,
                 index,
                 before: Segment::Transition(tr.clone()),
-                after: Segment::Transition(Transition {
-                    dur: remainder,
-                    ..tr.clone()
-                }),
+                after: Segment::Transition(move_blend_edge(&tr, start, start, t, false)),
             });
             Ok(())
         }
@@ -6351,6 +6461,76 @@ mod tests {
             (Seconds::from_integer(1), Seconds::from_integer(1)),
             "both sides still play at their neighbour's rate"
         );
+    }
+
+    // Extending a neighbour into a blend shrinks it the same way the trim does:
+    // the side follows the clip's edge, so the crossfade plays at the
+    // neighbour's rate (it used to keep its old span and double the rate).
+    #[test]
+    fn extending_into_a_blend_keeps_the_rate() {
+        let mut p = clip_pair();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        // red's out absorbs the blend's left 0.5 s (`e`, non-ripple).
+        let batch = absorb_outward_on(&p, 0, 1, false, 2.5).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        match &p.timeline.video_track().unwrap().segments[..] {
+            [Segment::Clip(c1), Segment::Transition(t), Segment::Clip(c2)] => {
+                assert_eq!(c1.asset_out, Seconds::new(5, 2), "red absorbed 0.5 s");
+                assert_eq!(t.dur, Seconds::new(1, 2), "the blend shrank");
+                assert_eq!(c2.asset_in, Seconds::from_integer(1), "blue is whole");
+            }
+            other => panic!("expected clip/blend/clip, got {other:?}"),
+        }
+        assert_eq!(
+            (side_rate(&p, 1, true), side_rate(&p, 1, false)),
+            (Seconds::from_integer(1), Seconds::from_integer(1)),
+            "both sides still play at their neighbour's rate"
+        );
+    }
+
+    // A ripple extend shifts the blend's side with the clip's new edge, so the
+    // clip's material does not play twice (once in its span, once in the blend).
+    #[test]
+    fn a_ripple_extend_shifts_the_blend_side() {
+        let mut p = clip_pair();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        // red's out ripples out to 2.5; the blend shifts right with it.
+        let batch = extend_edge(&p, 1, false, 2.5).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        match &p.timeline.video_track().unwrap().segments[..] {
+            [Segment::Clip(c1), Segment::Transition(t), Segment::Clip(c2)] => {
+                assert_eq!(c1.asset_out, Seconds::new(5, 2), "red grew");
+                assert_eq!(t.dur, Seconds::from_integer(1), "the blend kept its length");
+                let TransitionSource::Clip {
+                    src_in, src_out, ..
+                } = &t.a
+                else {
+                    panic!("expected a clip side")
+                };
+                assert_eq!(*src_in, c1.asset_out, "a follows red's new out");
+                assert_eq!(*src_out, Seconds::new(7, 2), "a kept its span");
+                assert_eq!(c2.asset_in, Seconds::from_integer(1), "blue is whole");
+            }
+            other => panic!("expected clip/blend/clip, got {other:?}"),
+        }
     }
 
     /// The playback rate of one transition side: its source span over the
