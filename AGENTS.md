@@ -103,6 +103,18 @@ plainly.
   `FakeMpv`, which records the calls. Handlers that need mpv are no longer
   untestable — add a `Call` variant and assert on it.
 
+## TUI diagnostics: dump the state and the grid
+
+`nle edit --dump [--dump-size WxH] [--dump-keys KEYS]` renders the TUI **once**
+(no mpv needed), feeds `KEYS` first (`\n` = Enter, `\e` = Esc), and prints the
+model state (`nle show`'s summary + mode, active track, playhead in seconds
+and frames, paused/eof, the message) followed by the grid with a **column
+ruler**. A rendering, layout, or playhead-placement question can then be
+answered from the dump instead of a screenshot — say *"dump `x` at 100x30 on
+the demo project"* and the answer is one command. The same path backs the
+render tests (`ratatui::backend::TestBackend`), so the dump and the tests see
+the identical grid.
+
 ## Playhead anchoring after an action (settled rules)
 
 - Normal edits follow the **media frame** (clip id + source), not the

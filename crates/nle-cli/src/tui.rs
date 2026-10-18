@@ -577,6 +577,96 @@ impl App {
 /// where the cursor is shortly after it stops moving.
 const PLAYHEAD_FLUSH_IDLE: Duration = Duration::from_millis(1000);
 
+/// A monitor that does nothing: the `--dump` path renders state, it never
+/// plays, so the handlers get a no-op player.
+struct NullMpv;
+
+impl Mpv for NullMpv {
+    fn state(&self) -> PlaybackState {
+        PlaybackState {
+            time_pos: None,
+            duration: None,
+            paused: true,
+            file_loaded: false,
+            eof: false,
+            dead: false,
+            last_error: None,
+        }
+    }
+    fn load(&self, _url: &str, _start: Option<f64>) {}
+    fn set_pause(&self, _on: bool) {}
+    fn toggle_pause(&self) {}
+    fn seek_absolute(&self, _target: f64) {}
+    fn seek_relative(&self, _delta: f64) {}
+    fn set_media_title(&self, _title: &str) {}
+}
+
+/// Render the TUI once at `size` and return a text dump: the model state (as
+/// `nle show` prints it), then the grid with a column ruler. Feed `keys`
+/// first (`\n` = Enter, `\e` = Esc) to reach a state, so a rendering or
+/// placement question can be answered from the dump, not a screenshot.
+pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> String {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = App::new(project, path);
+    // The handlers guard on this (mpv "loaded"); the dump has no monitor.
+    app.loaded = true;
+    let player = NullMpv;
+    for k in keys.chars() {
+        let code = match k {
+            '\n' => KeyCode::Enter,
+            '\x1b' => KeyCode::Esc,
+            c => KeyCode::Char(c),
+        };
+        handle_key(&mut app, &player, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    let (w, h) = size;
+    let mut term = Terminal::new(TestBackend::new(w, h)).expect("a test terminal");
+    term.draw(|f| render(f, &app)).expect("a draw");
+    let buf = term.backend().buffer();
+
+    let mut out = String::new();
+    out.push_str(&crate::show_report(&app.project));
+    out.push_str(&format!(
+        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {}\nmessage: {:?}\n",
+        app.mode,
+        track_label(&app.project, app.active()),
+        app.playhead,
+        frame_of(app.project.fps.as_ref(), app.playhead),
+        app.paused,
+        app.eof,
+        app.message,
+    ));
+    out.push_str(&format!("=== grid {w}x{h} ===\n"));
+    let ruler = |step: u16| -> String {
+        let mut s = String::from("    ");
+        for x in 0..w {
+            s.push(if x % step == 0 { '|' } else { ' ' });
+        }
+        s
+    };
+    out.push_str(&ruler(10));
+    out.push('\n');
+    out.push_str("    ");
+    for x in 0..w {
+        out.push(char::from_digit((x / 10 % 10) as u32, 10).unwrap_or(' '));
+    }
+    out.push('\n');
+    out.push_str("    ");
+    for x in 0..w {
+        out.push(char::from_digit((x % 10) as u32, 10).unwrap_or(' '));
+    }
+    out.push('\n');
+    for y in 0..h {
+        let row: String = (0..w)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect();
+        out.push_str(&format!("{y:>3} {row}\n"));
+    }
+    out
+}
+
 pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
     let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
@@ -4195,6 +4285,18 @@ mod tests {
             hard, mark,
             "the hard divider aligns with the marker:\n{track}\n{marker}"
         );
+    }
+
+    // The dump prints the model state and the grid — the diagnostic path.
+    #[test]
+    fn the_dump_prints_state_and_grid() {
+        let out = dump(asset_project(), PathBuf::from("t.json"), (40, 8), "");
+        assert!(out.contains("mode: Normal"), "{out}");
+        assert!(out.contains("=== grid 40x8 ==="), "{out}");
+        assert!(out.contains("clip #1"), "the model summary:\n{out}");
+        // Keys reach a state first.
+        let out = dump(asset_project(), PathBuf::from("t.json"), (40, 8), "ll");
+        assert!(out.contains("playhead: 2 s"), "{out}");
     }
 
     #[test]

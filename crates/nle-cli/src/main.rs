@@ -448,7 +448,17 @@ enum Cmd {
     },
     /// Interactive editor: TUI dashboard + mpv monitor, vim keys
     #[cfg(feature = "tui")]
-    Edit {},
+    Edit {
+        /// Render the TUI once, print the state and grid, and exit (diagnostics)
+        #[arg(long)]
+        dump: bool,
+        /// Grid size for --dump
+        #[arg(long, value_name = "WxH", default_value = "100x30")]
+        dump_size: String,
+        /// Keys to feed before dumping (`\n` = Enter, `\e` = Esc)
+        #[arg(long, value_name = "KEYS", default_value = "")]
+        dump_keys: String,
+    },
 
     /// Print the mpv preview URL the monitor plays (the composite), or one track's
     /// with `--track N` (debugging)
@@ -869,7 +879,11 @@ fn main() -> Result<()> {
     // executor (and undo history) the TUI uses.
     match &cli.command {
         #[cfg(feature = "tui")]
-        Cmd::Edit {} => return cmd_edit(&cli.project),
+        Cmd::Edit {
+            dump,
+            dump_size,
+            dump_keys,
+        } => return cmd_edit(&cli.project, *dump, dump_size, dump_keys),
         Cmd::Edl { track } => return cmd_edl(&cli.project, *track),
         Cmd::Init { force } => return cmd_init(&cli.project, *force),
         Cmd::Import { files } => return cmd_import(&cli.project, files),
@@ -1010,8 +1024,25 @@ fn main() -> Result<()> {
 // ------------------------------------------------------------ project cmds
 
 #[cfg(feature = "tui")]
-fn cmd_edit(project_path: &Path) -> Result<()> {
+fn cmd_edit(project_path: &Path, dump: bool, dump_size: &str, dump_keys: &str) -> Result<()> {
     let project = Project::load(project_path)?;
+    // `--dump`: render once and print the state + grid, no monitor needed —
+    // the diagnostic path (a rendering or placement question needs no mpv).
+    if dump {
+        let (w, h) = dump_size
+            .split_once(['x', 'X'])
+            .map_or((100, 30), |(w, h)| {
+                (
+                    w.trim().parse().unwrap_or(100),
+                    h.trim().parse().unwrap_or(30),
+                )
+            });
+        print!(
+            "{}",
+            tui::dump(project, project_path.to_path_buf(), (w, h), dump_keys)
+        );
+        return Ok(());
+    }
     // The monitor plays the composite, so any video track with a clip counts.
     let has_clip = project
         .timeline
