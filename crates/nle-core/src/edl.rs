@@ -171,6 +171,27 @@ fn hint(ev: &EdlEvent) -> Option<String> {
     ev.source_file.clone().or_else(|| ev.clip_name.clone())
 }
 
+/// Does a channel code designate video (or audio)? Codes combine with `/`
+/// (`AA/V` = both audio channels *plus* video), so match any part — a plain
+/// `starts_with('V')` reads `AA/V` as audio-only and loses the picture.
+pub fn channel_has(channel: &str, kind: char) -> bool {
+    channel
+        .split('/')
+        .any(|part| part.trim().to_ascii_uppercase().starts_with(kind))
+}
+
+/// The audio channel a code names (`AA/V` → `AA`, `A2/V` → `A2`), or `None`
+/// when it names no audio. The parts are the grouping key, so `AA/V` and `AA`
+/// land on the same track.
+fn audio_channel(channel: &str) -> Option<String> {
+    let parts: Vec<String> = channel
+        .split('/')
+        .map(|p| p.trim().to_ascii_uppercase())
+        .filter(|p| p.starts_with('A'))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
 fn frames_of(tc: Timecode, doc: &EdlDoc, fps: Seconds) -> i64 {
     timecode_to_frames(tc, fps, doc.drop_frame)
 }
@@ -194,7 +215,7 @@ pub fn build(
     let mut video: Vec<&EdlEvent> = doc
         .events
         .iter()
-        .filter(|e| e.channel.starts_with('V'))
+        .filter(|e| channel_has(&e.channel, 'V'))
         .collect();
     video.sort_by_key(|e| frames_of(e.rec_in, doc, fps));
     if video.is_empty() {
@@ -280,8 +301,7 @@ pub fn build(
     let mut channels: Vec<String> = doc
         .events
         .iter()
-        .filter(|e| e.channel.starts_with('A'))
-        .map(|e| e.channel.clone())
+        .filter_map(|e| audio_channel(&e.channel))
         .collect();
     channels.sort();
     channels.dedup();
@@ -291,7 +311,7 @@ pub fn build(
             .events
             .iter()
             .filter(|e| {
-                e.channel == ch
+                audio_channel(&e.channel).as_deref() == Some(ch.as_str())
                     && !linked.contains(&(
                         e.reel.clone(),
                         frames_of(e.src_in, doc, fps),
@@ -492,6 +512,29 @@ FCM: NON-DROP FRAME
             matches!(err, BuildError::Unresolved { event: 1, .. }),
             "{err:?}"
         );
+    }
+
+    // A combined channel code (`AA/V`) carries both picture and sound: a
+    // plain `starts_with('V')` read it as audio-only and the build failed
+    // with "no video events". The video clip carries the embedded audio, so
+    // the audio side is linked (no second track), not doubled.
+    #[test]
+    fn a_combined_channel_code_counts_as_video() {
+        let edl = "001 AX AA/V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n";
+        let doc = parse(edl).unwrap();
+        let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
+        assert_eq!(tl.tracks.len(), 1, "the video clip carries the sound");
+        assert_eq!(tl.tracks[0].kind, TrackKind::Video);
+        assert_eq!(tl.tracks[0].segments.len(), 1);
+
+        // A distinct audio event still gets its own track.
+        let edl = "\
+001 AX AA/V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+002 MU A   C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+";
+        let doc = parse(edl).unwrap();
+        let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
+        assert_eq!(tl.tracks.len(), 2, "video + the distinct audio");
     }
 
     #[test]

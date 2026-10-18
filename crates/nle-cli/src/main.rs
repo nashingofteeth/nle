@@ -1664,7 +1664,7 @@ fn import_edl_work(
         let first_asset = doc
             .events
             .iter()
-            .filter(|e| e.channel.starts_with('V'))
+            .filter(|e| edl::channel_has(&e.channel, 'V'))
             .find_map(|e| resolve_reel(&project, &map, e))
             .and_then(|id| project.asset(id));
         let fps = match fps_arg {
