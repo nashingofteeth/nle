@@ -3007,13 +3007,17 @@ pub fn paste_ripple_on(
             pieces
         }
         Segment::Gap(g) => {
+            // Guard the remainders like `paste_on` does: an off-grid gap start
+            // could otherwise strand a sub-frame sliver.
             let mut pieces = Vec::new();
-            if let Some(l) = gap_piece(t - seg_start) {
-                pieces.push(l);
+            let head = t - seg_start;
+            let tail = g.duration - head;
+            if head > Seconds::from_integer(0) && at_least_a_frame(project, &head).is_ok() {
+                pieces.push(Segment::Gap(Gap { duration: head }));
             }
             pieces.push(pasted_piece(snapshot, project.next_clip_id()));
-            if let Some(r) = gap_piece(g.duration - (t - seg_start)) {
-                pieces.push(r);
+            if tail > Seconds::from_integer(0) && at_least_a_frame(project, &tail).is_ok() {
+                pieces.push(Segment::Gap(Gap { duration: tail }));
             }
             pieces
         }
@@ -5069,6 +5073,46 @@ mod tests {
         h.apply(&mut p, batch, 0).unwrap();
         no_adjacent_gaps(&p);
         assert_eq!(p.timeline.end(), Seconds::from_integer(8));
+    }
+
+    // A ripple paste inside a gap whose start is off the frame grid drops the
+    // sub-frame remainders instead of stranding them (as `paste_on` does).
+    #[test]
+    fn a_ripple_paste_in_an_off_grid_gap_leaves_no_slivers() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let clip = |id, out: Seconds| {
+            Segment::Clip(Clip {
+                id,
+                asset: a,
+                asset_in: Seconds::from_integer(0),
+                asset_out: out,
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            })
+        };
+        // A clip ending half a frame early, then a 1 s gap: the playhead at
+        // 2.0 is one half-frame into it.
+        p.timeline.video_track_mut().unwrap().segments = vec![
+            clip(1, Seconds::new(119, 60)),
+            Segment::Gap(Gap {
+                duration: Seconds::from_integer(1),
+            }),
+            clip(2, Seconds::from_integer(2)),
+        ];
+        let payload = Segment::Clip(clip_by_id(&p, 2));
+        let mut h = History::default();
+        let batch = paste_ripple(&p, &payload, 2.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        for s in &p.timeline.video_track().unwrap().segments {
+            if let Segment::Gap(g) = s {
+                assert!(
+                    at_least_a_frame(&p, &g.duration).is_ok(),
+                    "no sub-frame gap: {g:?}"
+                );
+            }
+        }
     }
 
     #[test]
