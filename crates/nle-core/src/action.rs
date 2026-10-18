@@ -292,7 +292,11 @@ pub fn run_action(
             clip,
             effect,
         } => {
-            let batch = edit::add_effect_on(project, *track, *clip, effect.clone())?;
+            // A clip id is unique across tracks, so `--clip N` finds its own
+            // track (as delete/yank/speed already do) — the `--track` default
+            // must not hide a clip that lives elsewhere.
+            let ti = resolve_track(project, *track, Target::Clip(*clip))?;
+            let batch = edit::add_effect_on(project, ti, *clip, effect.clone())?;
             apply(project, history, batch, from)
         }
         Action::Delete {
@@ -1169,8 +1173,12 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
         }
         "effect" => {
             let track = parse_track(&mut f, d)?;
-            let clip = opt_u32(&mut f, "clip")?
-                .ok_or_else(|| ParseError::Invalid("effect needs --clip N".to_string()))?;
+            let clip = opt_u32(&mut f, "clip")?.or(d.clip).ok_or_else(|| {
+                ParseError::Invalid(
+                    "effect addresses a clip — pass --clip N (or run it with the playhead on one)"
+                        .to_string(),
+                )
+            })?;
             let kind = f
                 .positional()
                 .ok_or_else(|| ParseError::Invalid(EFFECT_USAGE.to_string()))?;
@@ -1501,6 +1509,14 @@ mod tests {
                 rate: Seconds::new(1, 2),
             })
         );
+        // `:effect` falls back to the clip under the playhead too (it used to
+        // demand an explicit `--clip`, unlike every other clip-addressed verb).
+        match parse("effect eq", &defaults()) {
+            Ok(Action::AddEffect { track, clip, .. }) => {
+                assert_eq!((track, clip), (5, 42), "the playhead's clip fills in")
+            }
+            other => panic!("expected an effect action, got {other:?}"),
+        }
         // No playhead to fall back to (the CLI case): refuse instead of
         // guessing a position.
         let bare = ParseDefaults::default();
@@ -1649,6 +1665,42 @@ mod tests {
         let undone = run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
         assert_eq!(undone.playhead, Some(75), "2.5 s @ 30 fps");
         assert_eq!(p.timeline.video_track().unwrap().segments.len(), 4);
+    }
+
+    // `--clip` finds the clip's own track: `effect` used to need an explicit
+    // `--track`, unlike delete/yank/speed.
+    #[test]
+    fn add_effect_finds_the_clips_own_track() {
+        let mut p = fixture();
+        let vi = p.timeline.add_track(TrackKind::Video);
+        p.timeline.tracks[vi].segments = vec![Segment::Clip(Clip {
+            id: 9,
+            asset: 1,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(1),
+            speed: Seconds::from_integer(1),
+            effects: Vec::new(),
+        })];
+        let mut reg = None;
+        let out = run(
+            &mut p,
+            &mut reg,
+            &Action::AddEffect {
+                track: 0, // the default track; clip #9 lives on the second
+                clip: 9,
+                effect: Effect::Eq {
+                    brightness: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                },
+            },
+        )
+        .unwrap();
+        assert!(out.changed, "{}", out.desc);
+        match &p.timeline.tracks[vi].segments[0] {
+            Segment::Clip(c) => assert_eq!(c.effects.len(), 1, "the effect landed"),
+            other => panic!("expected a clip, got {other:?}"),
+        }
     }
 
     // `x` lands the playhead on the blend it made — its first frame, not the

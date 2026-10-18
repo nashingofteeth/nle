@@ -792,9 +792,12 @@ fn cli_only_guards() {
     );
 
     // Effects are video filters: on an audio track they would be stored but
-    // never reach the graph, so the action refuses instead.
+    // never reach the graph, so the action refuses instead. `--clip` finds the
+    // clip's own track (as delete/yank/speed do), so the guard is reached by
+    // putting the clip on the audio track.
     s.ok(&["track", "add", "audio"]);
-    let out = s.err(&["effect", "eq", "--clip", "1", "--track", "2"]);
+    s.ok(&["add", "red.mp4", "--track", "2", "--in", "0", "--out", "1"]);
+    let out = s.err(&["effect", "eq", "--clip", "4"]);
     assert!(
         out.contains("video clips"),
         "an effect on an audio track is refused:\n{out}"
