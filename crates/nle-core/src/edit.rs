@@ -2835,8 +2835,10 @@ pub fn paste_ripple_on(
     // The containing segment splits at t; the paste rides between the
     // pieces. Inserting shifts every follower automatically.
     let pieces: Vec<Segment> = match &seg {
-        // A transition is opaque: the paste consumes it whole.
-        Segment::Transition(_) => Vec::new(),
+        // A transition owns its neighbours' trimmed spans and can't be split,
+        // so an insert at/over one is refused (as `_` does) rather than
+        // consuming it — a ripple paste would have to cut it in two.
+        Segment::Transition(_) => return Err(EditError::Transition),
         Segment::Clip(c) => {
             let head_len = t - seg_start;
             let (head_ok, tail_ok) = split_sides(project, c.duration(), head_len);
@@ -4439,6 +4441,33 @@ mod tests {
             "pasted"
         );
         h.undo(&mut p).unwrap();
+    }
+
+    // A ripple paste at/over a transition is refused, not a panic: a
+    // transition owns its neighbours' trimmed spans and can't be split.
+    #[test]
+    fn ripple_paste_over_a_transition_is_refused() {
+        let mut p = fixture(); // [C1 0..2][gap 2..3][C2 3..5]
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            2.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        // The blend owns [1, 2).
+        let snapshot = Segment::Clip(clip_by_id(&p, 2));
+        for at in [1.0, 1.5, 1.9] {
+            assert!(
+                matches!(paste_ripple(&p, &snapshot, at), Err(EditError::Transition)),
+                "ripple paste at {at} should be refused"
+            );
+        }
+        // …and a paste next to the blend still works.
+        assert!(paste_ripple(&p, &snapshot, 0.5).is_ok());
     }
 
     #[test]
