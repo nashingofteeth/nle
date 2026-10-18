@@ -95,6 +95,8 @@ $N media rm 3                          # drop an unused asset
 $N import-edl sequence.edl --media ~/footage   # CMX3600 → project
 #   reels/clip names match files in --media; --fps, --src-offset, --map
 #   REEL=PATH override; refuses to clobber without --force
+#   cuts only: a dissolve/wipe/key imports as a cut (each is reported), a
+#   black reel (BL) becomes a gap, a zero-length event is skipped
 $N import-otio sequence.otio            # OpenTimelineIO (.otio) → project
 #   e.g. a Kdenlive "OpenTimelineIO Export"; media paths come from the file
 #   itself (--media/--remap for moved media; --fps forces the rate). Kdenlive
