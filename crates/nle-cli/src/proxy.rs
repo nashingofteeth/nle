@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use nle_core::Project;
 use nle_core::Seconds;
-use nle_core::timeline::{Clip, Gap, Segment, Track, TrackKind};
+use nle_core::timeline::{Clip, Effect, Gap, Segment, Track, TrackKind};
 use nle_ffmpeg::graph::ExportSpec;
 use nle_ffmpeg::{Encoder, ExportError, export_quiet};
 use thiserror::Error;
@@ -77,6 +77,7 @@ fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     if let Ok(s) = serde_json::to_string(seg) {
         s.hash(&mut hasher);
     }
+    hash_lut_files(seg, &mut hasher);
     w.hash(&mut hasher);
     h.hash(&mut hasher);
     // The render bakes the project rate in (`fps=…`), so it belongs in the
@@ -115,6 +116,23 @@ fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
 /// forever — the hash never changes, so nothing would ever re-render it.
 fn complete(path: &std::path::Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.len() > 0)
+}
+
+/// Hash the LUT files a segment's effects read (path + mtime). The segment JSON
+/// carries only the LUT's *path*, so editing a `.cube` in place would otherwise
+/// serve the old grade from the cache while export bakes the new one.
+fn hash_lut_files(seg: &Segment, hasher: &mut DefaultHasher) {
+    let Segment::Clip(c) = seg else { return };
+    for e in &c.effects {
+        if let Effect::Lut { path } = e {
+            path.hash(hasher);
+            if let Ok(m) = std::fs::metadata(path)
+                && let Ok(t) = m.modified()
+            {
+                t.hash(hasher);
+            }
+        }
+    }
 }
 
 /// Render `project` into the cache under `hash` (if it isn't there yet) and
@@ -279,6 +297,7 @@ fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
     project.fps.hash(&mut hasher);
     for track in tracks {
         for seg in &track.segments {
+            hash_lut_files(seg, &mut hasher);
             let mut assets: Vec<u32> = Vec::new();
             match seg {
                 Segment::Clip(c) => assets.push(c.asset),
@@ -495,6 +514,32 @@ mod tests {
                 .any(|s| matches!(s, Segment::Transition(_))),
             "the blend is kept whole: {:?}",
             slice[0].segments
+        );
+    }
+
+    /// Editing a LUT file in place must re-render: the segment JSON carries
+    /// only its path, so the file's mtime is the signal that the grade changed.
+    #[test]
+    fn proxy_hash_tracks_lut_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let lut = dir.path().join("g.cube");
+        std::fs::write(&lut, "LUT_3D_SIZE 2\n").unwrap();
+        let mut c = clip();
+        if let Segment::Clip(cl) = &mut c {
+            cl.effects = vec![Effect::Lut {
+                path: lut.display().to_string(),
+            }];
+        }
+        let p = Project::new();
+        let before = proxy_hash(&p, &c, 320, 240);
+        // Rewrite the file with a later mtime.
+        let f = std::fs::File::options().write(true).open(&lut).unwrap();
+        f.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_ne!(
+            proxy_hash(&p, &c, 320, 240),
+            before,
+            "a changed LUT file invalidates the proxy"
         );
     }
 
