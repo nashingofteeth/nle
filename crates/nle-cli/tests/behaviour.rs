@@ -351,6 +351,28 @@ fn edl_import_round_trip() {
     s.assert_px("edl.mp4", 2.5, BLUE, "EDL event 2");
 }
 
+/// An EDL whose source out-point runs past the file is clamped to the media
+/// (as OTIO and detect-edits are), so the model and the export agree.
+#[test]
+fn edl_import_clamps_to_the_media() {
+    let s = Sandbox::new();
+    // red.mp4 is 5 s; this event claims a 9 s source span.
+    s.write(
+        "e.edl",
+        "TITLE: t\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:09:00 01:00:00:00 01:00:09:00\n\
+         * FROM CLIP NAME: red.mp4\n",
+    );
+    s.ok(&["import-edl", "e.edl", "--media", ".", "--force"]);
+    let show = s.show();
+    assert!(
+        show.contains("5 s"),
+        "the model is clamped to the file: {show}"
+    );
+    s.export("edl-clamp.mp4");
+    s.assert_dur("edl-clamp.mp4", 5.0, "the export matches the clamped model");
+}
+
 const OTIO: &str = r#"{
   "OTIO_SCHEMA": "Timeline.1",
   "tracks": {

@@ -1687,6 +1687,12 @@ fn import_edl_work(
         resolve_reel(&project, &map, ev)
     })?;
     project.timeline = timeline;
+    // Keep every clip inside its media and on the frame grid: an EDL's source
+    // out-point can run past the file, and the model must not disagree with
+    // what export can render (see `clamp_project_to_media`).
+    for n in clamp_project_to_media(&mut project) {
+        notes.push(format!("warning: {n}"));
+    }
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
     let mut report = CommandReport::new(format!(
