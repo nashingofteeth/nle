@@ -268,8 +268,24 @@ pub fn run_action(
                 GapLen::Frames(n) => frames_to_seconds(*n, fps),
                 GapLen::Seconds(s) => frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps),
             };
+            // `add_transition` ids the blend with the next segment id; keep
+            // it so the playhead can land on the blend itself below.
+            let blend_id = project.next_clip_id();
             let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
-            apply(project, history, batch, from)
+            let mut out = apply(project, history, batch, from)?;
+            // Land the playhead on the blend's first frame. The caller's
+            // anchor would otherwise keep the seam timecode, which is now the
+            // blend's *end* — the follower's start — so `dd` would delete the
+            // follower instead of the blend `x` just made.
+            if let Some(tr) = project.timeline.track(*track)
+                && let Some(i) = tr
+                    .segments
+                    .iter()
+                    .position(|s| matches!(s, Segment::Transition(t) if t.id == blend_id))
+            {
+                out.playhead = Some(frame_of(project.fps.as_ref(), secs_f64(&tr.start_of(i))));
+            }
+            Ok(out)
         }
         Action::AddEffect {
             track,
@@ -1633,6 +1649,62 @@ mod tests {
         let undone = run_action(&mut p, &mut h, &mut reg, &Action::Undo, 0.0).unwrap();
         assert_eq!(undone.playhead, Some(75), "2.5 s @ 30 fps");
         assert_eq!(p.timeline.video_track().unwrap().segments.len(), 4);
+    }
+
+    // `x` lands the playhead on the blend it made — its first frame, not the
+    // seam timecode, which is now the blend's *end* (the follower's start) —
+    // so `dd` right after removes the blend instead of the follower.
+    #[test]
+    fn a_transition_leaves_the_playhead_on_the_blend() {
+        let mut p = fixture(); // [Gap][Clip #1 1..4][Gap][Clip #2 6..8]
+        let mut reg = None;
+        let out = run(
+            &mut p,
+            &mut reg,
+            &Action::Transition {
+                track: 0,
+                at: 4.0,
+                kind: TransitionKind::Dissolve,
+                len: GapLen::Frames(30),
+            },
+        )
+        .unwrap();
+        // The clip gives up 1 s, so the blend owns [3, 4): frame 90.
+        assert_eq!(out.playhead, Some(90), "the blend's first frame");
+
+        // Deleting where the playhead landed removes the blend and hands the
+        // trimmed frames back — `x` then `dd` round-trips.
+        let out = run(
+            &mut p,
+            &mut reg,
+            &Action::Delete {
+                track: 0,
+                target: Target::At(3.0),
+                ripple: false,
+            },
+        )
+        .unwrap();
+        assert!(out.desc.contains("transition"), "{}", out.desc);
+        let segs = &p.timeline.video_track().unwrap().segments;
+        assert!(
+            !segs.iter().any(|s| matches!(s, Segment::Transition(_))),
+            "the blend is gone: {segs:?}"
+        );
+        match &segs[..] {
+            [
+                Segment::Gap(_),
+                Segment::Clip(c),
+                Segment::Gap(_),
+                Segment::Clip(_),
+            ] => {
+                assert_eq!(
+                    (c.asset_in, c.asset_out),
+                    (0.into(), 3.into()),
+                    "the clip is whole again"
+                );
+            }
+            other => panic!("expected the clip restored, got {other:?}"),
+        }
     }
 
     #[test]

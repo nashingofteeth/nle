@@ -2284,7 +2284,11 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
         Ok(outcome) => {
             match outcome.playhead {
                 Some(frame) => app.playhead = frame_to_secs(app.project.fps.as_ref(), frame),
-                None => reanchor_playhead(app, anchor),
+                // A no-op (a yank) must not move the playhead: the anchor
+                // maps a transition to its *end*, so reanchoring a yank out
+                // of a blend would slide the playhead — and `dd` yanks first.
+                None if outcome.changed => reanchor_playhead(app, anchor),
+                None => {}
             }
             app.set_message(&outcome.desc);
             // The register is shared with the CLI (`nle yank`/`nle paste`).
@@ -6708,6 +6712,45 @@ mod tests {
             "a transition was added: {:?}",
             track.segments
         );
+    }
+
+    // `x` then `dd` round-trips: the playhead lands on the blend, so `dd`
+    // removes the blend rather than the gap after it.
+    #[test]
+    fn x_then_dd_removes_the_blend_it_made() {
+        let mut app = App::new(asset_project(), temp_project_path("x-then-dd"));
+        app.loaded = true;
+        app.playhead = 3.0; // asset_project's clip|gap cut
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('x'));
+        assert_eq!(app.playhead, 2.0, "the blend's first frame");
+        handle_key(&mut app, &fake, key('d'));
+        handle_key(&mut app, &fake, key('d'));
+        let track = app.project.timeline.video_track().unwrap();
+        assert!(
+            !track
+                .segments
+                .iter()
+                .any(|s| matches!(s, TimelineSegment::Transition(_))),
+            "the blend is gone: {:?}",
+            track.segments
+        );
+        assert_eq!(app.playhead, 3.0, "back on the seam the restore leaves");
+    }
+
+    // A yank is a read: it must not move the playhead. Reanchoring a no-op
+    // would slide it onto a blend's *end* (the anchor's transition rule).
+    #[test]
+    fn yanking_a_blend_leaves_the_playhead_put() {
+        let mut app = App::new(asset_project(), temp_project_path("yank-blend"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('x'));
+        assert_eq!(app.playhead, 2.0, "on the blend");
+        handle_key(&mut app, &fake, key('y'));
+        handle_key(&mut app, &fake, key('y'));
+        assert_eq!(app.playhead, 2.0, "the yank left the playhead put");
     }
 
     // `:transition fade` picks the fade-through-black kind.
