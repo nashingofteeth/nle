@@ -4429,10 +4429,7 @@ mod tests {
 
         // at a cut: the paste lands BEFORE the clip; the clip keeps its id
         let batch = paste_ripple(&p, &Segment::Clip(snapshot.clone()), 3.0).unwrap();
-        eprintln!("at-cut batch: {batch:?}");
-        eprintln!("before: ids={:?} end={}", clip_ids(&p), p.timeline.end());
         h.apply(&mut p, batch, 0).unwrap();
-        eprintln!("after: ids={:?}", clip_ids(&p));
         assert_eq!(
             clip_by_id(&p, 2).duration(),
             Seconds::from_integer(2),
