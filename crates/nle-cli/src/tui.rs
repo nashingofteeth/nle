@@ -3551,10 +3551,11 @@ fn draw_track_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64
         let text = if i == 0 || start_x == 0 {
             truncate_label(label, width)
         } else {
-            // A blend is part of both neighbours: its divider is dotted, so
-            // the clip reads as reaching into the transition rather than
-            // stopping hard at it.
-            let bar = if *soft { '┆' } else { '▏' };
+            // A blend is part of both neighbours: its boundary is a bare
+            // colour change, not a bar. (A dotted box glyph would read as
+            // permeable but sits mid-cell, so it never lines up with the
+            // left-aligned `▏` dividers or the playhead marker.)
+            let bar = if *soft { ' ' } else { '▏' };
             format!("{bar}{}", truncate_label(label, width.saturating_sub(1)))
         };
         cells.push((start_x, text, *style));
@@ -4115,6 +4116,54 @@ mod tests {
             )
         })
         .unwrap();
+    }
+
+    // A blend's boundary is a bare colour change (no bar), while a hard
+    // boundary keeps the left-aligned `▏` that lines up with the marker — a
+    // dotted box glyph would read as permeable but sits mid-cell.
+    #[test]
+    fn a_blend_boundary_has_no_bar() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let batch = edit::add_transition(
+            &app.project,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        app.playhead = 5.0; // the gap|clip cut, after the blend
+        let mut term = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        term.draw(|f| {
+            render_timeline(
+                f,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 60,
+                    height: 6,
+                },
+                &app,
+            )
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let row = |y: u16| -> String {
+            (0..60)
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        let (track, marker) = (row(1), row(2));
+        assert!(!track.contains('┆'), "no dotted divider:\n{track}");
+        let hard = track.find('▏').expect("a hard divider after the gap");
+        let mark = marker.find('▏').expect("the playhead marker");
+        assert_eq!(
+            hard, mark,
+            "the hard divider aligns with the marker:\n{track}\n{marker}"
+        );
     }
 
     #[test]
