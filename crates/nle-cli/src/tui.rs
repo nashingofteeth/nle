@@ -2276,12 +2276,27 @@ enum Anchor {
     Gap(GapAnchor),
 }
 
+/// The gap or transition whose span *ends* exactly at `t`. `index_at` gives
+/// the boundary to the follower, but for anchoring the segment the playhead
+/// sits *on* is what matters: a blend's far edge is still the blend, and a
+/// trim that moves that edge to the playhead must keep the playhead put.
+fn gap_ending_at(track: &Track, t: Seconds) -> Option<usize> {
+    let mut acc = Seconds::from_integer(0);
+    for (i, s) in track.segments.iter().enumerate() {
+        acc += s.duration();
+        if acc == t && matches!(s, TimelineSegment::Gap(_) | TimelineSegment::Transition(_)) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// Anchor the playhead's position before an edit: the clip + source frame
 /// over a clip, or the gap's start over a gap.
 fn edit_anchor(project: &Project, playhead: f64, ti: usize) -> Option<Anchor> {
     let track = project.timeline.track(ti)?;
     let t = grid_time(project, playhead);
-    let idx = track.index_at(t)?;
+    let idx = gap_ending_at(track, t).or_else(|| track.index_at(t))?;
     let at = secs(&t);
     match &track.segments[idx] {
         TimelineSegment::Clip(c) => Some(Anchor::Media(MediaAnchor {
@@ -2350,11 +2365,10 @@ fn reanchor_playhead(app: &mut App, anchor: Option<Anchor>) {
         // the neighbours (the segment under `at` is then a clip).
         Anchor::Gap(g) => {
             let ti = app.active();
-            let idx = app
-                .project
-                .timeline
-                .track(ti)
-                .and_then(|track| track.index_at(grid_time(&app.project, g.at)));
+            let idx = app.project.timeline.track(ti).and_then(|track| {
+                let t = grid_time(&app.project, g.at);
+                gap_ending_at(track, t).or_else(|| track.index_at(t))
+            });
             match idx {
                 Some(i)
                     if !matches!(
@@ -4435,6 +4449,58 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         assert_eq!(app.playhead, 2.0, "the playhead stays put");
+    }
+
+    /// [C1 0..3][C2 3..6] with a 1 s dissolve at the 3.0 cut:
+    /// C1' 0..2 · blend [2, 3) · C2' 3..5.
+    fn blend_pair() -> Project {
+        let mut p = asset_project();
+        let a = p.media[0].id;
+        let clip = |id, out: i64| {
+            TimelineSegment::Clip(nle_core::Clip {
+                id,
+                asset: a,
+                asset_in: Seconds::from_integer(0),
+                asset_out: Seconds::from_integer(out),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            })
+        };
+        p.timeline.tracks[0].segments = vec![clip(1, 3), clip(2, 3)];
+        let batch = edit::add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        let mut h = edit::History::default();
+        h.apply(&mut p, batch, 0).unwrap();
+        p
+    }
+
+    // A blend's far edge is still the blend: `index_at` gives the boundary to
+    // the follower, but anchoring must see the blend — or a trim that moves the
+    // edge to the playhead slides it onto the follower's frame, and removing
+    // the blend follows that frame into the clip instead of landing on the cut.
+    #[test]
+    fn trimming_at_a_blends_edge_keeps_the_playhead() {
+        let fake = FakeMpv::new();
+        // Inside the blend: `o` moves the far edge to the playhead.
+        let mut app = App::new(blend_pair(), temp_project_path("blend-edge"));
+        app.loaded = true;
+        app.playhead = 2.5;
+        handle_key(&mut app, &fake, key('o'));
+        assert_eq!(app.playhead, 2.5, "the far edge moved to the playhead");
+
+        // On the blend's far edge: `i` removes the blend (the segment ending
+        // there) and lands on the cut the restore leaves.
+        let mut app = App::new(blend_pair(), temp_project_path("blend-edge2"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        handle_key(&mut app, &fake, key('i'));
+        assert_eq!(app.playhead, 3.0, "the cut the restore leaves");
     }
 
     #[test]
