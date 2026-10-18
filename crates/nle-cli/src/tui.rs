@@ -3478,36 +3478,48 @@ fn track_window(n: usize, active: usize, capacity: usize) -> (usize, usize) {
 /// One track's segments as (duration, label, style) parts, plus a trailing
 /// gap for any span short of the timeline end — a track shorter than the
 /// timeline reads as gap rather than blank.
-fn track_parts(project: &Project, track: &Track, total: f64) -> Vec<(f64, String, Style)> {
+/// One row's parts: `(duration, label, style, permeable_left)`. The flag is
+/// true when the boundary on this part's left is a blend — a transition is
+/// part of both neighbours, so that divider is drawn permeable rather than
+/// hard.
+fn track_parts(project: &Project, track: &Track, total: f64) -> Vec<(f64, String, Style, bool)> {
     let gap_style = Style::default().bg(Color::DarkGray).fg(Color::Black);
-    let mut parts: Vec<(f64, String, Style)> = track
+    let is_trans = |s: &TimelineSegment| matches!(s, TimelineSegment::Transition(_));
+    let mut parts: Vec<(f64, String, Style, bool)> = track
         .segments
         .iter()
-        .map(|s| match s {
-            TimelineSegment::Clip(c) => {
-                let name = project
-                    .asset(c.asset)
-                    .and_then(|a| a.path.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .unwrap_or_else(|| format!("#{}", c.id));
-                (
-                    secs(&c.duration()),
-                    name,
-                    Style::default().bg(Color::Cyan).fg(Color::Black),
-                )
+        .enumerate()
+        .map(|(i, s)| {
+            let soft = is_trans(s) || i > 0 && track.segments.get(i - 1).is_some_and(is_trans);
+            match s {
+                TimelineSegment::Clip(c) => {
+                    let name = project
+                        .asset(c.asset)
+                        .and_then(|a| a.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+                        .unwrap_or_else(|| format!("#{}", c.id));
+                    (
+                        secs(&c.duration()),
+                        name,
+                        Style::default().bg(Color::Cyan).fg(Color::Black),
+                        soft,
+                    )
+                }
+                // A transition gets its own band; the real dissolve is a
+                // proxy-render thing (M5), so it's labelled, not blended.
+                TimelineSegment::Transition(t) => (
+                    secs(&t.dur),
+                    "trans".to_string(),
+                    Style::default().bg(Color::Magenta).fg(Color::Black),
+                    soft,
+                ),
+                TimelineSegment::Gap(g) => (secs(&g.duration), "gap".to_string(), gap_style, soft),
             }
-            // A transition gets its own band; the real dissolve is a
-            // proxy-render thing (M5), so it's labelled, not blended.
-            TimelineSegment::Transition(t) => (
-                secs(&t.dur),
-                "trans".to_string(),
-                Style::default().bg(Color::Magenta).fg(Color::Black),
-            ),
-            TimelineSegment::Gap(g) => (secs(&g.duration), "gap".to_string(), gap_style),
         })
         .collect();
     let tail = total - secs(&track.end());
     if tail > 1e-9 {
-        parts.push((tail, "gap".to_string(), gap_style));
+        let soft = track.segments.last().is_some_and(is_trans);
+        parts.push((tail, "gap".to_string(), gap_style, soft));
     }
     parts
 }
@@ -3520,7 +3532,7 @@ fn draw_track_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64
     let parts = track_parts(&app.project, track, total);
     let mut cum: f64 = 0.0;
     let mut cells: Vec<(u16, String, Style)> = Vec::new();
-    for (i, (dur, label, style)) in parts.iter().enumerate() {
+    for (i, (dur, label, style, soft)) in parts.iter().enumerate() {
         let start_x = if i == 0 {
             0
         } else {
@@ -3539,7 +3551,11 @@ fn draw_track_row(f: &mut Frame, bar: Rect, app: &App, track: &Track, total: f64
         let text = if i == 0 || start_x == 0 {
             truncate_label(label, width)
         } else {
-            format!("▏{}", truncate_label(label, width.saturating_sub(1)))
+            // A blend is part of both neighbours: its divider is dotted, so
+            // the clip reads as reaching into the transition rather than
+            // stopping hard at it.
+            let bar = if *soft { '┆' } else { '▏' };
+            format!("{bar}{}", truncate_label(label, width.saturating_sub(1)))
         };
         cells.push((start_x, text, *style));
     }
@@ -4153,6 +4169,29 @@ mod tests {
         assert!(!row(1).contains("a1"), "{:?}", row(1));
     }
 
+    // A blend's dividers are permeable — the transition is part of both
+    // neighbours — so the clip reads as reaching into it.
+    #[test]
+    fn a_blend_boundary_is_permeable() {
+        let mut app = App::new(asset_project(), temp_project_path("blend-divider"));
+        let batch = edit::add_transition(
+            &app.project,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        // [C1 0..2][blend 2..3)[gap 3..5)[C2 5..7)
+        let parts = track_parts(&app.project, &app.project.timeline.tracks[0], 7.0);
+        assert_eq!(parts.len(), 4, "{parts:?}");
+        assert!(!parts[0].3, "the first part has no left divider");
+        assert!(parts[1].3, "the blend's left divider is permeable");
+        assert!(parts[2].3, "the part after a blend is permeable too");
+        assert!(!parts[3].3, "the gap separates C2 from the blend");
+    }
+
     // A track shorter than the timeline reads as a trailing gap, not blank.
     #[test]
     fn shorter_track_pads_with_a_trailing_gap() {
@@ -4170,7 +4209,7 @@ mod tests {
         // The 2 s track is padded to the 7 s timeline with a 5 s gap.
         let parts = track_parts(&p, &p.timeline.tracks[ti], 7.0);
         assert_eq!(parts.len(), 2, "{parts:?}");
-        let (dur, label, _) = parts.last().unwrap();
+        let (dur, label, _, _) = parts.last().unwrap();
         assert_eq!(label, "gap");
         assert!((dur - 5.0).abs() < 1e-9, "{dur}");
         // A track that already reaches the end gains nothing.
