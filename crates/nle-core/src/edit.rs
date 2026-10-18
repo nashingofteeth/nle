@@ -43,6 +43,8 @@ pub enum EditError {
     SegmentNotFound(usize),
     #[error("a transition can't be split or trimmed — remove it (dd) instead")]
     Transition,
+    #[error("a fade's black side has no clip to trim through")]
+    NoClipSide,
     #[error("effects apply to video clips — that track is audio")]
     EffectsNeedVideo,
     #[error("transitions apply to video tracks — that track is audio")]
@@ -1682,6 +1684,12 @@ pub fn trim_at_on(
     if let Some(si) = trim_consume_target_on(project, track, playhead, out) {
         return delete_segment_on(project, track, si, ripple);
     }
+    // Inside a blend the trim addresses the neighbour the transition is part
+    // of (`o`/`O` the preceding clip, `i`/`I` the following one), not the
+    // blend itself.
+    if let Some(batch) = trim_blend_on(project, track, playhead, out)? {
+        return Ok(batch);
+    }
     if is_gap_at_on(project, track, playhead) {
         if out {
             ripple_gap_out_on(project, track, playhead)
@@ -1699,6 +1707,131 @@ pub fn trim_at_on(
     } else {
         trim_in_on(project, track, playhead)
     }
+}
+
+/// `i`/`o` with the playhead strictly inside a blend. The transition is part
+/// of both neighbours, so its edges are their far ends: `o`/`O` moves the
+/// blend's right edge (the preceding clip's out, and the following clip's in),
+/// `i`/`I` its left edge. The clip on the moved side covers what the blend
+/// gives up, so `a`/`b` stay contiguous and `span / dur` stays 1× — the blend
+/// shrinks instead of playing faster. A fade's black side has no clip, so it
+/// is refused rather than guessed at.
+fn trim_blend_on(
+    project: &Project,
+    track: usize,
+    playhead: f64,
+    out: bool,
+) -> Result<Option<Batch>, EditError> {
+    let t = snap(project, playhead)?;
+    let ti = track;
+    let tr = track_at(project, ti)?;
+    let Some(si) = tr.index_at(t) else {
+        return Ok(None);
+    };
+    let Segment::Transition(trans) = tr.segments[si].clone() else {
+        return Ok(None);
+    };
+    let start = tr.start_of(si);
+    let end = start + trans.dur;
+    // Strictly inside: at an edge the trim consumes the segment whole.
+    if t <= start || t >= end {
+        return Ok(None);
+    }
+    let (Some(Segment::Clip(prev)), Some(Segment::Clip(next))) = (
+        si.checked_sub(1).and_then(|i| tr.segments.get(i)),
+        tr.segments.get(si + 1),
+    ) else {
+        return Err(EditError::NoClipSide);
+    };
+    let (prev, next) = (prev.clone(), next.clone());
+    let (
+        TransitionSource::Clip {
+            src_in: a_in,
+            src_out: a_out,
+            ..
+        },
+        TransitionSource::Clip { src_out: b_out, .. },
+    ) = (&trans.a, &trans.b)
+    else {
+        return Err(EditError::NoClipSide);
+    };
+    let a_asset = trans.a.asset().ok_or(EditError::NoClipSide)?;
+    let b_asset = trans.b.asset().ok_or(EditError::NoClipSide)?;
+    let dur = if out { t - start } else { end - t };
+    at_least_a_frame(project, &dur)?;
+
+    let (a, b, clip_op) = if out {
+        // The right edge moves left: `a` keeps its start and gives up its far
+        // end; the following clip's visible in follows the edge and `b` with
+        // it, so the blend keeps `dur` of each side.
+        let next_in = next.asset_in - source_span(&next, end - t);
+        (
+            TransitionSource::Clip {
+                asset: a_asset,
+                src_in: *a_in,
+                src_out: *a_in + source_span(&prev, dur),
+            },
+            TransitionSource::Clip {
+                asset: b_asset,
+                src_in: next_in,
+                src_out: next.asset_in,
+            },
+            EditOp::Replace {
+                track: ti,
+                index: si + 1,
+                before: Segment::Clip(next.clone()),
+                after: Segment::Clip(Clip {
+                    asset_in: next_in,
+                    ..next.clone()
+                }),
+            },
+        )
+    } else {
+        // The left edge moves right: `b` keeps its end; the preceding clip's
+        // visible out follows the edge and `a` with it.
+        let prev_out = prev.asset_out + source_span(&prev, t - start);
+        (
+            TransitionSource::Clip {
+                asset: a_asset,
+                src_in: prev_out,
+                src_out: *a_out,
+            },
+            TransitionSource::Clip {
+                asset: b_asset,
+                src_in: *b_out - source_span(&next, dur),
+                src_out: *b_out,
+            },
+            EditOp::Replace {
+                track: ti,
+                index: si - 1,
+                before: Segment::Clip(prev.clone()),
+                after: Segment::Clip(Clip {
+                    asset_out: prev_out,
+                    ..prev.clone()
+                }),
+            },
+        )
+    };
+    let blend = EditOp::Replace {
+        track: ti,
+        index: si,
+        before: Segment::Transition(trans.clone()),
+        after: Segment::Transition(Transition { dur, a, b, ..trans }),
+    };
+    // Ascending index order, so a Replace pair can't trip an index check.
+    let ops = if out {
+        vec![blend, clip_op]
+    } else {
+        vec![clip_op, blend]
+    };
+    Ok(Some(Batch {
+        ops,
+        desc: format!(
+            "trim {} through the blend to {}",
+            if out { "out" } else { "in" },
+            stamp(project, &t)
+        ),
+    }))
 }
 
 /// `i` — trim the in-edge of whatever is under the playhead:
@@ -6107,6 +6240,116 @@ mod tests {
                 Seconds::from_integer(1)
             )
             .is_ok()
+        );
+    }
+
+    // The transition is part of both neighbours: `o`/`O` moves the blend's
+    // right edge (the preceding clip's far end) and `i`/`I` its left edge. The
+    // clip on the moved side covers what the blend gives up, so no material is
+    // lost and `span / dur` stays 1×.
+    #[test]
+    fn trimming_through_a_blend_shrinks_it() {
+        let blend = |p: &Project| -> Transition {
+            match &p.timeline.video_track().unwrap().segments[1] {
+                Segment::Transition(t) => t.clone(),
+                other => panic!("expected the blend, got {other:?}"),
+            }
+        };
+        let side = |t: &Transition, out: bool| match if out { &t.a } else { &t.b } {
+            TransitionSource::Clip {
+                src_in, src_out, ..
+            } => (*src_in, *src_out),
+            other => panic!("expected a clip side, got {other:?}"),
+        };
+
+        // [C1 src 0..3][C2 src 0..3] with a 1 s dissolve at the 3.0 cut:
+        // C1' [0,2) src 0..2 · T [2,3) {a 2..3, b 0..1} · C2' [3,5) src 1..3.
+        let mut p = clip_pair();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        // `o` at 2.5 → the blend [2, 2.5); C2's head moves out to cover it.
+        let batch = trim_at_on(&p, 0, 2.5, true, false).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(blend(&p).dur, Seconds::new(1, 2), "the blend shrank");
+        assert_eq!(
+            p.timeline.end(),
+            Seconds::from_integer(5),
+            "length unchanged"
+        );
+        match &p.timeline.video_track().unwrap().segments[..] {
+            [Segment::Clip(c1), Segment::Transition(t), Segment::Clip(c2)] => {
+                assert_eq!(c1.asset_out, Seconds::from_integer(2), "C1 is whole");
+                assert_eq!(c2.asset_in, Seconds::new(1, 2), "C2 reclaimed its head");
+                assert_eq!(t.a.asset(), Some(1));
+                assert_eq!(
+                    side(t, true),
+                    (Seconds::from_integer(2), Seconds::new(5, 2)),
+                    "a keeps its start, gives up its far end"
+                );
+                assert_eq!(
+                    side(t, false),
+                    (Seconds::new(1, 2), Seconds::from_integer(1)),
+                    "b follows C2's in"
+                );
+            }
+            other => panic!("expected clip/blend/clip, got {other:?}"),
+        }
+        assert_eq!(
+            (side_rate(&p, 1, true), side_rate(&p, 1, false)),
+            (Seconds::from_integer(1), Seconds::from_integer(1)),
+            "both sides still play at their neighbour's rate"
+        );
+
+        // `i` at 2.5 on a fresh blend → the blend [2.5, 3); C1's tail moves out.
+        let mut p = clip_pair();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let batch = trim_at_on(&p, 0, 2.5, false, false).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(blend(&p).dur, Seconds::new(1, 2), "the blend shrank");
+        assert_eq!(
+            p.timeline.end(),
+            Seconds::from_integer(5),
+            "length unchanged"
+        );
+        match &p.timeline.video_track().unwrap().segments[..] {
+            [Segment::Clip(c1), Segment::Transition(t), Segment::Clip(c2)] => {
+                assert_eq!(c1.asset_out, Seconds::new(5, 2), "C1's tail moved out");
+                assert_eq!(c2.asset_in, Seconds::from_integer(1), "C2 is whole");
+                assert_eq!(
+                    side(t, true),
+                    (Seconds::new(5, 2), Seconds::from_integer(3)),
+                    "a follows C1's out"
+                );
+                assert_eq!(
+                    side(t, false),
+                    (Seconds::new(1, 2), Seconds::from_integer(1)),
+                    "b keeps its end"
+                );
+            }
+            other => panic!("expected clip/blend/clip, got {other:?}"),
+        }
+        assert_eq!(
+            (side_rate(&p, 1, true), side_rate(&p, 1, false)),
+            (Seconds::from_integer(1), Seconds::from_integer(1)),
+            "both sides still play at their neighbour's rate"
         );
     }
 
