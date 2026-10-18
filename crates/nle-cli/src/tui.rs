@@ -2477,10 +2477,18 @@ fn enter_extend(app: &mut App, player: &dyn Mpv, ripple: bool) {
         }
         Ok(p) => p,
     };
+    // `resolve_armed` hops past a blend beside the cut; say so, or the playhead
+    // moving to the blend's far end reads as a jump.
+    let hopped = (plan.edge_pos - app.playhead).abs() > 1e-6
+        && at_blend_edge(&app.project, app.active(), app.playhead);
     // Land on the armed edge: a gap on the right presents its tail, which
     // sits away from the cut `e` was pressed at.
     app.playhead = plan.edge_pos;
     apply_extend_plan(app, player, plan, ripple);
+    if hopped {
+        app.message
+            .push_str(" — the blend is part of the clip — armed its far end");
+    }
 }
 
 /// Hand the monitor over to an extend plan's material preview and enter
@@ -2589,6 +2597,58 @@ fn armed_on_side(project: &Project, t: f64, side: Side, ti: usize) -> Option<(Ar
     None
 }
 
+/// Is `t` a blend's edge — the cut between a clip and a transition?
+fn at_blend_edge(project: &Project, ti: usize, t: f64) -> bool {
+    let Some(track) = project.timeline.track(ti) else {
+        return false;
+    };
+    let mut acc = 0.0;
+    for seg in &track.segments {
+        if let TimelineSegment::Transition(_) = seg
+            && (acc - t).abs() < 1e-6
+        {
+            return true;
+        }
+        acc += secs(&seg.duration());
+        if let TimelineSegment::Transition(_) = seg
+            && (acc - t).abs() < 1e-6
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The far end of the blend beside a clip's armed edge, if one is there. A
+/// transition is part of both neighbours, so entering extend mode at a
+/// clip|transition cut hops past it to the clip's real edge.
+fn blend_far_end(
+    project: &Project,
+    ti: usize,
+    armed: &Armed,
+    edge: f64,
+) -> Option<(f64, &'static str)> {
+    let track = project.timeline.track(ti)?;
+    let Armed::Clip { id, head } = armed else {
+        return None;
+    };
+    let idx = track.clip_index(*id)?;
+    // The blend sits on the side the armed edge opens toward: a head reaches
+    // left, a tail right.
+    let ni = if *head { idx.checked_sub(1)? } else { idx + 1 };
+    let TimelineSegment::Transition(tr) = track.segments.get(ni)? else {
+        return None;
+    };
+    let (near, far) = (
+        secs(&track.start_of(ni)),
+        secs(&(track.start_of(ni) + tr.dur)),
+    );
+    // The edge the clip's edge touches, and the blend's far end past it.
+    let (want, far_end) = if *head { (far, near) } else { (near, far) };
+    ((edge - want).abs() < 1e-6)
+        .then_some((far_end, "the blend is part of the clip — armed its far end"))
+}
+
 fn side_hint(side: Side) -> &'static str {
     match side {
         Side::Left => "no clip ends here — ] works the clip on the left",
@@ -2601,9 +2661,18 @@ fn side_hint(side: Side) -> &'static str {
 /// there; `]` opens left, so the clip ending (left). `e`/`E` keep the
 /// default (right at a shared cut).
 fn enter_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
-    let Some((armed, edge)) = armed_on_side(&app.project, app.playhead, side, app.active()) else {
+    let Some((armed, mut edge)) = armed_on_side(&app.project, app.playhead, side, app.active())
+    else {
         app.set_message(side_hint(side));
         return;
+    };
+    // The blend beside the cut is part of the clip: arm its far end.
+    let note = match blend_far_end(&app.project, app.active(), &armed, edge) {
+        Some((far, note)) => {
+            edge = far;
+            Some(note)
+        }
+        None => None,
     };
     match plan_for_armed(&app.project, armed, edge, app.active()) {
         Ok(plan) => {
@@ -2611,6 +2680,9 @@ fn enter_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
             // be away from the cut we armed it from).
             app.playhead = edge;
             apply_extend_plan(app, player, plan, false);
+            if let Some(note) = note {
+                app.message.push_str(&format!(" — {note}"));
+            }
         }
         Err(m) => app.set_message(&m),
     }
@@ -6787,6 +6859,30 @@ mod tests {
             track.segments
         );
         assert_eq!(app.playhead, 3.0, "back on the seam the restore leaves");
+    }
+
+    // Entering extend mode at a clip|transition cut hops to the blend's far
+    // end — the transition is part of the clip.
+    #[test]
+    fn extend_mode_hops_over_a_blend() {
+        let mut p = asset_project();
+        p.video = Some(nle_core::VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let mut app = App::new(p, temp_project_path("extend-blend"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('x')); // blend [2, 3)
+        assert_eq!(app.playhead, 2.0, "on the blend");
+        handle_key(&mut app, &fake, key('e'));
+        assert!(
+            matches!(&app.mode, Mode::Extend(st) if st.edge_pos == 3.0),
+            "expected extend mode at the blend's far end; message = {:?}",
+            app.message
+        );
+        assert!(app.message.contains("blend"), "{}", app.message);
     }
 
     // A yank is a read: it must not move the playhead. Reanchoring a no-op

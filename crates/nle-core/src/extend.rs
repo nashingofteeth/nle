@@ -84,6 +84,40 @@ pub fn clip_span(project: &Project, id: u32, ti: usize) -> Option<(f64, f64)> {
 /// clip ends, then virtual timeline edges with gaps. Anything else is
 /// not a boundary.
 pub fn resolve_armed(project: &Project, t: f64, ti: usize) -> Result<(Armed, f64), String> {
+    let (armed, edge) = resolve_armed_raw(project, t, ti)?;
+    // The blend beside a clip's edge is part of the clip, so arming at a
+    // clip|transition cut hops to the blend's far end.
+    match blend_far_end(project, ti, &armed, edge) {
+        Some(far) => Ok((armed, far)),
+        None => Ok((armed, edge)),
+    }
+}
+
+/// A clip's real edge when a blend sits beside it: a transition is part of both
+/// neighbours, so the clip's edge is the blend's far end. `None` when no blend
+/// abuts `edge`.
+pub fn blend_far_end(project: &Project, ti: usize, armed: &Armed, edge: f64) -> Option<f64> {
+    let track = project.timeline.track(ti)?;
+    let Armed::Clip { id, head } = armed else {
+        return None;
+    };
+    let idx = track.clip_index(*id)?;
+    // The blend sits on the side the edge opens toward: a head reaches left,
+    // a tail right.
+    let ni = if *head { idx.checked_sub(1)? } else { idx + 1 };
+    let Segment::Transition(tr) = track.segments.get(ni)? else {
+        return None;
+    };
+    let (near, far) = (
+        secs_f64(&track.start_of(ni)),
+        secs_f64(&(track.start_of(ni) + tr.dur)),
+    );
+    // The edge the clip's edge touches, and the blend's far end past it.
+    let (want, far_end) = if *head { (far, near) } else { (near, far) };
+    ((edge - want).abs() < 1e-6).then_some(far_end)
+}
+
+fn resolve_armed_raw(project: &Project, t: f64, ti: usize) -> Result<(Armed, f64), String> {
     let track = project
         .timeline
         .track(ti)
@@ -110,9 +144,35 @@ pub fn resolve_armed(project: &Project, t: f64, ti: usize) -> Result<(Armed, f64
                     ));
                 }
                 Segment::Gap(_) => return Ok((Armed::GapHead { index: i }, acc)),
-                // A transition isn't material to extend; phase 1 refuses it.
-                Segment::Transition(_) => {
-                    return Err("a transition can't be armed — remove it (dd) instead".to_string());
+                // A transition isn't material: the blend is part of the clip
+                // either side, so hop to the far side of it.
+                Segment::Transition(tr) => {
+                    let far = acc + secs_f64(&tr.dur);
+                    return match track.segments.get(i + 1) {
+                        Some(Segment::Clip(c)) => Ok((
+                            Armed::Clip {
+                                id: c.id,
+                                head: true,
+                            },
+                            far,
+                        )),
+                        Some(Segment::Gap(_)) => Ok((Armed::GapHead { index: i + 1 }, far)),
+                        // A trailing blend: the clip before it reaches its end.
+                        _ => {
+                            match i.checked_sub(1).and_then(|p| track.segments.get(p)) {
+                                Some(Segment::Clip(c)) => Ok((
+                                    Armed::Clip {
+                                        id: c.id,
+                                        head: false,
+                                    },
+                                    far,
+                                )),
+                                Some(Segment::Gap(_)) => Ok((Armed::GapTail { index: i - 1 }, far)),
+                                _ => Err("a transition can't be armed — remove it (dd) instead"
+                                    .to_string()),
+                            }
+                        }
+                    };
                 }
             }
         }
