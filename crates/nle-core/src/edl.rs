@@ -187,6 +187,15 @@ pub fn channel_has(channel: &str, kind: char) -> bool {
         .any(|part| part.trim().to_ascii_uppercase().starts_with(kind))
 }
 
+/// Is this reel a black / empty-space reel? Standard EDLs write `BL`; some
+/// systems use `BLK` or `BLACK`. An event on one is a gap, not a clip.
+pub fn is_black_reel(reel: &str) -> bool {
+    matches!(
+        reel.trim().to_ascii_uppercase().as_str(),
+        "BL" | "BLK" | "BLACK"
+    )
+}
+
 /// The audio channel a code names (`AA/V` → `AA`, `A2/V` → `A2`), or `None`
 /// when it names no audio. The parts are the grouping key, so `AA/V` and `AA`
 /// land on the same track.
@@ -268,19 +277,30 @@ pub fn build(
                     return Err(BuildError::RecSpan { event: ev.num });
                 }
                 let speed = Seconds::new(src_out - src_in, rec_out - rec_in);
-                let asset = resolve(ev).ok_or_else(|| BuildError::Unresolved {
-                    event: ev.num,
-                    name: hint(ev).unwrap_or_else(|| ev.reel.clone()),
-                })?;
-                segs.push(Segment::Clip(Clip {
-                    id: next_id,
-                    asset,
-                    asset_in: frames_to_seconds(src_in, fps),
-                    asset_out: frames_to_seconds(src_out, fps),
-                    speed,
-                    effects: Vec::new(),
-                }));
-                next_id += 1;
+                match resolve(ev) {
+                    Some(asset) => {
+                        segs.push(Segment::Clip(Clip {
+                            id: next_id,
+                            asset,
+                            asset_in: frames_to_seconds(src_in, fps),
+                            asset_out: frames_to_seconds(src_out, fps),
+                            speed,
+                            effects: Vec::new(),
+                        }));
+                        next_id += 1;
+                    }
+                    // A black event (`BL`) is empty space, not a clip — the
+                    // fuzzy reel matcher used to latch it onto `blue.mp4`.
+                    None if is_black_reel(&ev.reel) => segs.push(Segment::Gap(Gap {
+                        duration: frames_to_seconds(rec_out - rec_in, fps),
+                    })),
+                    None => {
+                        return Err(BuildError::Unresolved {
+                            event: ev.num,
+                            name: hint(ev).unwrap_or_else(|| ev.reel.clone()),
+                        });
+                    }
+                }
                 cursor = rec_out;
             }
             Ok(segs)
@@ -431,6 +451,26 @@ FCM: NON-DROP FRAME
         // The timeline is the two real events, adjacent.
         let tl = build(&doc, Seconds::from_integer(30), 0, &some_asset).unwrap();
         assert_eq!(tl.tracks[0].segments.len(), 2);
+    }
+
+    // A black event (`BL`) is empty space, not a clip.
+    #[test]
+    fn a_black_reel_becomes_a_gap() {
+        let edl = "\
+001 AX V C 00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00
+002 BL V C 00:00:00:00 00:00:01:00 01:00:02:00 01:00:03:00
+003 AX V C 00:00:00:00 00:00:02:00 01:00:03:00 01:00:05:00
+";
+        let doc = parse(edl).unwrap();
+        // The resolver knows only `AX`; `BL` is black, not unresolved.
+        let resolve = |ev: &EdlEvent| (ev.reel == "AX").then_some(1);
+        let tl = build(&doc, Seconds::from_integer(30), 0, &resolve).unwrap();
+        match &tl.tracks[0].segments[..] {
+            [Segment::Clip(_), Segment::Gap(g), Segment::Clip(_)] => {
+                assert_eq!(g.duration, Seconds::from_integer(1), "the black span");
+            }
+            other => panic!("expected clip, gap, clip, got {other:?}"),
+        }
     }
 
     #[test]

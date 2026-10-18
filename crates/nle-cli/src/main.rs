@@ -1568,6 +1568,13 @@ fn resolve_reel(project: &Project, map: &HashMap<String, PathBuf>, ev: &EdlEvent
             return Some(id);
         }
     }
+    // A black reel is empty space, not a clip: the fuzzy edge rule would
+    // latch `BL` onto `blue.mp4`. Only an explicit `--map` or a
+    // `SOURCE FILE`/`FROM CLIP NAME` hint resolves it; `build` turns the
+    // unresolved black reel into a gap.
+    if edl::is_black_reel(&ev.reel) {
+        return None;
+    }
     match_asset(project, &ev.reel)
 }
 

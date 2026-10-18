@@ -405,6 +405,30 @@ fn edl_import_degrades_transitions_to_cuts() {
     s.assert_px("edl-degrade.mp4", 5.0, GREEN, "the wipe, now a cut");
 }
 
+/// A black event (`BL`) is empty space, not a clip — the fuzzy reel matcher
+/// used to latch it onto `blue.mp4`.
+#[test]
+fn edl_black_reel_becomes_a_gap() {
+    let s = Sandbox::new();
+    s.write(
+        "e.edl",
+        "TITLE: t\nFCM: NON-DROP FRAME\n\n\
+         001  AX  V  C  00:00:00:00 00:00:02:00 01:00:00:00 01:00:02:00\n\
+         * FROM CLIP NAME: red.mp4\n\
+         002  BL  V  C  00:00:00:00 00:00:01:00 01:00:02:00 01:00:03:00\n",
+    );
+    s.ok(&["import-edl", "e.edl", "--media", ".", "--force"]);
+    s.export("edl-black.mp4");
+    s.assert_dur("edl-black.mp4", 3.0, "red + a 1 s black span");
+    s.assert_px("edl-black.mp4", 1.0, RED, "event 1");
+    s.assert_px(
+        "edl-black.mp4",
+        2.5,
+        BLACK,
+        "the BL event is black, not blue",
+    );
+}
+
 const OTIO: &str = r#"{
   "OTIO_SCHEMA": "Timeline.1",
   "tracks": {
