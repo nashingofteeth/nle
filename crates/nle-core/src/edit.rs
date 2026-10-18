@@ -45,6 +45,8 @@ pub enum EditError {
     Transition,
     #[error("effects apply to video clips — that track is audio")]
     EffectsNeedVideo,
+    #[error("transitions apply to video tracks — that track is audio")]
+    TransitionsNeedVideo,
     #[error("playhead is not in a gap")]
     NoGap,
     #[error("no clip at that position — it is in a gap")]
@@ -1190,6 +1192,13 @@ pub fn add_transition(
     let fps = project.fps.ok_or(EditError::NoFps)?;
     let t = snap(project, playhead)?;
     let tr = track_at(project, track)?;
+
+    // A transition renders as video (`xfade`); on an audio track the export
+    // graph would carry a filter it can't apply, so refuse rather than emit a
+    // broken graph (the model must not hold what export can't render).
+    if tr.kind != TrackKind::Video {
+        return Err(EditError::TransitionsNeedVideo);
+    }
 
     // Whole frames, at least one.
     let frames = (dur * fps).round().to_integer();
@@ -6031,6 +6040,49 @@ mod tests {
         assert_eq!(frames(c.duration()), 129);
         assert_eq!(c.asset_out, Seconds::from_integer(3));
         assert_eq!(c.speed, Seconds::new(30, 43));
+    }
+
+    // A transition renders as video (`xfade`); on an audio track the export
+    // graph would carry a filter it can't apply, so refuse it — as effects are.
+    #[test]
+    fn a_transition_needs_a_video_track() {
+        let mut p = clip_pair(); // [C1 src 0..3][C2 src 0..3] on v1
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ai].segments = vec![
+            Segment::Clip(Clip::new(
+                1,
+                1,
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+            )),
+            Segment::Clip(Clip::new(
+                2,
+                1,
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+            )),
+        ];
+        assert!(matches!(
+            add_transition(
+                &p,
+                ai,
+                2.0,
+                TransitionKind::Dissolve,
+                Seconds::from_integer(1)
+            ),
+            Err(EditError::TransitionsNeedVideo)
+        ));
+        // The video track is unaffected.
+        assert!(
+            add_transition(
+                &p,
+                0,
+                3.0,
+                TransitionKind::Dissolve,
+                Seconds::from_integer(1)
+            )
+            .is_ok()
+        );
     }
 
     /// The playback rate of one transition side: its source span over the
