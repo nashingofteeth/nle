@@ -114,6 +114,14 @@ plainly.
   **entry edge** so undo returns where you entered the mode.
 - Deletes: plain (`dd`) keeps the same offset in the resulting gap; ripple
   (`D`) and gap deletes land on the seam between the neighbours.
+- **A no-op edit must not move the playhead.** `run_action` reanchors only
+  when the outcome `changed`; only `Yank` reports `false`, and reanchoring a
+  read used to slide the playhead (a transition anchor resolves to the
+  transition's *end*, so `yy` on a blend moved it — and `dd` yanks first).
+- **A gap/transition anchor keeps the playhead while the segment survives.**
+  `edit_anchor` maps a transition to its end (the seam a removal leaves), but
+  the seam is used only once the segment under the playhead is gone — an
+  insert, a trim, or an effect elsewhere over a gap must not slide it.
 - Implemented by capturing an anchor **before** `history.apply` and
   resolving it after; `run.resume` for the pool.
 
@@ -192,8 +200,22 @@ plainly.
   gone. Never merge the neighbours (before `x` they were two segments), and
   the playhead anchor is the transition's **end** — the cut the restore
   leaves — not its start.
+- **A transition is opaque and video-only.** It can't be split or trimmed: an
+  insert/paste at/over one is refused (`EditError::Transition`, as `_` does),
+  an overwrite `p` consumes it whole. `add_transition` refuses a non-video
+  track (the export graph emits video `xfade` chains an audio track never
+  consumes). A composite *span* is widened to contain a transition whole and
+  the slice keeps it whole — a partial crossfade isn't expressible.
+- **Every write path clamps clips to their media.** EDL import, OTIO import,
+  `detect-edits` and `purge-stumps` all run `clamp_to_media`; a new import or
+  write path must call `clamp_project_to_media`, or the model reads past EOF
+  and the export silently truncates (a 10 s clip over a 5 s file exports as
+  5 s and `nle show` disagrees).
 - **Any inward gap move ripples**; outward gap growth honours the flag
   (`e` overwrite, `E` insert space).
+- **An append at/past the end is one gap.** Inserting or pasting a gap beyond
+  the track end bridges the void and the payload as a *single* gap segment
+  (`append_at_end`) — the track never holds two adjacent gaps.
 - **`e`/`E`/`[`/`]` must agree**: a leading gap's head is `GapHead` for all
   of them (retire redundant variants so paths can't drift — same for
   `resolve_armed` vs `armed_on_side`).
@@ -260,8 +282,10 @@ plainly.
   - a *span* where another track is audible (`proxy::composite_proxy`): every
     unmuted track's slice of it, hashed the same way over the slices.
   Each asset's **path and mtime** are in the hash, so a replaced file
-  re-renders. The render is `export_quiet`: the monitor calls it, so ffmpeg
-  must never write to the TUI's stderr.
+  re-renders — and so is each **LUT file** an effect reads (the segment JSON
+  carries only its path, so editing a `.cube` in place must re-render too).
+  The render is `export_quiet`: the monitor calls it, so ffmpeg must never
+  write to the TUI's stderr.
 - **Any timeline↔source mapping must scale by `Clip.speed`.** Edits use
   `source_span` (`edit.rs`); anything outside it uses `Clip::source_at` /
   `Clip::timeline_offset_of`. The playhead anchor missed the factor and
@@ -330,6 +354,10 @@ plainly.
   fail loudly if a spelling misses it. **Session state is not an action**:
   the playhead (`nle seek`/`:seek`) and the yank register are shared slots,
   not catalog entries.
+- **`--clip N` finds the clip's own track** (`resolve_track`), so delete,
+  yank, speed and effect address a clip wherever it lives; `--track` only
+  addresses position-based targets. Tracks are 1-based — 0 is refused
+  (`cli_index`), never silently "track 1".
 - **The message line has one writer.** `run_action` sets the edit's notice,
   then `persist_and_refresh` runs; a failure there **appends**
   (`{notice} — preview rebuild failed: …`) instead of replacing it — plumbing
