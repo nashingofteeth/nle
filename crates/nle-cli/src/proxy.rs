@@ -217,7 +217,7 @@ pub fn composite_proxy(
 /// never cut: `composite_spans` widens a span to contain any it straddles.
 fn slice_tracks(project: &Project, start: Seconds, end: Seconds) -> Vec<Track> {
     let span = end - start;
-    project
+    let mut sliced: Vec<Track> = project
         .timeline
         .tracks
         .iter()
@@ -257,7 +257,17 @@ fn slice_tracks(project: &Project, start: Seconds, end: Seconds) -> Vec<Track> {
                 segments,
             }
         })
-        .collect()
+        .collect();
+    // A fully-muted video timeline still renders: the export needs a video
+    // layer, so give it one of black (a gap) rather than failing.
+    if !sliced.iter().any(|t| t.kind == TrackKind::Video) {
+        sliced.push(Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Gap(Gap { duration: span })],
+        });
+    }
+    sliced
 }
 
 /// The `[offset, offset + len)` part of `seg`, in span-relative time. Clips and

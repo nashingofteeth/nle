@@ -153,13 +153,10 @@ fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError>
         .audio_tracks()
         .filter(|t| !t.muted)
         .collect();
-    if video.is_empty() {
-        return Err(PreviewError::NoVideoTrack);
-    }
-
     // Union of every unmuted track's segment boundaries. Audio tracks are in
     // the cut set too: a composite span starts and ends where their material
-    // does.
+    // does. A fully-muted video timeline is not an error — it plays black, as
+    // a traditional editor shows.
     let mut cuts = vec![Seconds::from_integer(0), total];
     for t in video.iter().chain(audio.iter()) {
         let mut acc = Seconds::from_integer(0);
@@ -618,6 +615,38 @@ mod tests {
             speed: Seconds::from_integer(1),
             effects: Vec::new(),
         })
+    }
+
+    // A fully-muted video timeline previews as black, not an error — the
+    // monitor keeps working and shows nothing rather than the muted composite.
+    #[test]
+    fn a_muted_video_timeline_previews_as_black() {
+        let secs = Seconds::from_integer;
+        let mut p = Project::new();
+        p.fps = Some(secs(30));
+        let probe = RawProbe {
+            streams: vec![RawStream {
+                index: 0,
+                codec_type: Some("video".into()),
+                width: Some(320),
+                height: Some(240),
+                ..Default::default()
+            }],
+            format: RawFormat {
+                format_name: "mp4".into(),
+                duration: Some("10".into()),
+                ..Default::default()
+            },
+        };
+        p.add_asset("/media/red.mp4".into(), probe);
+        p.timeline.tracks[0].segments = vec![seg_clip(1, 0, 2)];
+        p.timeline.tracks[0].muted = true;
+        let windows = composite_windows(&p).unwrap();
+        assert!(!windows.is_empty(), "the timeline still previews");
+        assert!(
+            windows.iter().all(|w| matches!(w.kind, WindowKind::Gap)),
+            "every window is black"
+        );
     }
 
     #[test]
