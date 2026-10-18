@@ -184,6 +184,12 @@ plainly.
 - **Opposite-end extend commit = delete** (ripple), by **id** for a clip
   (not by playhead position, which resolves to the follower) and by
   **index** for a gap.
+- **A trim at an edge deletes the segment that edge would consume**
+  (`trim_consume_target_on`): `i`/`I` the one **ending** at the playhead,
+  `o`/`O` the one **starting** there — at a shared cut those are the two
+  different neighbours, so `i` at a clip|clip cut deletes the *preceding*
+  clip, and `i` on a clip's start deletes the preceding gap. Deliberate (and
+  unit-tested): the trim collapses the segment whose edge is already there.
 - **A transition's side plays at its neighbour's rate.** `add_transition` gives
   each side the span `dur × that neighbour's rate`, and the side renders that
   span into `dur`, so `span / dur` is the rate at the seam. `set_speed_on`
