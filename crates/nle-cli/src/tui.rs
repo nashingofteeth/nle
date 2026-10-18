@@ -2135,12 +2135,18 @@ struct MediaAnchor {
     at: f64,
 }
 
-/// A position anchor for a gap delete: a gap is not media (nothing to
-/// re-find by id) — it can only be removed, which ripples — so the
-/// playhead lands where it started, the cut between the neighbours.
+/// A position anchor for a gap or transition — neither is media (a gap has no
+/// id, a transition is opaque), so the playhead can't be re-found by frame.
+/// It is kept where it was while the segment survives; a *removal* ripples and
+/// leaves the seam (`start`) between the neighbours.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct GapAnchor {
+    /// The seam a removal leaves: a gap's start, a transition's end.
     start: f64,
+    /// The playhead before the edit — kept while a gap or transition is still
+    /// under it (an insert, a trim, an effect elsewhere), so those don't slide
+    /// the playhead to the seam.
+    at: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2155,6 +2161,7 @@ fn edit_anchor(project: &Project, playhead: f64, ti: usize) -> Option<Anchor> {
     let track = project.timeline.track(ti)?;
     let t = grid_time(project, playhead);
     let idx = track.index_at(t)?;
+    let at = secs(&t);
     match &track.segments[idx] {
         TimelineSegment::Clip(c) => Some(Anchor::Media(MediaAnchor {
             id: c.id,
@@ -2162,16 +2169,17 @@ fn edit_anchor(project: &Project, playhead: f64, ti: usize) -> Option<Anchor> {
             // timeline second is two source seconds).
             source: c.source_at(t - track.start_of(idx)),
             start: secs(&track.start_of(idx)),
-            at: secs(&t),
+            at,
         })),
         TimelineSegment::Gap(_) => Some(Anchor::Gap(GapAnchor {
             start: secs(&track.start_of(idx)),
+            at,
         })),
-        // A transition is only ever removed, and removing one gives its
-        // trimmed spans back — so the neighbours meet at its *end*, which is
-        // where the playhead lands.
-        TimelineSegment::Transition(t) => Some(Anchor::Gap(GapAnchor {
-            start: secs(&(track.start_of(idx) + t.dur)),
+        // A transition is removed by handing its trimmed spans back, so the
+        // neighbours meet at its *end*; a non-removing edit keeps the playhead.
+        TimelineSegment::Transition(tr) => Some(Anchor::Gap(GapAnchor {
+            start: secs(&(track.start_of(idx) + tr.dur)),
+            at,
         })),
     }
 }
@@ -2216,9 +2224,28 @@ fn reanchor_playhead(app: &mut App, anchor: Option<Anchor>) {
     let pos = match anchor {
         Anchor::Media(a) => resolve_anchor(&app.project, a.id, a.source, app.active())
             .unwrap_or_else(|| fallback_position(&app.project, &a, app.active())),
-        // A gap is only ever deleted (rippling), so land on the seam it
-        // left between its neighbours.
-        Anchor::Gap(g) => g.start,
+        // A gap or transition still under the playhead: an edit that doesn't
+        // remove it keeps the playhead put. A removal leaves the seam between
+        // the neighbours (the segment under `at` is then a clip).
+        Anchor::Gap(g) => {
+            let ti = app.active();
+            let idx = app
+                .project
+                .timeline
+                .track(ti)
+                .and_then(|track| track.index_at(grid_time(&app.project, g.at)));
+            match idx {
+                Some(i)
+                    if !matches!(
+                        app.project.timeline.tracks[ti].segments[i],
+                        TimelineSegment::Clip(_)
+                    ) =>
+                {
+                    g.at
+                }
+                _ => g.start,
+            }
+        }
     };
     let total = app.total();
     app.playhead = pos.clamp(0.0, total);
@@ -5286,7 +5313,13 @@ mod tests {
         let mut app = App::new(asset_project(), PathBuf::from("t.json")); // [C1][gap 3..5][C2]
         app.playhead = 4.0; // inside the gap
         let anchor = edit_anchor(&app.project, app.playhead, 0);
-        assert_eq!(anchor, Some(Anchor::Gap(GapAnchor { start: 3.0 })));
+        assert_eq!(
+            anchor,
+            Some(Anchor::Gap(GapAnchor {
+                start: 3.0,
+                at: 4.0
+            }))
+        );
         let batch = edit::delete_under(&app.project, app.playhead).unwrap();
         app.history.apply(&mut app.project, batch, 0).unwrap();
         reanchor_playhead(&mut app, anchor);
@@ -5342,7 +5375,10 @@ mod tests {
         let anchor = edit_anchor(&app.project, app.playhead, 0);
         assert_eq!(
             anchor,
-            Some(Anchor::Gap(GapAnchor { start: 3.0 })),
+            Some(Anchor::Gap(GapAnchor {
+                start: 3.0,
+                at: 2.5
+            })),
             "the transition's end"
         );
         let batch = edit::delete_under(&app.project, app.playhead).unwrap();
@@ -5357,6 +5393,21 @@ mod tests {
             }
             other => panic!("expected the two clips back, got {other:?}"),
         }
+    }
+
+    // An edit over a gap that doesn't remove it keeps the playhead where it
+    // is; only a removal leaves the seam (the gap anchor used to slide it to
+    // the gap's start for every edit).
+    #[test]
+    fn an_edit_over_a_gap_keeps_the_playhead() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json")); // [C1][gap 3..5][C2]
+        app.playhead = 4.0; // inside the gap
+        let anchor = edit_anchor(&app.project, app.playhead, 0);
+        // An insert over the gap grows it — a non-removing edit.
+        let batch = edit::insert_gap(&app.project, app.playhead, 15).unwrap();
+        app.history.apply(&mut app.project, batch, 0).unwrap();
+        reanchor_playhead(&mut app, anchor);
+        assert_eq!(app.playhead, 4.0, "the playhead stays put");
     }
 
     // The anchor maps through a speed clip's rate: the media frame is a
