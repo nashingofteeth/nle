@@ -2065,7 +2065,7 @@ fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
         let start = project.timeline.end();
         let video_ti = match track {
             Some(n) => {
-                let i = n.saturating_sub(1);
+                let i = cli_index(n, "--track").map_err(anyhow::Error::msg)?;
                 let t = project
                     .timeline
                     .track(i)

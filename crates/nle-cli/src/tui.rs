@@ -1222,7 +1222,7 @@ fn add_command(app: &mut App, player: &dyn Mpv, f: &mut action::Flags) -> Option
     let mut out_point = None;
     match (|| -> Result<(), String> {
         if let Some(n) = flag_usize(f, "track")? {
-            track = n.saturating_sub(1);
+            track = crate::cli_index(n, "--track")?;
         }
         at = flag_time(f, "at")?.unwrap_or(at);
         in_point = f.take("in");
@@ -6828,6 +6828,25 @@ mod tests {
             "a fade was added: {:?}",
             track.segments
         );
+    }
+
+    // `:add --track 0` is refused like every other command (tracks are 1-based);
+    // it used to silently mean track 1.
+    #[test]
+    fn colon_add_refuses_track_zero() {
+        let mut app = App::new(asset_project(), temp_project_path("add-track0"));
+        app.loaded = true;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key(':'));
+        for c in "add red.mp4 --track 0".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(app.message.contains("1-based"), "{}", app.message);
     }
 
     // `:effect crop` appends an effect to a clip.
