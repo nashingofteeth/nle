@@ -35,6 +35,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              gg/G/0 ends · < / > (, / .) clip start/end · 3l = 3s (counts)
 #   editing:   i/o trim in/out (I/O ripple; a gap always ripples) ·
 #              at a segment's edge i/o delete it, I/O or a gap ripples ·
+#              inside a transition i/o trim the neighbouring clip's portion in
+#              the blend — a transition is part of both neighbours, so `o`
+#              works the preceding clip's out and `i` the following clip's in ·
 #              s split at playhead · _ insert gap (count = frames) ·
 #              dd delete (gap) · D delete + ripple · yy yank clip/gap ·
 #              p paste-over (replaces underneath) · P ripple-insert ·
@@ -48,7 +51,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :effect [--clip N] crop|scale|eq|lut … · rendered at export;
 #              the monitor plays a rendered proxy for effects/speed/transitions,
 #              and for any clip whose picture size isn't the sequence's ·
-#              dd/D removes one, giving the frames it trimmed back
+#              dd/D removes one, giving the frames it trimmed back ·
+#              a blend is part of both neighbours: extending one moves its
+#              portion in the transition, and extend mode hops over it
 #   commands:  the :cmd line is the CLI grammar, flag for flag — every
 #              action has both spellings:
 #              :trim-in|out [--ripple] · :split · :gap [--frames N|--dur T] ·

@@ -206,6 +206,17 @@ plainly.
   track (the export graph emits video `xfade` chains an audio track never
   consumes). A composite *span* is widened to contain a transition whole and
   the slice keeps it whole — a partial crossfade isn't expressible.
+- **The ends of a neighbour clip are the ends of the transition.** A blend is
+  part of both neighbours: `o`/`O` moves its right edge (the preceding clip's
+  out, and the following clip's in), `i`/`I` its left; the clip on the moved
+  side covers what the blend gives up, so `a`/`b` stay contiguous and
+  `span / dur` stays the neighbour's rate. Extending into a blend moves each
+  side with its edge (`move_blend_edge`); a *ripple* extend shifts the side
+  (`shift_blend_side`), or the material plays twice. A fade's black side has no
+  clip to cover it, so a blend trim is refused (`NoClipSide`). Extend mode hops
+  to the blend's far end (`blend_far_end`), and the row draws the boundary as a
+  bare colour change — a dotted box glyph sits mid-cell and reads misaligned
+  against the left-aligned `▏`.
 - **Every write path clamps clips to their media.** EDL import, OTIO import,
   `detect-edits` and `purge-stumps` all run `clamp_to_media`; a new import or
   write path must call `clamp_project_to_media`, or the model reads past EOF
