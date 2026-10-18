@@ -2427,6 +2427,40 @@ fn delete_segment_ripple(project: &Project, ti: usize, si: usize) -> Result<Batc
     Ok(Batch { ops, desc })
 }
 
+/// The ops appending `payload` at/past the track end: the void between the
+/// track's end and the playhead becomes a gap — coalesced with the payload when
+/// it is itself a gap, so the track never holds two adjacent gap segments.
+fn append_at_end(ti: usize, len: usize, void: Seconds, payload: Segment) -> Vec<EditOp> {
+    if void <= Seconds::from_integer(0) {
+        return vec![EditOp::Insert {
+            track: ti,
+            index: len,
+            segment: payload,
+        }];
+    }
+    match payload {
+        Segment::Gap(pg) => vec![EditOp::Insert {
+            track: ti,
+            index: len,
+            segment: Segment::Gap(Gap {
+                duration: void + pg.duration,
+            }),
+        }],
+        payload => vec![
+            EditOp::Insert {
+                track: ti,
+                index: len,
+                segment: Segment::Gap(Gap { duration: void }),
+            },
+            EditOp::Insert {
+                track: ti,
+                index: len + 1,
+                segment: payload,
+            },
+        ],
+    }
+}
+
 /// The pasted piece for a clipboard segment: a clip takes a fresh id, a
 /// gap just carries its duration.
 fn pasted_piece(snapshot: &Segment, new_id: u32) -> Segment {
@@ -2503,24 +2537,9 @@ pub fn paste_on(
     // At/past the end (or an empty track): nothing to overwrite — append,
     // bridging the void with a gap when there's distance to cover.
     if track.segments.is_empty() || t >= track.end() {
-        let mut ops = Vec::new();
-        let mut index = track.segments.len();
         let void = t - track.end();
-        if void > Seconds::from_integer(0) {
-            ops.push(EditOp::Insert {
-                track: ti,
-                index,
-                segment: Segment::Gap(Gap { duration: void }),
-            });
-            index += 1;
-        }
-        ops.push(EditOp::Insert {
-            track: ti,
-            index,
-            segment: pasted.clone(),
-        });
         return Ok(Batch {
-            ops,
+            ops: append_at_end(ti, track.segments.len(), void, pasted.clone()),
             desc: format!("paste at {}", stamp(project, &t)),
         });
     }
@@ -2690,26 +2709,11 @@ pub fn insert_gap_on(
         return Ok(batch);
     }
 
-    // At/past the end: bridge the void (if any), then the new gap.
+    // At/past the end: bridge the void (if any), coalesced with the new gap.
     if track.segments.is_empty() || t >= track.end() {
-        let mut ops = Vec::new();
-        let mut index = track.segments.len();
         let void = t - track.end();
-        if void > Seconds::from_integer(0) {
-            ops.push(EditOp::Insert {
-                track: ti,
-                index,
-                segment: Segment::Gap(Gap { duration: void }),
-            });
-            index += 1;
-        }
-        ops.push(EditOp::Insert {
-            track: ti,
-            index,
-            segment: gap,
-        });
         return Ok(Batch {
-            ops,
+            ops: append_at_end(ti, track.segments.len(), void, gap),
             desc: format!("insert gap at {}", stamp(project, &t)),
         });
     }
@@ -2798,27 +2802,17 @@ pub fn paste_ripple_on(
         Segment::Transition(_) => "transition".to_string(),
     };
 
-    // At or past the track end: the void becomes a gap segment (when
-    // there's distance to cover), then the payload lands on the playhead.
+    // At or past the track end: the void becomes a gap (coalesced with the
+    // payload when it is itself a gap), then the payload lands on the playhead.
     if t >= track.end() {
-        let mut ops = Vec::new();
         let void = t - track.end();
-        let mut index = track.segments.len();
-        if void > Seconds::from_integer(0) {
-            ops.push(EditOp::Insert {
-                track: ti,
-                index,
-                segment: Segment::Gap(Gap { duration: void }),
-            });
-            index += 1;
-        }
-        ops.push(EditOp::Insert {
-            track: ti,
-            index,
-            segment: pasted_piece(snapshot, project.next_clip_id()),
-        });
         return Ok(Batch {
-            ops,
+            ops: append_at_end(
+                ti,
+                track.segments.len(),
+                void,
+                pasted_piece(snapshot, project.next_clip_id()),
+            ),
             desc: format!("ripple paste at {} — {what} inserted", stamp(project, &t)),
         });
     }
@@ -4801,6 +4795,40 @@ mod tests {
             &q.timeline.video_track().unwrap().segments[0],
             Segment::Gap(_)
         ));
+    }
+
+    // Appending at/past the end never leaves two adjacent gaps: the void
+    // between the track end and the playhead is one segment with the payload.
+    #[test]
+    fn appending_past_the_end_coalesces_gaps() {
+        let gap = Segment::Gap(Gap {
+            duration: Seconds::from_integer(1),
+        });
+        let no_adjacent_gaps = |p: &Project| {
+            let segs = &p.timeline.video_track().unwrap().segments;
+            assert!(
+                !segs
+                    .windows(2)
+                    .any(|w| matches!(w, [Segment::Gap(_), Segment::Gap(_)])),
+                "adjacent gaps: {segs:?}"
+            );
+        };
+
+        // An inserted gap past the end: the void [5,7) and the 1 s gap merge.
+        let mut p = fixture(); // [C1 0..2][gap 2..3][C2 3..5]
+        let mut h = History::default();
+        let batch = insert_gap(&p, 7.0, 30).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        no_adjacent_gaps(&p);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8), "void + gap");
+
+        // …and a pasted gap payload too.
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = paste(&p, &gap, 7.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        no_adjacent_gaps(&p);
+        assert_eq!(p.timeline.end(), Seconds::from_integer(8));
     }
 
     #[test]
