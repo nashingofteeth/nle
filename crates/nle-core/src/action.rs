@@ -121,6 +121,18 @@ pub enum Action {
         clip: u32,
         effect: Effect,
     },
+    /// Drop one effect from a clip (`:effect rm`).
+    RemoveEffect {
+        track: usize,
+        clip: u32,
+        /// `None` = the last effect.
+        index: Option<usize>,
+    },
+    /// Drop every effect from a clip (`:effect clear`).
+    ClearEffects {
+        track: usize,
+        clip: u32,
+    },
     /// Drop sub-frame stumps and snap to the frame grid (`:purge`).
     /// Re-baselines the undo stack.
     PurgeStumps {
@@ -174,13 +186,15 @@ impl Action {
             Action::Redo => 15,
             Action::Transition { .. } => 16,
             Action::AddEffect { .. } => 17,
+            Action::RemoveEffect { .. } => 18,
+            Action::ClearEffects { .. } => 19,
         }
     }
 }
 
 /// How many slots the catalog has — the coverage tests assert exactly
 /// this many are reachable from each spelling.
-pub const SLOTS: usize = 18;
+pub const SLOTS: usize = 20;
 
 /// What running an action produced. `changed` tells the caller whether
 /// the project needs persisting (a yank only writes the register).
@@ -297,6 +311,16 @@ pub fn run_action(
             // must not hide a clip that lives elsewhere.
             let ti = resolve_track(project, *track, Target::Clip(*clip))?;
             let batch = edit::add_effect_on(project, ti, *clip, effect.clone())?;
+            apply(project, history, batch, from)
+        }
+        Action::RemoveEffect { track, clip, index } => {
+            let ti = resolve_track(project, *track, Target::Clip(*clip))?;
+            let batch = edit::remove_effect_on(project, ti, *clip, *index)?;
+            apply(project, history, batch, from)
+        }
+        Action::ClearEffects { track, clip } => {
+            let ti = resolve_track(project, *track, Target::Clip(*clip))?;
+            let batch = edit::clear_effects_on(project, ti, *clip)?;
             apply(project, history, batch, from)
         }
         Action::Delete {
@@ -1002,7 +1026,8 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 /// The `:effect` / `nle effect` usage string — one spelling for both
 /// front-ends.
 pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] crop --w --h [--x --y] | \
-     scale --w --h | eq [--brightness --contrast --saturation] | lut --path P";
+     scale --w --h | eq [--brightness --contrast --saturation] | lut --path P | \
+     rm [--index N] | clear";
 
 /// The parameters of an effect call, before the kind picks which of them
 /// apply. Shared by the `:cmd` grammar and the CLI so a new kind can't drift
@@ -1182,23 +1207,36 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             let kind = f
                 .positional()
                 .ok_or_else(|| ParseError::Invalid(EFFECT_USAGE.to_string()))?;
-            let args = EffectArgs {
-                w: opt_u32(&mut f, "w")?,
-                h: opt_u32(&mut f, "h")?,
-                x: opt_u32(&mut f, "x")?,
-                y: opt_u32(&mut f, "y")?,
-                brightness: opt_time(&mut f, "brightness")?,
-                contrast: opt_time(&mut f, "contrast")?,
-                saturation: opt_time(&mut f, "saturation")?,
-                path: f.take("path"),
-            };
-            let effect = effect_from_args(&kind, args)?;
-            f.finish(EFFECT_USAGE)?;
-            Ok(Action::AddEffect {
-                track,
-                clip,
-                effect,
-            })
+            match kind.as_str() {
+                "rm" => {
+                    let index = opt_usize(&mut f, "index")?;
+                    f.finish(":effect rm [--index N] [--clip N] [--track N]")?;
+                    Ok(Action::RemoveEffect { track, clip, index })
+                }
+                "clear" => {
+                    f.finish(":effect clear [--clip N] [--track N]")?;
+                    Ok(Action::ClearEffects { track, clip })
+                }
+                _ => {
+                    let args = EffectArgs {
+                        w: opt_u32(&mut f, "w")?,
+                        h: opt_u32(&mut f, "h")?,
+                        x: opt_u32(&mut f, "x")?,
+                        y: opt_u32(&mut f, "y")?,
+                        brightness: opt_time(&mut f, "brightness")?,
+                        contrast: opt_time(&mut f, "contrast")?,
+                        saturation: opt_time(&mut f, "saturation")?,
+                        path: f.take("path"),
+                    };
+                    let effect = effect_from_args(&kind, args)?;
+                    f.finish(EFFECT_USAGE)?;
+                    Ok(Action::AddEffect {
+                        track,
+                        clip,
+                        effect,
+                    })
+                }
+            }
         }
         "delete" | "del" => {
             let target = parse_target(&mut f, d, "what to delete")?;
@@ -1416,6 +1454,8 @@ mod tests {
             "redo",
             "transition --at 3",
             "effect crop --clip 1 --w 10 --h 10",
+            "effect rm --clip 1 --index 0",
+            "effect clear --clip 1",
         ];
         let mut seen = vec![false; SLOTS];
         for spec in SPECS {
@@ -1453,6 +1493,31 @@ mod tests {
                 to: -1.5,
                 ripple: true,
             })
+        );
+    }
+
+    #[test]
+    fn effect_removal_parses() {
+        assert_eq!(
+            parse("effect rm --clip 4 --index 1 --track 1", &defaults()),
+            Ok(Action::RemoveEffect {
+                track: 0,
+                clip: 4,
+                index: Some(1),
+            })
+        );
+        // Without `--index` the last effect is the one dropped.
+        assert_eq!(
+            parse("effect rm --clip 4", &defaults()),
+            Ok(Action::RemoveEffect {
+                track: 5,
+                clip: 4,
+                index: None,
+            })
+        );
+        assert_eq!(
+            parse("effect clear --clip 4", &defaults()),
+            Ok(Action::ClearEffects { track: 5, clip: 4 })
         );
     }
 

@@ -278,9 +278,9 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         track: usize,
     },
-    /// Append a visual effect to a clip (TUI `:effect`)
+    /// Add, remove, or clear a visual effect on a clip (TUI `X`)
     Effect {
-        /// Which effect: crop | scale | eq | lut
+        /// Which effect: crop | scale | eq | lut | rm | clear
         #[arg(value_name = "KIND")]
         kind: String,
         /// The clip to attach it to
@@ -289,6 +289,9 @@ enum Cmd {
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
         track: usize,
+        /// `rm`: which effect to drop (0-based; default: the last one)
+        #[arg(long, value_name = "N")]
+        index: Option<usize>,
         /// crop/scale width
         #[arg(long)]
         w: Option<u32>,
@@ -777,6 +780,7 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             kind,
             clip,
             track,
+            index,
             w,
             h,
             x,
@@ -786,25 +790,33 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             saturation,
             path,
         } => Some(cli_index(*track, "--track").and_then(|track| {
-            effect_from_args(
-                kind,
-                EffectArgs {
-                    w: *w,
-                    h: *h,
-                    x: *x,
-                    y: *y,
-                    brightness: *brightness,
-                    contrast: *contrast,
-                    saturation: *saturation,
-                    path: path.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())
-            .map(|effect| Action::AddEffect {
-                track,
-                clip: *clip,
-                effect,
-            })
+            match kind.as_str() {
+                "rm" => Ok(Action::RemoveEffect {
+                    track,
+                    clip: *clip,
+                    index: *index,
+                }),
+                "clear" => Ok(Action::ClearEffects { track, clip: *clip }),
+                _ => effect_from_args(
+                    kind,
+                    EffectArgs {
+                        w: *w,
+                        h: *h,
+                        x: *x,
+                        y: *y,
+                        brightness: *brightness,
+                        contrast: *contrast,
+                        saturation: *saturation,
+                        path: path.clone(),
+                    },
+                )
+                .map_err(|e| e.to_string())
+                .map(|effect| Action::AddEffect {
+                    track,
+                    clip: *clip,
+                    effect,
+                }),
+            }
         })),
         Cmd::Undo {} => Some(Ok(Action::Undo)),
         Cmd::Redo {} => Some(Ok(Action::Redo)),
@@ -2662,8 +2674,37 @@ mod tests {
                 kind: "crop".into(),
                 clip: 1,
                 track: 1,
+                index: None,
                 w: Some(10),
                 h: Some(10),
+                x: None,
+                y: None,
+                brightness: None,
+                contrast: None,
+                saturation: None,
+                path: None,
+            },
+            Cmd::Effect {
+                kind: "rm".into(),
+                clip: 1,
+                track: 1,
+                index: Some(0),
+                w: None,
+                h: None,
+                x: None,
+                y: None,
+                brightness: None,
+                contrast: None,
+                saturation: None,
+                path: None,
+            },
+            Cmd::Effect {
+                kind: "clear".into(),
+                clip: 1,
+                track: 1,
+                index: None,
+                w: None,
+                h: None,
                 x: None,
                 y: None,
                 brightness: None,

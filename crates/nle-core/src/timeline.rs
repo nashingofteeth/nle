@@ -57,6 +57,35 @@ pub enum Effect {
 }
 
 impl Effect {
+    /// The short name used by notices, `nle show`, and the effects panel.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Effect::Crop { .. } => "crop",
+            Effect::Scale { .. } => "scale",
+            Effect::Eq { .. } => "eq",
+            Effect::Lut { .. } => "lut",
+        }
+    }
+
+    /// The parameters as one line — the panel's detail column.
+    pub fn details(&self) -> String {
+        match self {
+            Effect::Crop { x, y, w, h } => format!("{w}×{h} at {x},{y}"),
+            Effect::Scale { w, h } => format!("{w}×{h}"),
+            Effect::Eq {
+                brightness,
+                contrast,
+                saturation,
+            } => format!("b {brightness} · c {contrast} · s {saturation}"),
+            // The full path is noise in a one-line row; the file name is the
+            // part that identifies the LUT.
+            Effect::Lut { path } => std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone()),
+        }
+    }
+
     /// The ffmpeg filter fragment for this effect.
     pub fn filter(&self) -> String {
         match self {

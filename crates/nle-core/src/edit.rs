@@ -49,6 +49,10 @@ pub enum EditError {
     BlendNoHandle { id: u32, detail: String },
     #[error("effects apply to video clips — that track is audio")]
     EffectsNeedVideo,
+    #[error("clip #{0} has no effects")]
+    NoEffects(u32),
+    #[error("clip #{0} has no effect #{1}")]
+    EffectNotFound(u32, usize),
     #[error("transitions apply to video tracks — that track is audio")]
     TransitionsNeedVideo,
     #[error("playhead is not in a gap")]
@@ -1349,6 +1353,77 @@ pub fn add_effect_on(
             after: Segment::Clip(c),
         }],
         desc: format!("effect on clip #{clip_id}"),
+    })
+}
+
+/// `:effect rm` — drop one effect from a clip. `index = None` drops the last
+/// one (what a shell user gets without counting rows).
+pub fn remove_effect_on(
+    project: &Project,
+    track: usize,
+    clip_id: u32,
+    index: Option<usize>,
+) -> Result<Batch, EditError> {
+    let tr = track_at(project, track)?;
+    if tr.kind != TrackKind::Video {
+        return Err(EditError::EffectsNeedVideo);
+    }
+    let si = tr
+        .clip_index(clip_id)
+        .ok_or(EditError::ClipNotFound(clip_id))?;
+    let before = tr.segments[si].clone();
+    let Segment::Clip(c) = &before else {
+        return Err(EditError::ClipNotFound(clip_id));
+    };
+    let at = match index {
+        Some(i) if i < c.effects.len() => i,
+        Some(i) => return Err(EditError::EffectNotFound(clip_id, i)),
+        None => c
+            .effects
+            .len()
+            .checked_sub(1)
+            .ok_or(EditError::NoEffects(clip_id))?,
+    };
+    let mut after = c.clone();
+    let removed = after.effects.remove(at);
+    Ok(Batch {
+        ops: vec![EditOp::Replace {
+            track,
+            index: si,
+            before,
+            after: Segment::Clip(after),
+        }],
+        desc: format!("drop {} from clip #{clip_id}", removed.kind()),
+    })
+}
+
+/// `:effect clear` — drop every effect from a clip (one undo step).
+pub fn clear_effects_on(project: &Project, track: usize, clip_id: u32) -> Result<Batch, EditError> {
+    let tr = track_at(project, track)?;
+    if tr.kind != TrackKind::Video {
+        return Err(EditError::EffectsNeedVideo);
+    }
+    let si = tr
+        .clip_index(clip_id)
+        .ok_or(EditError::ClipNotFound(clip_id))?;
+    let before = tr.segments[si].clone();
+    let Segment::Clip(c) = &before else {
+        return Err(EditError::ClipNotFound(clip_id));
+    };
+    if c.effects.is_empty() {
+        return Err(EditError::NoEffects(clip_id));
+    }
+    let n = c.effects.len();
+    let mut after = c.clone();
+    after.effects.clear();
+    Ok(Batch {
+        ops: vec![EditOp::Replace {
+            track,
+            index: si,
+            before,
+            after: Segment::Clip(after),
+        }],
+        desc: format!("clear {n} effect(s) from clip #{clip_id}"),
     })
 }
 
@@ -7543,6 +7618,67 @@ mod tests {
             add_effect_on(&p, ai, 9, Effect::Scale { w: 2, h: 2 }),
             Err(EditError::EffectsNeedVideo)
         ));
+    }
+
+    // `:effect rm` drops one effect (default: the last) and `:effect clear`
+    // drops the rest — each is one undo step, and both refuse an empty clip
+    // rather than recording a no-op.
+    #[test]
+    fn effects_can_be_removed_and_cleared() {
+        let effects = |p: &Project| match &p.timeline.video_track().unwrap().segments[0] {
+            Segment::Clip(c) => c.effects.clone(),
+            other => panic!("expected a clip, got {other:?}"),
+        };
+        let scale = Effect::Scale { w: 2, h: 2 };
+        let crop = Effect::Crop {
+            x: 0,
+            y: 0,
+            w: 3,
+            h: 3,
+        };
+
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = add_effect(&p, 1, scale.clone()).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let batch = add_effect(&p, 1, crop.clone()).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(effects(&p), vec![scale.clone(), crop.clone()]);
+
+        // An explicit index drops that row (0-based), and the notice names it.
+        let batch = remove_effect_on(&p, 0, 1, Some(0)).unwrap();
+        assert!(batch.desc.contains("scale"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(effects(&p), vec![crop.clone()]);
+
+        // `None` drops the last, and an empty list is an error.
+        let batch = remove_effect_on(&p, 0, 1, None).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        assert!(effects(&p).is_empty());
+        assert!(matches!(
+            remove_effect_on(&p, 0, 1, None),
+            Err(EditError::NoEffects(1))
+        ));
+        assert!(matches!(
+            remove_effect_on(&p, 0, 1, Some(3)),
+            Err(EditError::EffectNotFound(1, 3))
+        ));
+        assert!(matches!(
+            clear_effects_on(&p, 0, 1),
+            Err(EditError::NoEffects(1))
+        ));
+
+        // Clear drops every row in one batch; undo restores them together.
+        let batch = add_effect(&p, 1, crop.clone()).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let batch = add_effect(&p, 1, scale.clone()).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let batch = clear_effects_on(&p, 0, 1).unwrap();
+        assert!(batch.desc.contains("2 effect"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        assert!(effects(&p).is_empty());
+        h.undo(&mut p).unwrap();
+        assert_eq!(effects(&p), vec![crop, scale]);
     }
 
     /// [Clip #1 [0..3) src 0..3] [Clip #2 [3..6) src 0..3] — a plain cut.
