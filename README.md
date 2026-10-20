@@ -59,9 +59,14 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :track add video|audio · :track mute [N] · :track rm N ·
 #              navigation, edits, and the monitor all follow the active
 #              track (the timeline draws one row per track)
-#   fx:        x cross-dissolve at the boundary (count = frames) ·
+#   fx:        X effects panel for the clip under the playhead — j/k select ·
+#              d drop · D clear · c/s/e/l add crop/scale/eq/lut (opens the
+#              : line pre-filled) · u undo · X/esc close; `*` marks a clip
+#              with effects in the row and `nle show` lists them in order ·
+#              x cross-dissolve at the boundary (count = frames) ·
 #              :transition [dissolve|fade] [--dur T|--frames N] ·
-#              :effect [--clip N] crop|scale|eq|lut … · rendered at export;
+#              :effect [--clip N] crop|scale|eq|lut … · :effect rm [--index N] ·
+#              :effect clear · rendered at export;
 #              the monitor plays a rendered proxy for effects/speed/transitions,
 #              and for any clip whose picture size isn't the sequence's ·
 #              dd/D removes one, giving the frames it trimmed back ·
@@ -72,7 +77,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :trim-in|out [--ripple] · :split · :gap [--frames N|--dur T] ·
 #              :delete|--yank [--at T|--clip N|--seg N] · :paste [--ripple] ·
 #              :extend --edge in|out --to T [--ripple] · :speed RATE (or R) ·
-#              :transition · :effect · :undo · :redo · :purge · :track … ·
+#              :transition · :effect [rm|clear] · :undo · :redo · :purge · :track … ·
 #              :media ls|rm · :import ·
 #              :add · :show · :seek T · :export -o FILE · :detect FILE ·
 #              :edl-import · :otio-import · :help · :q quit
@@ -136,6 +141,10 @@ $N yank --clip 3                       # into the shared register (TUI: yy)
 $N paste --at 5 --ripple               # from the register (TUI: p / P --ripple)
 $N extend --clip 3 --edge out --to 8   # move one edge (the extend-mode commit)
 $N extend --seg 4 --edge in --to 2 --ripple
+$N effect crop --clip 3 --w 160 --h 120 # x offset / y optional (--x/--y)
+$N effect eq --clip 3 --brightness -0.2 # contrast/saturation default to 1
+$N effect rm --clip 3                  # drop the last effect (--index N picks)
+$N effect clear --clip 3               # drop them all (one undo step)
 $N undo                                # works on TUI edits too; redo likewise
 $N show                                # [i] = --seg index, #n = --clip id
 #   --track N (1-based) picks the track for position-based commands;
