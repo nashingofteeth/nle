@@ -47,6 +47,10 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              inside a transition i/o trim the neighbouring clip's portion in
 #              the blend — a transition is part of both neighbours, so `o`
 #              works the preceding clip's out and `i` the following clip's in ·
+#              a trim on a clip *beside* a transition moves the blend's near
+#              edge instead of leaving a gap: the trimmed span goes into the
+#              transition and the timeline keeps its length (I/O ripple the
+#              side instead); refused if the neighbour has no material there ·
 #              s split at playhead · _ insert gap (count = frames) ·
 #              dd delete (gap) · D delete + ripple · yy yank clip/gap ·
 #              p paste-over (replaces underneath) · P ripple-insert ·
