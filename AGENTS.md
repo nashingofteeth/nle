@@ -212,6 +212,9 @@ the identical grid.
   different neighbours, so `i` at a clip|clip cut deletes the *preceding*
   clip, and `i` on a clip's start deletes the preceding gap. Deliberate (and
   unit-tested): the trim collapses the segment whose edge is already there.
+  **A transition's edge is not a neighbour's edge** (`blend_ends_at` /
+  `blend_starts_at`): since the blend is part of both neighbours, `o` at its
+  end and `i` at its start are no-ops, not a delete of the neighbour.
 - **A transition's side plays at its neighbour's rate.** `add_transition` gives
   each side the span `dur × that neighbour's rate`, and the side renders that
   span into `dur`, so `span / dur` is the rate at the seam. `set_speed_on`

@@ -41,7 +41,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              at a segment's edge i/o delete it, I/O or a gap ripples —
 #              i/I deletes the segment ENDING at the playhead, o/O the one
 #              STARTING there (at a shared cut: the preceding / following clip),
-#              so i on a clip's start deletes the preceding gap ·
+#              so i on a clip's start deletes the preceding gap; a transition's
+#              edge is not a neighbour's edge, so i/o there are no-ops ·
 #              inside a transition i/o trim the neighbouring clip's portion in
 #              the blend — a transition is part of both neighbours, so `o`
 #              works the preceding clip's out and `i` the following clip's in ·

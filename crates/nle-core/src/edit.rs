@@ -1733,6 +1733,12 @@ fn trim_blend_on(
     };
     let start = tr.start_of(si);
     let end = start + trans.dur;
+    // At the blend's own far edge there is nothing to trim: the neighbour's
+    // effective edge is the blend's *other* end, so `o` at the end and `i` at
+    // the start are no-ops (they used to collapse the neighbour into a gap).
+    if (out && t == end) || (!out && t == start) {
+        return Err(EditError::NothingToTrim(stamp(project, &t)));
+    }
     // Strictly inside: at an edge the trim consumes the segment whole.
     if t <= start || t >= end {
         return Ok(None);
@@ -3052,6 +3058,30 @@ pub fn delete_segment_on(
     }
 }
 
+/// Is a transition the segment whose span *ends* at `t`? A blend is part of
+/// both neighbours, so its edge is not the neighbour's edge for the collapse
+/// rule — `o`/`O` there must not delete the following clip.
+fn blend_ends_at(track: &Track, t: Seconds) -> bool {
+    let mut acc = Seconds::from_integer(0);
+    for s in &track.segments {
+        acc += s.duration();
+        if acc == t && matches!(s, Segment::Transition(_)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// …or *starts* at `t` (`i`/`I` there must not delete the preceding clip).
+fn blend_starts_at(track: &Track, t: Seconds) -> bool {
+    matches!(
+        track.index_at(t),
+        Some(i)
+            if matches!(track.segments[i], Segment::Transition(_))
+                && track.start_of(i) == t
+    )
+}
+
 /// The segment an edge-trim at the playhead would consume completely (so
 /// the trim should delete it instead). `out` (`o`/`O`) targets the
 /// segment STARTING at the playhead; `!out` (`i`/`I`) the segment ENDING
@@ -3066,8 +3096,14 @@ pub fn trim_consume_target_on(
     let track = project.timeline.tracks.get(track)?;
     if out {
         let si = track.index_at(t)?;
-        (track.start_of(si) == t).then_some(si)
+        // A blend ending here is part of this segment: the playhead is inside
+        // its effective span, not at its edge.
+        (!blend_ends_at(track, t) && track.start_of(si) == t).then_some(si)
     } else {
+        // A blend starting here is part of the segment ending here.
+        if blend_starts_at(track, t) {
+            return None;
+        }
         let mut acc = Seconds::from_integer(0);
         for (i, s) in track.segments.iter().enumerate() {
             acc += s.duration();

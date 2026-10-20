@@ -4503,6 +4503,28 @@ mod tests {
         assert_eq!(app.playhead, 3.0, "the cut the restore leaves");
     }
 
+    // A blend's far edge is not the neighbour's edge: `o` at the blend's end
+    // and `i` at its start must not collapse the neighbour into a gap — they
+    // are no-ops, in both directions and with or without ripple.
+    #[test]
+    fn trimming_at_a_blends_far_edge_spares_the_neighbour() {
+        let fake = FakeMpv::new();
+        // blend_pair(): C1 0..2 · blend [2,3) · C2 3..5.
+        for (k, pos) in [('o', 3.0), ('O', 3.0), ('i', 2.0), ('I', 2.0)] {
+            let mut app = App::new(blend_pair(), temp_project_path("blend-far"));
+            app.loaded = true;
+            app.playhead = pos;
+            let before = app.project.timeline.tracks[0].segments.clone();
+            handle_key(&mut app, &fake, key(k));
+            assert_eq!(
+                app.project.timeline.tracks[0].segments, before,
+                "{k} at {pos} must not change the track: {}",
+                app.message
+            );
+            assert!(app.message.contains("nothing to trim"), "{}", app.message);
+        }
+    }
+
     #[test]
     fn track_labels_number_within_kind() {
         let mut p = asset_project();
