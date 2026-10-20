@@ -33,7 +33,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   diagnostics: `nle edit --dump [--dump-size 100x30] [--dump-keys "llx"]`
 #              renders the TUI once (no mpv), feeds the keys, and prints the
 #              state + grid with a column ruler — for reporting a rendering or
-#              playhead question without a screenshot
+#              playhead question without a screenshot. Read-only: it runs on a
+#              copy, so a dump never changes the project it diagnoses
 #   transport: space play/pause · h/l ±1s · H/L ±5s · f/F frame step
 #   motion:    j/k next/prev cut · w/b next/prev clip · n/N next/prev gap
 #              gg/G/0 ends · < / > (, / .) clip start/end · 3l = 3s (counts)

@@ -602,15 +602,43 @@ impl Mpv for NullMpv {
     fn set_media_title(&self, _title: &str) {}
 }
 
-/// Render the TUI once at `size` and return a text dump: the model state (as
-/// `nle show` prints it), then the grid with a column ruler. Feed `keys`
-/// first (`\n` = Enter, `\e` = Esc) to reach a state, so a rendering or
-/// placement question can be answered from the dump, not a screenshot.
+/// Render the TUI once at `size` and return a text dump: the project path and
+/// model state (as `nle show` prints it), then the grid with a column ruler.
+/// Feed `keys` first (`\n` = Enter, `\e` = Esc) to reach a state.
+///
+/// The keys run through the real handlers, which save the project, the undo
+/// sidecar, and the register — so the dump runs on a temp **copy** of all
+/// three: a diagnostic must never touch what it is diagnosing (a dump with an
+/// editing key used to rewrite the project you were looking at).
 pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> String {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let mut app = App::new(project, path);
+    // A private scratch dir: the keys run through the real handlers, which
+    // save, so everything must land somewhere disposable.
+    let nanos = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("nle-dump-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    let copy = dir.join(
+        path.file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("dump.json")),
+    );
+    project.save(&copy).expect("save the dump copy");
+    // Bring the session state along (undo depth, the register) so the dump
+    // shows the same thing, but every save lands in the scratch dir.
+    for sidecar in [
+        nle_core::edit::History::sidecar_path(&path),
+        path.with_extension("clipboard.json"),
+    ] {
+        if let (Ok(bytes), Some(name)) = (std::fs::read(&sidecar), sidecar.file_name()) {
+            let _ = std::fs::write(dir.join(name), bytes);
+        }
+    }
+
+    let mut app = App::new(project, copy);
     // The handlers guard on this (mpv "loaded"); the dump has no monitor.
     app.loaded = true;
     let player = NullMpv;
@@ -627,7 +655,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     term.draw(|f| render(f, &app)).expect("a draw");
     let buf = term.backend().buffer();
 
-    let mut out = String::new();
+    let mut out = format!("project: {}\n", path.display());
     out.push_str(&crate::show_report(&app.project));
     out.push_str(&format!(
         "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {}\nmessage: {:?}\n",
@@ -665,6 +693,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
             .collect();
         out.push_str(&format!("{y:>3} {row}\n"));
     }
+    let _ = std::fs::remove_dir_all(&dir);
     out
 }
 
@@ -4523,6 +4552,33 @@ mod tests {
             );
             assert!(app.message.contains("nothing to trim"), "{}", app.message);
         }
+    }
+
+    // The dump is read-only: it runs on a copy, so an editing key changes
+    // nothing in the source project and a second dump sees the same model.
+    #[test]
+    fn the_dump_does_not_touch_the_project() {
+        let path = temp_project_path("dump-ro");
+        asset_project().save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // `lllx` creates a blend at the 3 s cut — an edit that saves.
+        let first = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "lllx");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the source project is untouched"
+        );
+        let second = dump(Project::load(&path).unwrap(), path.clone(), (40, 8), "lllx");
+        let model = |s: &str| s.lines().nth(1).unwrap_or_default().to_string();
+        assert_eq!(
+            model(&first),
+            model(&second),
+            "the second dump starts from the same model"
+        );
+        assert!(
+            first.starts_with(&format!("project: {}\n", path.display())),
+            "the dump names what it diagnosed:\n{first}"
+        );
     }
 
     #[test]

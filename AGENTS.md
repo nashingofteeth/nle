@@ -107,13 +107,16 @@ plainly.
 
 `nle edit --dump [--dump-size WxH] [--dump-keys KEYS]` renders the TUI **once**
 (no mpv needed), feeds `KEYS` first (`\n` = Enter, `\e` = Esc), and prints the
-model state (`nle show`'s summary + mode, active track, playhead in seconds
-and frames, paused/eof, the message) followed by the grid with a **column
-ruler**. A rendering, layout, or playhead-placement question can then be
-answered from the dump instead of a screenshot — say *"dump `x` at 100x30 on
-the demo project"* and the answer is one command. The same path backs the
-render tests (`ratatui::backend::TestBackend`), so the dump and the tests see
-the identical grid.
+project path, the model state (`nle show`'s summary + mode, active track,
+playhead in seconds and frames, paused/eof, the message) and the grid with a
+**column ruler**. A rendering, layout, or playhead-placement question can then
+be answered from the dump instead of a screenshot — say *"dump `x` at 100x30 on
+the demo project"* and the answer is one command. **The dump is read-only:** the
+keys run through the real handlers (which save), so it works on a scratch copy
+of the project + undo sidecar + register and deletes it afterwards — it never
+touches the project it diagnoses. The same path backs the render tests
+(`ratatui::backend::TestBackend`), so the dump and the tests see the identical
+grid.
 
 ## Playhead anchoring after an action (settled rules)
 
