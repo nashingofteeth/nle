@@ -251,6 +251,16 @@ grid.
   to the blend's far end (`blend_far_end`), and the row draws the boundary as a
   bare colour change — a dotted box glyph sits mid-cell and reads misaligned
   against the left-aligned `▏`.
+- **A trim on a clip's visible span beside a blend moves the blend, not a
+  gap.** `o` on the preceding clip moves the blend's left edge, `i` on the
+  following clip its right: the visible span shrinks and the blend grows by
+  the same amount, so the timeline length is unchanged and `a`/`b` stay
+  contiguous at the neighbour's rate (`trim_beside_blend_on`). Growing needs
+  handle material (pre-roll before the following clip's in-point, post-roll
+  after the preceding clip's out-point); a shortage refuses with
+  `BlendNoHandle` (asset + shortfall) rather than writing a source before 0.
+  `I`/`O` keep the blend's `dur` and ripple: the side follows the new edge
+  and the shorter clip slides the blend and followers left.
 - **Every write path clamps clips to their media.** EDL import, OTIO import,
   `detect-edits` and `purge-stumps` all run `clamp_to_media`; a new import or
   write path must call `clamp_project_to_media`, or the model reads past EOF
