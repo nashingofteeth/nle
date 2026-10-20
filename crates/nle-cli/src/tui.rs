@@ -15,16 +15,17 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
+#[cfg(test)]
+use nle_core::Batch;
+use nle_core::EditError;
 use nle_core::action::{self, Action, Edge, GapLen, ParseDefaults, ParseError, Target};
 #[cfg(test)]
 use nle_core::edit;
-use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
+use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind, TransitionKind};
 use nle_core::{
     Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_of,
     frame_to_secs, gap_span, load_register, plan_commit, resolve_armed, save_register, track_label,
 };
-#[cfg(test)]
-use nle_core::{Batch, EditError};
 
 use crate::mpv::{Mpv, PlaybackState};
 use crate::preview;
@@ -241,6 +242,7 @@ pub enum Mode {
     Command(String),
     Extend(ExtendState),
     Pool(PoolState),
+    Fx(FxState),
 }
 
 /// Extend-mode session state. All bounds are timeline seconds; `hi` is
@@ -268,6 +270,15 @@ pub struct PoolState {
     pub sel: usize,
     pub pos: f64,
     pub resume: f64,
+}
+
+/// Effects-panel state: the clip whose effects are listed and the row under
+/// the cursor. A `Mode` variant so "panel is open" and its target can't
+/// drift apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FxState {
+    pub clip: u32,
+    pub sel: usize,
 }
 
 /// Which two-key sequence is waiting for its second keystroke (`gg`, `dd`, `yy`).
@@ -351,6 +362,10 @@ pub struct App {
     /// timeline back on the monitor, or the monitor keeps playing the pooled
     /// file while the UI shows the timeline.
     command_from_pool: bool,
+    /// The effects panel to return to after a `:` line opened from it
+    /// (`c`/`s`/`e`/`l`), plus the effect count when it opened: adding lands
+    /// the cursor on the new last row.
+    fx_return: Option<(FxState, usize)>,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -390,6 +405,7 @@ impl App {
             quit: false,
             message: String::new(),
             command_from_pool: false,
+            fx_return: None,
             paused: true,
             loaded: false,
             dead: false,
@@ -913,6 +929,50 @@ fn pool_resume(app: &App) -> f64 {
     }
 }
 
+fn is_fx(app: &App) -> bool {
+    matches!(app.mode, Mode::Fx(_))
+}
+
+/// A copy of the panel state: the handlers mutate `app` (and call
+/// `run_action`), so a `&mut FxState` borrow would collide with the rest.
+fn fx_state(app: &App) -> Option<FxState> {
+    match &app.mode {
+        Mode::Fx(st) => Some(*st),
+        _ => None,
+    }
+}
+
+fn set_fx_sel(app: &mut App, sel: usize) {
+    if let Mode::Fx(st) = &mut app.mode {
+        st.sel = sel;
+    }
+}
+
+/// Keep the cursor on a row after an edit shrank the list.
+fn clamp_fx_sel(app: &mut App) {
+    let Some(st) = fx_state(app) else { return };
+    let n = fx_clip(app).map_or(0, |c| c.effects.len());
+    set_fx_sel(app, st.sel.min(n.saturating_sub(1)));
+}
+
+/// The clip with `id` on any track — clip ids are unique across the timeline.
+fn clip_by_id(project: &Project, id: u32) -> Option<&Clip> {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|t| t.segments.iter())
+        .find_map(|seg| match seg {
+            TimelineSegment::Clip(c) if c.id == id => Some(c),
+            _ => None,
+        })
+}
+
+fn fx_clip(app: &App) -> Option<&Clip> {
+    let st = fx_state(app)?;
+    clip_by_id(&app.project, st.clip)
+}
+
 pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     if matches!(app.mode, Mode::Command(_)) {
         let buf = match std::mem::replace(&mut app.mode, Mode::Normal) {
@@ -924,6 +984,8 @@ pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         extend_key(app, player, key);
     } else if is_pool(app) {
         pool_key(app, player, key);
+    } else if is_fx(app) {
+        fx_key(app, player, key);
     } else {
         normal_key(app, player, key);
     }
@@ -1701,13 +1763,19 @@ fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
                 app.set_message(&msg);
             }
             if !quitting {
-                app.mode = Mode::Normal;
+                match app.fx_return.take() {
+                    Some((st, before)) => restore_fx(app, st, before),
+                    None => app.mode = Mode::Normal,
+                }
                 leave_pool_command(app, player);
             }
             // else: keep the command text visible while exiting
         }
         KeyCode::Esc => {
-            app.mode = Mode::Normal;
+            match app.fx_return.take() {
+                Some((st, before)) => restore_fx(app, st, before),
+                None => app.mode = Mode::Normal,
+            }
             leave_pool_command(app, player);
         }
         KeyCode::Backspace => {
@@ -1789,6 +1857,127 @@ fn track_ls_command(app: &App) -> String {
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// `X` — open the effects panel on the clip under the playhead. Effects are
+/// video filters, so an audio clip gets the model's own refusal.
+fn open_fx(app: &mut App) {
+    let Some(clip) = clip_under(&app.project, app.playhead, app.active()).cloned() else {
+        app.set_message("move the playhead onto a clip to see its effects");
+        return;
+    };
+    if app
+        .project
+        .timeline
+        .track(app.active())
+        .is_some_and(|t| t.kind != TrackKind::Video)
+    {
+        app.set_message(&crate::edit_message(&EditError::EffectsNeedVideo));
+        return;
+    }
+    app.mode = Mode::Fx(FxState {
+        clip: clip.id,
+        sel: 0,
+    });
+    app.set_message("effects");
+}
+
+/// Close the panel. Unlike the pool it hasn't moved the monitor, so there is
+/// nothing to reload.
+fn close_fx(app: &mut App) {
+    app.mode = Mode::Normal;
+    app.set_message("timeline");
+}
+
+/// Return to the panel after its `:` line, or to Normal if the clip is gone
+/// (a command may have deleted it). A command that added an effect lands the
+/// cursor on it.
+fn restore_fx(app: &mut App, st: FxState, before: usize) {
+    let Some(clip) = clip_by_id(&app.project, st.clip) else {
+        app.mode = Mode::Normal;
+        return;
+    };
+    let n = clip.effects.len();
+    let sel = if n > before {
+        n - 1
+    } else {
+        st.sel.min(n.saturating_sub(1))
+    };
+    app.mode = Mode::Fx(FxState { clip: st.clip, sel });
+}
+
+/// Open the `:` line for an effect kind, targeting the panel's clip
+/// explicitly (`--clip`) so a moved playhead can't retarget it.
+fn open_effect_command(app: &mut App, cmd: &str) {
+    let Some(st) = fx_state(app) else { return };
+    let before = fx_clip(app).map_or(0, |c| c.effects.len());
+    app.fx_return = Some((st, before));
+    app.mode = Mode::Command(format!("effect {cmd}--clip {} ", st.clip));
+}
+
+/// Effects panel keys: list motion, drop/clear, add (pre-filled `:` line),
+/// and undo.
+fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
+    let Some(st) = fx_state(app) else { return };
+    let Some(clip) = clip_by_id(&app.project, st.clip) else {
+        // The clip vanished (an undo of the insert that made it): leave.
+        close_fx(app);
+        return;
+    };
+    let n = clip.effects.len();
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('X') => close_fx(app),
+        KeyCode::Char('j') | KeyCode::Down => {
+            set_fx_sel(app, (st.sel + 1).min(n.saturating_sub(1)));
+        }
+        KeyCode::Char('k') | KeyCode::Up => set_fx_sel(app, st.sel.saturating_sub(1)),
+        KeyCode::Char('d') => {
+            if n == 0 {
+                app.set_message("no effects to drop");
+                return;
+            }
+            run_action(
+                app,
+                player,
+                &Action::RemoveEffect {
+                    track: app.active(),
+                    clip: st.clip,
+                    index: Some(st.sel.min(n - 1)),
+                },
+            );
+            clamp_fx_sel(app);
+        }
+        KeyCode::Char('D') => {
+            if n == 0 {
+                app.set_message("no effects to clear");
+                return;
+            }
+            run_action(
+                app,
+                player,
+                &Action::ClearEffects {
+                    track: app.active(),
+                    clip: st.clip,
+                },
+            );
+            set_fx_sel(app, 0);
+        }
+        // Adding opens the one existing grammar instead of a second
+        // parameter UI; Enter lands back on the list (`fx_return`).
+        KeyCode::Char('c') => open_effect_command(app, "crop "),
+        KeyCode::Char('s') => open_effect_command(app, "scale "),
+        KeyCode::Char('e') => open_effect_command(app, "eq "),
+        KeyCode::Char('l') => open_effect_command(app, "lut "),
+        KeyCode::Char('u') => {
+            do_undo(app, player);
+            clamp_fx_sel(app);
+        }
+        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            do_redo(app, player);
+            clamp_fx_sel(app);
+        }
+        _ => {}
+    }
 }
 
 fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
@@ -2010,6 +2199,8 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         }
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('m') => open_pool(app, player),
+        // `X` — the effects panel for the clip under the playhead.
+        KeyCode::Char('X') => open_fx(app),
         // `t`/`T` cycle the active track; `<N>t` jumps to track N (1-based).
         KeyCode::Char('t') => {
             let n = app.project.timeline.tracks.len();
@@ -3248,6 +3439,8 @@ fn render(f: &mut Frame, app: &App) {
     render_timeline(f, timeline, app);
     if is_pool(app) {
         render_pool(f, info, app);
+    } else if is_fx(app) {
+        render_fx(f, info, app);
     } else {
         render_info(f, info, app);
     }
@@ -3332,12 +3525,20 @@ fn hints_for(app: &App) -> Vec<&'static str> {
             "tracks     t/T target · <N>t jump · insert goes to the active track",
         ];
     }
+    if is_fx(app) {
+        return vec![
+            "effects — rows apply in order at export; the monitor re-renders",
+            "j/k select · d drop · D clear all · u undo · Ctrl-r redo",
+            "c crop · s scale · e eq · l lut · X/esc close",
+        ];
+    }
     vec![
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
         "motion     j/k cuts · w/b clips · n/N gaps · < > (, .) clip start/end",
         "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
         "           R speed · x transition · e/E extend · [ ] side · m pool",
         "extend     e/E enter · [ ] side · m pool · u undo · r reload · : cmd · q quit",
+        "effects    X panel · c/s/e/l add · d/D drop/clear (in the panel)",
         "tracks     t/T cycle · <N>t jump to N · :track add video|audio",
     ]
 }
@@ -3491,6 +3692,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             }
         }
         Mode::Pool(_) => "POOL".to_string(),
+        Mode::Fx(_) => "EFFECTS".to_string(),
     };
     let count = app.count.map(|c| format!("{c}")).unwrap_or_default();
 
@@ -3870,6 +4072,58 @@ fn paint_run(
     for cell in cells.iter_mut().take(col_b).skip(col_a) {
         *cell = (glyph, style);
     }
+}
+
+/// The effects panel takes over the info pane: one row per effect, in the
+/// order they apply at export. Adding opens the `:` line pre-filled, so
+/// parameters use the one existing grammar.
+fn render_fx(f: &mut Frame, area: Rect, app: &App) {
+    use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+    let st = fx_state(app);
+    let clip = fx_clip(app);
+    let title = clip
+        .map(|c| format!(" effects → clip #{} ", c.id))
+        .unwrap_or_else(|| " effects ".to_string());
+    let block = Block::bordered().title(title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let Some(clip) = clip else {
+        f.render_widget(
+            Paragraph::new("the clip is gone — esc to close")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    };
+    if clip.effects.is_empty() {
+        f.render_widget(
+            Paragraph::new("(no effects)   c crop · s scale · e eq · l lut")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+    let sel = st.map(|s| s.sel);
+    let items: Vec<ListItem> = clip
+        .effects
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let style = if sel == Some(i) {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:>2}  ", i + 1), style),
+                Span::styled(format!("{:<6}", e.kind()), style),
+                Span::styled(e.details(), style),
+            ]))
+        })
+        .collect();
+    let mut list_state = ListState::default();
+    list_state.select(sel);
+    f.render_stateful_widget(List::new(items), inner, &mut list_state);
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
@@ -7240,6 +7494,192 @@ mod tests {
         handle_key(&mut app, &fake, key('u'));
         assert_eq!(app.project.media.len(), 2, "undo restored the spare");
         assert!(app.project.asset(spare).is_some());
+    }
+
+    /// Give one clip an explicit effect list (the panel tests don't need the
+    /// edit path; `d`/`D`/undo are what they exercise).
+    fn set_effects(app: &mut App, clip: u32, effects: Vec<nle_core::timeline::Effect>) {
+        for track in &mut app.project.timeline.tracks {
+            for seg in &mut track.segments {
+                if let TimelineSegment::Clip(c) = seg
+                    && c.id == clip
+                {
+                    c.effects = effects.clone();
+                }
+            }
+        }
+    }
+
+    // `X` opens the panel on the clip under the playhead; a gap or an audio
+    // clip is refused with a message instead of an empty panel.
+    #[test]
+    fn x_opens_the_effects_panel_on_the_clip_under_the_playhead() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("fx-open"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('X'));
+        assert!(is_fx(&app));
+        assert_eq!(
+            fx_state(&app),
+            Some(FxState { clip: 1, sel: 0 }),
+            "clip #1 is under the playhead"
+        );
+        assert_eq!(app.message, "effects");
+
+        let mut app = App::new(asset_project(), temp_project_path("fx-gap"));
+        app.loaded = true;
+        app.playhead = 4.0; // the gap between the clips
+        handle_key(&mut app, &fake, key('X'));
+        assert!(!is_fx(&app));
+        assert!(app.message.contains("onto a clip"), "{}", app.message);
+
+        let mut p = asset_project();
+        let ai = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ai].segments = vec![TimelineSegment::Clip(nle_core::Clip::new(
+            9,
+            1,
+            Seconds::from_integer(0),
+            Seconds::from_integer(2),
+        ))];
+        let mut app = App::new(p, temp_project_path("fx-audio"));
+        app.loaded = true;
+        app.active_track = ai;
+        app.playhead = 0.5;
+        handle_key(&mut app, &fake, key('X'));
+        assert!(!is_fx(&app));
+        assert!(app.message.contains("video clips"), "{}", app.message);
+    }
+
+    // `j`/`k` move the row cursor; `d` drops that row (one undo step) and the
+    // cursor clamps onto the surviving list.
+    #[test]
+    fn effects_panel_drops_the_selected_row_and_undo_restores_it() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("fx-drop"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        let scale = nle_core::timeline::Effect::Scale { w: 2, h: 2 };
+        let crop = nle_core::timeline::Effect::Crop {
+            x: 0,
+            y: 0,
+            w: 3,
+            h: 3,
+        };
+        set_effects(&mut app, 1, vec![scale.clone(), crop.clone()]);
+
+        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('j'));
+        assert_eq!(fx_state(&app).unwrap().sel, 1);
+        handle_key(&mut app, &fake, key('d'));
+        assert_eq!(fx_clip(&app).unwrap().effects, vec![scale.clone()]);
+        assert_eq!(fx_state(&app).unwrap().sel, 0, "the cursor clamps");
+        assert!(app.history.can_undo());
+
+        handle_key(&mut app, &fake, key('u'));
+        assert_eq!(fx_clip(&app).unwrap().effects, vec![scale, crop]);
+        assert!(is_fx(&app), "undo keeps the panel open");
+    }
+
+    // `D` drops every effect in one batch; one undo brings them all back.
+    #[test]
+    fn effects_panel_clear_is_one_undo_step() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("fx-clear"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        let eff = nle_core::timeline::Effect::Eq {
+            brightness: 0.5,
+            contrast: 1.0,
+            saturation: 1.0,
+        };
+        set_effects(&mut app, 1, vec![eff.clone(), eff.clone()]);
+        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('D'));
+        assert!(fx_clip(&app).unwrap().effects.is_empty());
+        handle_key(&mut app, &fake, key('u'));
+        assert_eq!(fx_clip(&app).unwrap().effects, vec![eff.clone(), eff]);
+    }
+
+    // Adding from the panel opens the `:` line pre-filled with `--clip`, and
+    // Enter lands back on the list with the cursor on the appended row.
+    #[test]
+    fn effects_panel_add_returns_to_the_list_on_the_new_row() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("fx-add"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        set_effects(
+            &mut app,
+            1,
+            vec![nle_core::timeline::Effect::Scale { w: 2, h: 2 }],
+        );
+        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('e'));
+        assert!(
+            matches!(&app.mode, Mode::Command(c) if c == "effect eq --clip 1 "),
+            "{:?}",
+            app.mode
+        );
+        for c in "--brightness 0.5".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        assert!(is_fx(&app), "the panel comes back");
+        assert_eq!(fx_clip(&app).unwrap().effects.len(), 2);
+        assert_eq!(fx_state(&app).unwrap().sel, 1, "on the new row");
+    }
+
+    // The panel renders the kind + parameters, and says how to add when the
+    // clip has none.
+    #[test]
+    fn the_effects_panel_shows_rows_or_an_empty_hint() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        set_effects(
+            &mut app,
+            1,
+            vec![
+                nle_core::timeline::Effect::Crop {
+                    x: 2,
+                    y: 4,
+                    w: 160,
+                    h: 120,
+                },
+                nle_core::timeline::Effect::Eq {
+                    brightness: 0.1,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                },
+            ],
+        );
+        app.mode = Mode::Fx(FxState { clip: 1, sel: 1 });
+        let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        term.draw(|f| render_fx(f, f.area(), &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..8u16)
+            .map(|y| (0..60u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("effects → clip #1"), "{text}");
+        assert!(text.contains("160×120 at 2,4"), "{text}");
+        assert!(text.contains("b 0.1 · c 1 · s 1"), "{text}");
+
+        app.mode = Mode::Fx(FxState { clip: 2, sel: 0 });
+        let mut term = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        term.draw(|f| render_fx(f, f.area(), &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..6u16)
+            .map(|y| (0..60u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("no effects"), "{text}");
     }
 
     // `t`/`T` change the insert target while the pool is open, without
