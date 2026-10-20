@@ -1422,8 +1422,16 @@ pub(crate) fn show_report(project: &Project) -> String {
                     } else {
                         String::new()
                     };
+                    // A clip's effects apply in list order; show the kinds
+                    // (the parameters are one `X` away in the panel).
+                    let fx = if clip.effects.is_empty() {
+                        String::new()
+                    } else {
+                        let kinds: Vec<&str> = clip.effects.iter().map(|e| e.kind()).collect();
+                        format!("  · fx: {}", kinds.join(", "))
+                    };
                     out += &format!(
-                        "    [{si}] #{:<4}{:>9} – {:<9} {}{speed}  (src {}–{})\n",
+                        "    [{si}] #{:<4}{:>9} – {:<9} {}{speed}  (src {}–{}){fx}\n",
                         clip.id,
                         format_seconds(&start),
                         format_seconds(&end),
@@ -2723,6 +2731,37 @@ mod tests {
             seen[s] = true;
         }
         assert!(seen.iter().all(|&s| s), "CLI-unreachable actions: {seen:?}");
+    }
+
+    // `nle show` names a clip's effects, in the order the export applies
+    // them, so a shell-only session can see what is on a clip.
+    #[test]
+    fn show_report_names_a_clips_effects() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset(
+            "/media/red.mp4".into(),
+            nle_core::media::RawProbe::default(),
+        );
+        p.timeline.video_track_mut().unwrap().segments = vec![Segment::Clip(Clip {
+            id: 1,
+            asset: a,
+            asset_in: Seconds::from_integer(0),
+            asset_out: Seconds::from_integer(2),
+            speed: Seconds::from_integer(1),
+            effects: vec![
+                nle_core::timeline::Effect::Eq {
+                    brightness: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                },
+                nle_core::timeline::Effect::Lut {
+                    path: "/luts/warm.cube".into(),
+                },
+            ],
+        })];
+        let report = show_report(&p);
+        assert!(report.contains("· fx: eq, lut"), "{report}");
     }
 
     #[test]

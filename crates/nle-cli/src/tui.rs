@@ -3889,6 +3889,13 @@ fn track_parts(project: &Project, track: &Track, total: f64) -> Vec<(f64, String
                         .asset(c.asset)
                         .and_then(|a| a.path.file_name().map(|n| n.to_string_lossy().into_owned()))
                         .unwrap_or_else(|| format!("#{}", c.id));
+                    // `*` marks a clip with effects — a suffix would be cut
+                    // off on a narrow cell, a prefix survives.
+                    let name = if c.effects.is_empty() {
+                        name
+                    } else {
+                        format!("*{name}")
+                    };
                     (
                         secs(&c.duration()),
                         name,
@@ -4932,6 +4939,23 @@ mod tests {
         assert!((dur - 5.0).abs() < 1e-9, "{dur}");
         // A track that already reaches the end gains nothing.
         assert_eq!(track_parts(&p, &p.timeline.tracks[0], 7.0).len(), 3);
+    }
+
+    // A clip with effects is marked in the row; the prefix survives a narrow
+    // cell, where a suffix would be truncated away.
+    #[test]
+    fn a_clip_with_effects_is_marked_in_the_track_row() {
+        let mut p = asset_project();
+        if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[0].segments[0] {
+            c.effects = vec![nle_core::timeline::Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }];
+        }
+        let parts = track_parts(&p, &p.timeline.tracks[0], 7.0);
+        assert_eq!(parts[0].1, "*red.mp4", "{parts:?}");
+        assert_eq!(parts[1].1, "gap", "only the clip is marked");
     }
 
     // The panel is sized so every track fits; the bottom panels are dropped
