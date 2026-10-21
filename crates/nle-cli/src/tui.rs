@@ -2033,7 +2033,7 @@ fn apply_fx_form(app: &mut App, player: &dyn Mpv) {
             return;
         }
     };
-    run_action(
+    let added = run_action(
         app,
         player,
         &Action::AddEffect {
@@ -2042,10 +2042,12 @@ fn apply_fx_form(app: &mut App, player: &dyn Mpv) {
             effect,
         },
     );
-    let n = fx_clip(app).map_or(0, |c| c.effects.len());
-    set_fx_form(app, None);
-    if n > 0 {
-        set_fx_sel(app, n - 1);
+    // Applying is the end of the gesture: leave the panel, keeping the
+    // action's notice ("effect on clip #N"). A refused value never reaches
+    // here, so the form stays open only while there is something to fix.
+    if added {
+        set_fx_form(app, None);
+        app.mode = Mode::Normal;
     }
 }
 
@@ -3842,7 +3844,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         if fx_state(app).is_some_and(|st| st.form.is_some()) {
             return vec![
                 "new effect — type in the focused field, tab/↑↓ moves",
-                "enter next · enter on last applies · ctrl-u clears · esc cancels",
+                "enter next · enter on last applies and closes · ctrl-u clears · esc cancels",
             ];
         }
         return vec![
@@ -4492,7 +4494,7 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
         .collect();
     lines.push(Line::from(""));
     lines.push(
-        Line::from("tab/↑↓ field · enter next · enter on last applies · esc cancels")
+        Line::from("tab/↑↓ field · enter next · enter on last applies and closes · esc cancels")
             .style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(Paragraph::new(lines), area);
@@ -8075,10 +8077,9 @@ mod tests {
     }
 
     // Adding from the panel asks for the values in labelled fields, refuses a
-    // missing required one, then lands back on the list with the cursor on the
-    // appended row.
+    // missing required one, and exits the panel once the effect lands.
     #[test]
-    fn effects_panel_form_takes_values_and_returns_to_the_list() {
+    fn effects_panel_form_takes_values_and_exits() {
         let fake = FakeMpv::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
@@ -8118,17 +8119,24 @@ mod tests {
         handle_key(&mut app, &fake, enter); // → y (pre-filled 50)
         handle_key(&mut app, &fake, enter); // apply
 
-        assert!(is_fx(&app), "the panel comes back");
-        assert!(fx_state(&app).unwrap().form.is_none());
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "applying exits the panel: {:?}",
+            app.mode
+        );
+        assert!(
+            app.message.starts_with("effect on clip #1"),
+            "the action's notice stays: {}",
+            app.message
+        );
         assert_eq!(
-            fx_clip(&app).unwrap().effects.last(),
+            clip_by_id(&app.project, 1).effects.last(),
             Some(&Effect::Crop {
                 scale: 50.0,
                 x: 50.0,
                 y: 50.0
             })
         );
-        assert_eq!(fx_state(&app).unwrap().sel, 1, "on the new row");
     }
 
     // `e` opens the `eq` form with the neutral defaults; enter through them
@@ -8147,13 +8155,14 @@ mod tests {
         }
         handle_key(&mut app, &fake, enter);
         assert_eq!(
-            fx_clip(&app).unwrap().effects.last(),
+            clip_by_id(&app.project, 1).effects.last(),
             Some(&Effect::Eq {
                 brightness: 0.0,
                 contrast: 1.0,
                 saturation: 1.0
             })
         );
+        assert!(matches!(app.mode, Mode::Normal));
     }
 
     // The panel renders the kind + parameters, and says how to add when the

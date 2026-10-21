@@ -61,9 +61,10 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              track (the timeline draws one row per track)
 #   fx:        x effects panel for the clip under the playhead — j/k select ·
 #              d drop · D clear · c/s/e/l add crop/scale/eq/lut (labelled
-#              fields: tab/↑↓ move, enter next/apply, ctrl-u clears, esc
-#              cancels) · u undo · q/esc close; `*` marks a clip with effects
-#              in the row and `nle show` lists them in order ·
+#              fields: tab/↑↓ move, enter next, enter on the last applies and
+#              closes the panel, ctrl-u clears, esc cancels) · u undo · q/esc
+#              close; `*` marks a clip with effects in the row and `nle show`
+#              lists them in order ·
 #              X cross-dissolve at the boundary (count = frames); `xx` also
 #              works — the first x opens the panel, the second applies it ·
 #              :transition [dissolve|fade] [--dur T|--frames N] ·
