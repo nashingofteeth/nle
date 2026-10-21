@@ -81,7 +81,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :delete|--yank [--at T|--clip N|--seg N] · :paste [--ripple] ·
 #              :extend --edge in|out --to T [--ripple] · :speed RATE (or R) ·
 #              :transition · :effect [rm|clear] · :undo · :redo · :purge · :track … ·
-#              :media ls|rm · :import ·
+#              :media ls|rm · :cache prune [--days N] [--dry-run] · :import ·
 #              :add · :show · :seek T · :export -o FILE · :detect FILE ·
 #              :edl-import · :otio-import · :help · :q quit
 #              (--at defaults to the playhead, --track to the active track)
