@@ -5,6 +5,7 @@
 //! command line. Playback keys are sent to mpv; state flows back through
 //! the reader thread and is rendered on the next tick (~20fps redraw).
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -446,6 +447,9 @@ pub struct App {
     preview_enabled: bool,
     /// Progress for the status row while `preview` runs.
     pub preview_progress: Option<PreviewProgress>,
+    /// When the status-bar crocodile's mouth is open — a delete just removed
+    /// material from the timeline. `None`/past means closed.
+    chomp_until: Option<Instant>,
     /// Session files as we last read/wrote them (see [`Seen`]).
     seen: Seen,
     /// A foreign change arrived while a mode held state; reload when back
@@ -481,6 +485,7 @@ impl App {
             preview_dirty: false,
             preview_enabled: false,
             preview_progress: None,
+            chomp_until: None,
             seen: Seen::default(),
             reload_pending: false,
         };
@@ -3025,7 +3030,46 @@ fn trim_key(
 /// `:cmd`: apply through the undo history, reanchor the playhead, persist,
 /// refresh the monitor. Returns whether it applied (the action set its own
 /// notice either way).
+/// What a delete can take away: clip/transition ids and the segment count.
+/// `dd` on a clip leaves a gap (the count stays), so ids are needed; deleting
+/// a gap keeps the ids, so the count is needed too.
+struct TimelineStamp {
+    ids: HashSet<u32>,
+    segments: usize,
+}
+
+fn timeline_stamp(project: &Project) -> TimelineStamp {
+    let mut stamp = TimelineStamp {
+        ids: HashSet::new(),
+        segments: 0,
+    };
+    for track in &project.timeline.tracks {
+        for seg in &track.segments {
+            stamp.segments += 1;
+            match seg {
+                TimelineSegment::Clip(c) => {
+                    stamp.ids.insert(c.id);
+                }
+                TimelineSegment::Transition(t) => {
+                    stamp.ids.insert(t.id);
+                }
+                TimelineSegment::Gap(_) => {}
+            }
+        }
+    }
+    stamp
+}
+
+/// Did an edit remove material? A clip/transition id vanished, or the segment
+/// count fell. Trims that only shorten, splits, and inserts don't.
+fn removed_material(before: &TimelineStamp, after: &TimelineStamp) -> bool {
+    after.segments < before.segments || before.ids.iter().any(|id| !after.ids.contains(id))
+}
+
 fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
+    // What the timeline holds before the edit — a removal opens the crocodile's
+    // mouth in the status row (the chomp is transient, not a message).
+    let stamp = timeline_stamp(&app.project);
     // Keep the playhead on the frame it was showing, not the same
     // timecode (a trim can move material under it). Undo/redo carry their
     // own restore position; an extend commit is made from the armed edge,
@@ -3066,6 +3110,9 @@ fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
                     app.playhead = app.playhead.clamp(0.0, app.last_frame());
                 }
                 None => {}
+            }
+            if outcome.changed && removed_material(&stamp, &timeline_stamp(&app.project)) {
+                app.chomp_until = Some(Instant::now() + Duration::from_millis(CHOMP_MS));
             }
             app.set_message(&outcome.desc);
             // The register is shared with the CLI (`nle yank`/`nle paste`).
@@ -4100,6 +4147,19 @@ fn asset_metadata(a: &nle_core::Asset) -> Vec<String> {
     out
 }
 
+/// The status-bar mark: a crocodile. `=` is the closed mouth; a delete opens
+/// it to `>` for a moment (`CHOMP_MS`), then it closes again.
+const CROC: &str = r#"=";::;>--"#;
+const CHOMP: &str = r#">";::;>--"#;
+const CHOMP_MS: u64 = 140;
+
+fn logo(app: &App) -> &'static str {
+    match app.chomp_until {
+        Some(until) if Instant::now() < until => CHOMP,
+        _ => CROC,
+    }
+}
+
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let name = app
         .path
@@ -4157,7 +4217,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         };
         let fs = app.project.media.get(sel).and_then(|a| a.fps());
         let line = Line::from(vec![
-            Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!(" {} ", logo(app)),
+                style.add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!(" {name} · "), style),
             Span::styled(
                 fmt_timecode(pos, fs.as_ref()),
@@ -4171,7 +4234,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let mut spans = vec![
-        Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!(" {} ", logo(app)),
+            style.add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!(" {name} · "), style),
         Span::styled(
             fmt_timecode(app.playhead, app.project.fps.as_ref()),
@@ -7936,6 +8002,16 @@ mod tests {
         dir.join("t.json")
     }
 
+    /// One rendered status row, as text (colors are not asserted).
+    fn status_row(app: &App) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(100, 1)).unwrap();
+        term.draw(|f| render_status(f, f.area(), app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..100u16).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
     #[test]
     fn switching_track_keeps_the_composite_monitor() {
         let mut p = asset_project();
@@ -8126,16 +8202,8 @@ mod tests {
     // edit is waiting.
     #[test]
     fn the_status_row_shows_preview_progress() {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        let row = |app: &App| -> String {
-            let mut term = Terminal::new(TestBackend::new(100, 1)).unwrap();
-            term.draw(|f| render_status(f, f.area(), app)).unwrap();
-            let buf = term.backend().buffer().clone();
-            (0..100u16).map(|x| buf[(x, 0)].symbol()).collect()
-        };
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        let before = row(&app);
+        let before = status_row(&app);
         assert!(!before.contains("proxies"), "{before}");
 
         app.preview_progress = Some(PreviewProgress {
@@ -8143,17 +8211,92 @@ mod tests {
             total: 3,
             frac: 0.5,
         });
-        let mid = row(&app);
+        let mid = status_row(&app);
         assert!(mid.contains("proxies 1/3 · 50%"), "{mid}");
 
         app.preview_dirty = true;
-        let queued = row(&app);
+        let queued = status_row(&app);
         assert!(queued.contains("50% · queued"), "{queued}");
 
         // Before the plan counts its renders, it says it is building.
         app.preview_progress = Some(PreviewProgress::default());
-        let planning = row(&app);
+        let planning = status_row(&app);
         assert!(planning.contains("building preview"), "{planning}");
+    }
+
+    // The status mark is a crocodile; deleting material opens its mouth for a
+    // moment, then it closes (time-based, so there is no extra mode/state).
+    #[test]
+    fn the_crocodile_chomps_when_material_is_removed() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("chomp-clip"));
+        app.loaded = true;
+        let closed = status_row(&app);
+        assert!(closed.contains(r#"=";::;>--"#), "{closed}");
+
+        // `dd` on clip #1 leaves a gap: the clip id vanishes, the count does
+        // not — the stamp looks at both.
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('d'));
+        handle_key(&mut app, &fake, key('d'));
+        assert!(app.chomp_until.is_some(), "a delete opens the mouth");
+        let open = status_row(&app);
+        assert!(open.contains(r#">";::;>--"#), "{open}");
+
+        // Deleting a gap has no id to lose, but the segment count falls.
+        let mut app = App::new(asset_project(), temp_project_path("chomp-gap"));
+        app.loaded = true;
+        app.playhead = 4.0; // the gap
+        handle_key(&mut app, &fake, key('d'));
+        handle_key(&mut app, &fake, key('d'));
+        assert!(app.chomp_until.is_some(), "a gap delete chomps too");
+
+        // After the window it is closed again.
+        app.chomp_until = Some(Instant::now() - Duration::from_millis(1));
+        let row = status_row(&app);
+        assert!(row.contains(r#"=";::;>--"#), "{row}");
+        assert!(!row.contains(r#">";::;>--"#), "{row}");
+    }
+
+    // Shortening trims and splits don't remove material, so no chomp.
+    #[test]
+    fn a_trim_or_split_does_not_chomp() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("chomp-trim"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('o'));
+        assert!(app.chomp_until.is_none(), "{}", app.message);
+
+        let mut app = App::new(asset_project(), temp_project_path("chomp-split"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('s'));
+        assert!(app.chomp_until.is_none(), "{}", app.message);
+    }
+
+    #[test]
+    fn the_removal_stamp_sees_gaps_and_clips() {
+        let stamp = |ids: &[u32], segments| TimelineStamp {
+            ids: ids.iter().copied().collect(),
+            segments,
+        };
+        assert!(
+            removed_material(&stamp(&[1], 2), &stamp(&[1], 1)),
+            "a gap delete lowers the count"
+        );
+        assert!(
+            removed_material(&stamp(&[1], 2), &stamp(&[], 2)),
+            "a clip→gap keeps the count but loses the id"
+        );
+        assert!(
+            !removed_material(&stamp(&[1], 2), &stamp(&[1, 2], 3)),
+            "a split adds"
+        );
+        assert!(
+            !removed_material(&stamp(&[1], 2), &stamp(&[1], 2)),
+            "nothing changed"
+        );
     }
 
     // The worker's progress and completion: the EDL loads at the playhead in
