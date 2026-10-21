@@ -4151,7 +4151,7 @@ fn asset_metadata(a: &nle_core::Asset) -> Vec<String> {
 /// it to `>` for a moment (`CHOMP_MS`), then it closes again.
 const CROC: &str = r#"=";::;>--"#;
 const CHOMP: &str = r#">";::;>--"#;
-const CHOMP_MS: u64 = 140;
+const CHOMP_MS: u64 = 250;
 
 fn logo(app: &App) -> &'static str {
     match app.chomp_until {
