@@ -859,3 +859,44 @@ fn cli_only_guards() {
         "an effect on an audio track is refused:\n{out}"
     );
 }
+
+// `nle cache prune` is the only thing that deletes proxy renders: age-based
+// on the file's mtime, and never implicit.
+#[test]
+fn cache_prune_is_explicit_and_age_based() {
+    use std::time::{Duration, SystemTime};
+
+    let s = Sandbox::new();
+    s.base();
+    let dir = s.cache_dir().join("nle").join("proxy");
+    fs::create_dir_all(&dir).unwrap();
+    let now = SystemTime::now();
+    let write = |name: &str, len: usize, age: Duration| {
+        let path = dir.join(name);
+        fs::write(&path, vec![0u8; len]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(now - age))
+            .unwrap();
+    };
+    write("aaaa.mp4", 100, Duration::from_secs(31 * 24 * 3600));
+    write("bbbb.mp4", 200, Duration::from_secs(3600));
+
+    // An ordinary command sweeps nothing: pruning is explicit.
+    s.ok(&["show"]);
+    assert!(dir.join("aaaa.mp4").exists(), "no implicit sweep");
+
+    let out = s.ok(&["cache", "prune", "--dry-run"]);
+    assert!(out.contains("would remove 1"), "{out}");
+    assert!(dir.join("aaaa.mp4").exists(), "a dry run deletes nothing");
+
+    let out = s.ok(&["cache", "prune"]);
+    assert!(out.contains("removed 1"), "{out}");
+    assert!(!dir.join("aaaa.mp4").exists(), "the old entry is gone");
+    assert!(dir.join("bbbb.mp4").exists(), "the young entry is kept");
+
+    let out = s.err(&["cache", "prune", "--days", "0"]);
+    assert!(out.contains("at least 1"), "0 days is refused:\n{out}");
+}

@@ -352,6 +352,11 @@ enum Cmd {
         #[command(subcommand)]
         action: TrackCmd,
     },
+    /// On-disk caches: prune old proxy renders (explicit, never automatic)
+    Cache {
+        #[command(subcommand)]
+        action: CacheCmd,
+    },
     /// Import a CMX3600 EDL, building a project from the listed media
     ImportEdl {
         /// The .edl file
@@ -524,6 +529,19 @@ enum MediaCmd {
     Rm {
         /// Asset id (from `nle media ls`)
         id: u32,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheCmd {
+    /// Delete proxy renders older than N days
+    Prune {
+        /// Maximum age in days (default 30)
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// List what would go; remove nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -925,6 +943,7 @@ fn main() -> Result<()> {
         Cmd::Track {
             action: TrackCmd::Ls,
         } => return cmd_track_ls(&cli.project),
+        Cmd::Cache { action } => return cmd_cache(action),
         Cmd::Media {
             action: MediaCmd::Ls,
         } => return cmd_media_ls(&cli.project),
@@ -1501,6 +1520,21 @@ fn cmd_track_ls(project_path: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn cmd_cache(action: &CacheCmd) -> Result<()> {
+    match action {
+        CacheCmd::Prune { days, dry_run } => {
+            if *days == 0 {
+                bail!("--days must be at least 1 (there is no --all)");
+            }
+            let max_age = std::time::Duration::from_secs(days.saturating_mul(86_400));
+            let report = proxy::prune(max_age, *dry_run)?;
+            let prefix = if *dry_run { "prune --dry-run" } else { "prune" };
+            say!("{prefix}: {}", report.summary(*dry_run));
+            Ok(())
+        }
+    }
 }
 
 /// Media extensions probed when importing a `--media` directory.

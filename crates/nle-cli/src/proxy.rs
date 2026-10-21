@@ -4,10 +4,17 @@
 //! segments are rendered once into `~/.cache/nle/proxy/<hash>.mp4` and the
 //! monitor plays the proxy instead of the raw source. The hash covers
 //! everything the render reads, so a change (or a replaced file) re-renders.
+//!
+//! An entry's mtime is when it was rendered (a cache hit does not touch it).
+//! Nothing sweeps on its own: `nle cache prune` / `:cache prune` deletes
+//! entries older than a chosen age, explicitly. A pruned proxy simply
+//! re-renders on the next play.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use nle_core::Project;
 use nle_core::Seconds;
@@ -68,6 +75,130 @@ pub fn proxy_cache_dir() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
     base.join("nle").join("proxy")
+}
+
+/// What one prune pass found.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    /// Entries deleted (with `dry_run`, that *would* be).
+    pub removed: usize,
+    /// Bytes freed by those entries.
+    pub bytes: u64,
+    /// Entries young enough to keep.
+    pub kept: usize,
+    /// Bytes they occupy.
+    pub kept_bytes: u64,
+    /// Entries the sweep could not remove (permissions, a vanished file).
+    /// Counted rather than fatal: one unreadable entry must not abort the
+    /// rest.
+    pub failed: usize,
+}
+
+impl PruneReport {
+    /// `removed 3 proxy renders (12.4 MB), kept 5 (230.1 MB)` — the line the
+    /// CLI prints and the TUI's notice shows.
+    pub fn summary(&self, dry_run: bool) -> String {
+        let mut s = format!(
+            "{} {} proxy render{} ({}), kept {} ({})",
+            if dry_run { "would remove" } else { "removed" },
+            self.removed,
+            if self.removed == 1 { "" } else { "s" },
+            human_bytes(self.bytes),
+            self.kept,
+            human_bytes(self.kept_bytes),
+        );
+        if self.failed > 0 {
+            s.push_str(&format!(", {} could not be removed", self.failed));
+        }
+        s
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    if mb >= 1.0 {
+        format!("{mb:.1} MB")
+    } else {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    }
+}
+
+/// Delete proxy renders older than `max_age` from the real cache directory.
+/// Explicit only — nothing calls this on a timer or on project open.
+pub fn prune(max_age: Duration, dry_run: bool) -> Result<PruneReport, ProxyError> {
+    prune_at(&proxy_cache_dir(), max_age, SystemTime::now(), dry_run)
+}
+
+/// The sweep itself, with the directory and the clock injected so tests can
+/// backdate entries instead of sleeping.
+///
+/// Scope is strict: only `<hash>.mp4` and a crashed render's
+/// `<hash>.tmp-<pid>.mp4` are candidates. The black filler files live in a
+/// sibling directory (`nle/black/`) and are never touched; neither is any
+/// other file that happens to share the directory.
+pub fn prune_at(
+    dir: &Path,
+    max_age: Duration,
+    now: SystemTime,
+    dry_run: bool,
+) -> Result<PruneReport, ProxyError> {
+    let mut report = PruneReport::default();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // No cache yet is not an error: there is nothing to prune.
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(report),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_entry_name(name) {
+            continue;
+        }
+        // `symlink_metadata`: never follow a link out of the cache.
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        // A future mtime (clock skew) counts as new, so it is kept.
+        let age = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .unwrap_or_default();
+        if age <= max_age {
+            report.kept += 1;
+            report.kept_bytes += meta.len();
+            continue;
+        }
+        if !dry_run && std::fs::remove_file(entry.path()).is_err() {
+            report.failed += 1;
+            continue;
+        }
+        report.removed += 1;
+        report.bytes += meta.len();
+    }
+    Ok(report)
+}
+
+/// A cache entry's name: `<hash>.mp4`, or a crashed render's
+/// `<hash>.tmp-<pid>.mp4`. The hash is written as `{hash:x}`, so it is 1–16
+/// hex digits; anything else in the directory is not ours to delete.
+fn is_entry_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".mp4") else {
+        return false;
+    };
+    let (hash, pid) = match stem.split_once(".tmp-") {
+        Some((hash, pid)) => (hash, Some(pid)),
+        None => (stem, None),
+    };
+    !hash.is_empty()
+        && hash.len() <= 16
+        && hash.bytes().all(|b| b.is_ascii_hexdigit())
+        && pid.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Everything the render depends on: the segment (effects, transition,
@@ -610,5 +741,96 @@ mod tests {
             proxy_hash(&p30, &a, 320, 240),
             "frame rate is part of the key"
         );
+    }
+
+    /// Write a cache entry of `len` bytes and stamp it `age` before `now`.
+    fn entry(dir: &Path, name: &str, len: usize, age: Duration, now: SystemTime) {
+        let path = dir.join(name);
+        std::fs::write(&path, vec![0u8; len]).unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(now - age))
+            .unwrap();
+    }
+
+    #[test]
+    fn prune_removes_old_entries_and_only_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let old = Duration::from_secs(31 * 24 * 3600);
+        let young = Duration::from_secs(24 * 3600);
+        entry(dir.path(), "abcd.mp4", 10, old, now);
+        entry(dir.path(), "beef.tmp-77.mp4", 5, old, now); // crashed render
+        entry(dir.path(), "cafe.mp4", 20, young, now);
+        entry(dir.path(), "notes.txt", 3, old, now); // not ours
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let r = prune_at(dir.path(), Duration::from_secs(30 * 24 * 3600), now, false).unwrap();
+        assert_eq!(r.removed, 2, "{r:?}");
+        assert_eq!(r.bytes, 15);
+        assert_eq!(r.kept, 1);
+        assert_eq!(r.kept_bytes, 20);
+        assert_eq!(r.failed, 0);
+        assert!(!dir.path().join("abcd.mp4").exists());
+        assert!(!dir.path().join("beef.tmp-77.mp4").exists());
+        assert!(dir.path().join("cafe.mp4").exists());
+        assert!(dir.path().join("notes.txt").exists());
+        assert!(dir.path().join("sub").is_dir());
+        assert!(
+            r.summary(false)
+                .starts_with("removed 2 proxy renders (0 KB)")
+        );
+    }
+
+    #[test]
+    fn a_dry_run_reports_without_removing() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let old = Duration::from_secs(31 * 24 * 3600);
+        entry(dir.path(), "abcd.mp4", 10, old, now);
+
+        let r = prune_at(dir.path(), Duration::from_secs(30 * 24 * 3600), now, true).unwrap();
+        assert_eq!((r.removed, r.bytes, r.kept), (1, 10, 0));
+        assert!(dir.path().join("abcd.mp4").exists(), "dry run keeps it");
+        assert!(r.summary(true).starts_with("would remove 1 proxy render"));
+    }
+
+    #[test]
+    fn pruning_a_missing_directory_is_an_empty_pass() {
+        let dir = tempfile::tempdir().unwrap().path().join("nope");
+        let r = prune_at(&dir, Duration::ZERO, SystemTime::now(), false).unwrap();
+        assert_eq!(r, PruneReport::default());
+    }
+
+    #[test]
+    fn a_future_mtime_counts_as_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        entry(
+            dir.path(),
+            "abcd.mp4",
+            4,
+            Duration::ZERO,
+            now + Duration::from_secs(60),
+        );
+        let r = prune_at(dir.path(), Duration::ZERO, now, false).unwrap();
+        assert_eq!((r.removed, r.kept), (0, 1), "clock skew keeps the entry");
+    }
+
+    #[test]
+    fn entry_names_are_narrow() {
+        for ok in ["a.mp4", "0123456789abcdef.mp4", "dead.tmp-1.mp4"] {
+            assert!(is_entry_name(ok), "{ok}");
+        }
+        for no in [
+            "notes.txt",
+            ".mp4",
+            "0123456789abcdef0.mp4", // 17 hex digits: not a u64 hash
+            "xyz.mp4",               // not hex
+            "dead.tmp-.mp4",
+            "dead.tmp-x.mp4",
+            "dead.mp4.bak",
+        ] {
+            assert!(!is_entry_name(no), "{no}");
+        }
     }
 }
