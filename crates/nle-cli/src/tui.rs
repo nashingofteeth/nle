@@ -1405,7 +1405,7 @@ fn remove_from_pool(app: &mut App, player: &dyn Mpv) {
 /// The `:` commands, shown by `:help` and in the Command-mode cheat-sheet.
 /// The edit commands are the CLI's, flag for flag (`--at` defaults to the
 /// playhead here).
-const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
+const COMMAND_HELP: &str = "commands — :trim-in|out · :split · :gap · :transition · :effect · :delete · :yank · :paste · :extend · :speed · :undo · :redo · :seek · :track · :media · :cache · :import · :add · :show · :purge · :detect · :edl-import · :otio-import · :export · :w · :q";
 
 /// `:import PATH…` — probe files and add them to the media pool. An
 /// out-of-band pool write, so it re-baselines the undo sidecar (a stale
@@ -1472,6 +1472,7 @@ fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
         "show" => Some(show_command(app)),
         "media" => Some(media_ls_command(app)),
         "track" => Some(track_ls_command(app)),
+        "cache" => cache_command(&mut f),
         "reload" => {
             app.reload_requested = true;
             None
@@ -2023,6 +2024,33 @@ fn track_ls_command(app: &App) -> String {
         })
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+/// `:cache prune [--days N] [--dry-run]` — delete old proxy renders. Not an
+/// edit: it touches no project state and has no undo.
+fn cache_command(f: &mut action::Flags) -> Option<String> {
+    const USAGE: &str = "usage: :cache prune [--days N] [--dry-run]";
+    let Some(verb) = f.positional() else {
+        return Some(USAGE.to_string());
+    };
+    if verb != "prune" {
+        return Some(format!("unknown cache command: {verb} — {USAGE}"));
+    }
+    let days = match f.take("days") {
+        Some(v) => match v.parse::<u64>() {
+            Ok(d) if d > 0 => d,
+            _ => return Some("--days expects a whole number of days (1 or more)".to_string()),
+        },
+        None => 30,
+    };
+    let dry_run = f.take_bool("dry-run");
+    if let Err(e) = f.finish(USAGE) {
+        return Some(e.to_string());
+    }
+    match crate::proxy::prune(Duration::from_secs(days * 86_400), dry_run) {
+        Ok(report) => Some(report.summary(dry_run)),
+        Err(e) => Some(format!("prune failed: {e}")),
+    }
 }
 
 /// The clip ending exactly at `t` — the left neighbour at a cut whose right
@@ -5893,6 +5921,19 @@ mod tests {
         poll_job(&mut app, &FakeMpv::new());
         assert_eq!(app.message, "✓ out.mp4");
         assert!(app.job.is_none(), "the job is done");
+    }
+
+    // `:cache prune` is an IO command, not an edit: it validates its
+    // arguments and never touches the project (so no undo entry).
+    #[test]
+    fn cache_prune_reports_usage_and_refuses_bad_arguments() {
+        let mut app = App::new(asset_project(), temp_project_path("cache"));
+        assert!(cmd(&mut app, "cache").contains("usage"));
+        assert!(cmd(&mut app, "cache nope").contains("unknown cache command"));
+        assert!(cmd(&mut app, "cache prune --days 0").contains("1 or more"));
+        assert!(cmd(&mut app, "cache prune --days soon").contains("1 or more"));
+        assert!(cmd(&mut app, "cache prune --week").contains("--week"));
+        assert!(!app.history.can_undo(), "pruning is not an edit");
     }
 
     // `:track rm N` takes the track's clips with it (no "empty it first").
