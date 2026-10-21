@@ -290,6 +290,12 @@ below.)
   crossfade isn't expressible). Elsewhere the monitor stays on raw sources:
   with opaque clips, fall-through *is* `overlay`. Bare `nle edl` prints the
   composite the monitor plays; `--track N` still previews one track.
+- **Cache pruning:** the cache only grows (every trim, retime, or effect mints
+  a new hash), so `nle cache prune [--days N] [--dry-run]` / `:cache prune`
+  deletes entries older than N days (default 30), by mtime — which is the
+  render time, since a hit does not touch it. Explicit: nothing sweeps on open
+  or on a timer; a pruned proxy simply re-renders. Only `<hash>.mp4` (and a
+  crashed render's temp) is a candidate, so `nle/black/` is never touched.
 - **Verified:** unit tests + real ffmpeg runs — a dissolve reads a ≈50%
   blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
   and `nle edl` renders and references the proxies.
