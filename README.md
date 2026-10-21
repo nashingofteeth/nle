@@ -144,7 +144,9 @@ $N yank --clip 3                       # into the shared register (TUI: yy)
 $N paste --at 5 --ripple               # from the register (TUI: p / P --ripple)
 $N extend --clip 3 --edge out --to 8   # move one edge (the extend-mode commit)
 $N extend --seg 4 --edge in --to 2 --ripple
-$N effect crop --clip 3 --w 160 --h 120 # x offset / y optional (--x/--y)
+$N effect crop --clip 3 --scale 50     # 50% of the frame, centred
+#   x/y place it in the leftover margin: 0 = left/top, 50 = centre,
+#   100 = right/bottom (percent; default 50)
 $N effect eq --clip 3 --brightness -0.2 # contrast/saturation default to 1
 $N effect rm --clip 3                  # drop the last effect (--index N picks)
 $N effect clear --clip 3               # drop them all (one undo step)
