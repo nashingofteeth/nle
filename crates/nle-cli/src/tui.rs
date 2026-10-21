@@ -18,11 +18,13 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 #[cfg(test)]
 use nle_core::Batch;
 use nle_core::EditError;
-use nle_core::action::{self, Action, Edge, GapLen, ParseDefaults, ParseError, Target};
+use nle_core::action::{
+    self, Action, Edge, EffectArgs, GapLen, ParseDefaults, ParseError, Target, effect_from_args,
+};
 #[cfg(test)]
 use nle_core::edit;
 use nle_core::timeline::{
-    Segment as TimelineSegment, Track, TrackKind, TransitionKind, TransitionSource,
+    Effect, Segment as TimelineSegment, Track, TrackKind, TransitionKind, TransitionSource,
 };
 use nle_core::{
     Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_of,
@@ -274,13 +276,42 @@ pub struct PoolState {
     pub resume: f64,
 }
 
-/// Effects-panel state: the clip whose effects are listed and the row under
-/// the cursor. A `Mode` variant so "panel is open" and its target can't
-/// drift apart.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Effects-panel state: the clip whose effects are listed, the row under the
+/// cursor, and the open "add effect" form (if any). A `Mode` variant so
+/// "panel is open" and its target can't drift apart.
+#[derive(Debug, Clone, PartialEq)]
 pub struct FxState {
     pub clip: u32,
     pub sel: usize,
+    pub form: Option<FxForm>,
+}
+
+/// A structured "add effect" form: one string per parameter. The values are
+/// typed into pre-labelled fields (no shell-style flags in the TUI), then
+/// handed to `effect_from_args` — the same parser the CLI uses — so the
+/// required fields and neutral defaults can't drift.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FxForm {
+    pub kind: &'static str,
+    pub fields: Vec<FxField>,
+    pub focus: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FxField {
+    pub label: &'static str,
+    pub value: String,
+    pub kind: FieldKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FieldKind {
+    /// Whole number (width/height/offsets).
+    Int,
+    /// Decimal (eq values; `-` is allowed).
+    Float,
+    /// A file path (any printable character).
+    Path,
 }
 
 /// Which two-key sequence is waiting for its second keystroke (`gg`, `dd`, `yy`).
@@ -364,10 +395,6 @@ pub struct App {
     /// timeline back on the monitor, or the monitor keeps playing the pooled
     /// file while the UI shows the timeline.
     command_from_pool: bool,
-    /// The effects panel to return to after a `:` line opened from it
-    /// (`c`/`s`/`e`/`l`), plus the effect count when it opened: adding lands
-    /// the cursor on the new last row.
-    fx_return: Option<(FxState, usize)>,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -407,7 +434,6 @@ impl App {
             quit: false,
             message: String::new(),
             command_from_pool: false,
-            fx_return: None,
             paused: true,
             loaded: false,
             dead: false,
@@ -663,6 +689,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     for k in keys.chars() {
         let code = match k {
             '\n' => KeyCode::Enter,
+            '\t' => KeyCode::Tab,
             '\x1b' => KeyCode::Esc,
             c => KeyCode::Char(c),
         };
@@ -937,16 +964,29 @@ fn is_fx(app: &App) -> bool {
 
 /// A copy of the panel state: the handlers mutate `app` (and call
 /// `run_action`), so a `&mut FxState` borrow would collide with the rest.
-fn fx_state(app: &App) -> Option<FxState> {
+fn fx_state(app: &App) -> Option<&FxState> {
     match &app.mode {
-        Mode::Fx(st) => Some(*st),
+        Mode::Fx(st) => Some(st),
+        _ => None,
+    }
+}
+
+fn fx_state_mut(app: &mut App) -> Option<&mut FxState> {
+    match &mut app.mode {
+        Mode::Fx(st) => Some(st),
         _ => None,
     }
 }
 
 fn set_fx_sel(app: &mut App, sel: usize) {
-    if let Mode::Fx(st) = &mut app.mode {
+    if let Some(st) = fx_state_mut(app) {
         st.sel = sel;
+    }
+}
+
+fn set_fx_form(app: &mut App, form: Option<FxForm>) {
+    if let Some(st) = fx_state_mut(app) {
+        st.form = form;
     }
 }
 
@@ -954,7 +994,8 @@ fn set_fx_sel(app: &mut App, sel: usize) {
 fn clamp_fx_sel(app: &mut App) {
     let Some(st) = fx_state(app) else { return };
     let n = fx_clip(app).map_or(0, |c| c.effects.len());
-    set_fx_sel(app, st.sel.min(n.saturating_sub(1)));
+    let sel = st.sel.min(n.saturating_sub(1));
+    set_fx_sel(app, sel);
 }
 
 /// The clip with `id` on any track — clip ids are unique across the timeline.
@@ -1765,19 +1806,13 @@ fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: KeyEvent) {
                 app.set_message(&msg);
             }
             if !quitting {
-                match app.fx_return.take() {
-                    Some((st, before)) => restore_fx(app, st, before),
-                    None => app.mode = Mode::Normal,
-                }
+                app.mode = Mode::Normal;
                 leave_pool_command(app, player);
             }
             // else: keep the command text visible while exiting
         }
         KeyCode::Esc => {
-            match app.fx_return.take() {
-                Some((st, before)) => restore_fx(app, st, before),
-                None => app.mode = Mode::Normal,
-            }
+            app.mode = Mode::Normal;
             leave_pool_command(app, player);
         }
         KeyCode::Backspace => {
@@ -1861,10 +1896,31 @@ fn track_ls_command(app: &App) -> String {
         .join(" · ")
 }
 
-/// `X` — open the effects panel on the clip under the playhead. Effects are
-/// video filters, so an audio clip gets the model's own refusal.
+/// The clip ending exactly at `t` — the left neighbour at a cut whose right
+/// side is a gap (where `clip_under` finds no clip).
+fn clip_ending_at(project: &Project, t: f64, ti: usize) -> Option<&Clip> {
+    let track = project.timeline.track(ti)?;
+    let mut acc = 0.0;
+    for seg in &track.segments {
+        acc += secs(&seg.duration());
+        if (acc - t).abs() < 1e-6 {
+            return match seg {
+                TimelineSegment::Clip(c) => Some(c),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
+/// `x` — open the effects panel on the clip under the playhead (or the clip
+/// ending there, so `xx` works at a clip|gap cut). Effects are video filters,
+/// so an audio clip gets the model's own refusal.
 fn open_fx(app: &mut App) {
-    let Some(clip) = clip_under(&app.project, app.playhead, app.active()).cloned() else {
+    let clip = clip_under(&app.project, app.playhead, app.active())
+        .or_else(|| clip_ending_at(&app.project, app.playhead, app.active()))
+        .cloned();
+    let Some(clip) = clip else {
         app.set_message("move the playhead onto a clip to see its effects");
         return;
     };
@@ -1880,6 +1936,7 @@ fn open_fx(app: &mut App) {
     app.mode = Mode::Fx(FxState {
         clip: clip.id,
         sel: 0,
+        form: None,
     });
     app.set_message("effects");
 }
@@ -1891,48 +1948,249 @@ fn close_fx(app: &mut App) {
     app.set_message("timeline");
 }
 
-/// Return to the panel after its `:` line, or to Normal if the clip is gone
-/// (a command may have deleted it). A command that added an effect lands the
-/// cursor on it.
-fn restore_fx(app: &mut App, st: FxState, before: usize) {
-    let Some(clip) = clip_by_id(&app.project, st.clip) else {
-        app.mode = Mode::Normal;
+/// The "add" form for an effect kind. Width/height start empty (a full-frame
+/// crop is not a useful default); `eq` starts neutral; offsets start at 0.
+fn form_for(kind: &'static str) -> FxForm {
+    let field = |label, value: &str, kind| FxField {
+        label,
+        value: value.to_string(),
+        kind,
+    };
+    let fields = match kind {
+        "crop" => vec![
+            field("width", "", FieldKind::Int),
+            field("height", "", FieldKind::Int),
+            field("x", "0", FieldKind::Int),
+            field("y", "0", FieldKind::Int),
+        ],
+        "scale" => vec![
+            field("width", "", FieldKind::Int),
+            field("height", "", FieldKind::Int),
+        ],
+        "eq" => vec![
+            field("brightness", "0", FieldKind::Float),
+            field("contrast", "1", FieldKind::Float),
+            field("saturation", "1", FieldKind::Float),
+        ],
+        "lut" => vec![field("path", "", FieldKind::Path)],
+        _ => Vec::new(),
+    };
+    FxForm {
+        kind,
+        fields,
+        focus: 0,
+    }
+}
+
+fn open_effect_form(app: &mut App, kind: &'static str) {
+    if fx_state(app).is_none() {
+        return;
+    }
+    set_fx_form(app, Some(form_for(kind)));
+    app.set_message(&format!("new {kind} — tab between fields, enter applies"));
+}
+
+/// Does a typed character belong in the focused field?
+fn field_accepts(kind: FieldKind, c: char) -> bool {
+    match kind {
+        FieldKind::Int => c.is_ascii_digit(),
+        FieldKind::Float => c.is_ascii_digit() || c == '.' || c == '-',
+        FieldKind::Path => !c.is_control(),
+    }
+}
+
+/// Edit the focused field's string; the borrow ends inside so callers can
+/// keep touching `app`.
+fn fx_edit_field(app: &mut App, f: impl FnOnce(&mut String)) {
+    let Some(st) = fx_state_mut(app) else { return };
+    let Some(form) = st.form.as_mut() else { return };
+    let Some(field) = form.fields.get_mut(form.focus) else {
         return;
     };
-    let n = clip.effects.len();
-    let sel = if n > before {
-        n - 1
-    } else {
-        st.sel.min(n.saturating_sub(1))
+    f(&mut field.value);
+}
+
+fn fx_move_focus(app: &mut App, delta: isize) {
+    let Some(st) = fx_state_mut(app) else { return };
+    let Some(form) = st.form.as_mut() else { return };
+    let last = form.fields.len().saturating_sub(1);
+    form.focus = form.focus.saturating_add_signed(delta).min(last);
+}
+
+/// Turn the form's strings into the typed effect and apply it. The values go
+/// through `effect_from_args` — the CLI's parser — so the required fields and
+/// neutral defaults can't drift between the two front-ends.
+fn apply_fx_form(app: &mut App, player: &dyn Mpv) {
+    let Some((clip, _)) = fx_state(app).map(|s| (s.clip, s.sel)) else {
+        return;
     };
-    app.mode = Mode::Fx(FxState { clip: st.clip, sel });
+    let Some(form) = fx_state(app).and_then(|s| s.form.clone()) else {
+        return;
+    };
+    let effect = match form_effect(&form) {
+        Ok(effect) => effect,
+        Err(msg) => {
+            app.set_message(&msg);
+            return;
+        }
+    };
+    run_action(
+        app,
+        player,
+        &Action::AddEffect {
+            track: app.active(),
+            clip,
+            effect,
+        },
+    );
+    let n = fx_clip(app).map_or(0, |c| c.effects.len());
+    set_fx_form(app, None);
+    if n > 0 {
+        set_fx_sel(app, n - 1);
+    }
 }
 
-/// Open the `:` line for an effect kind, targeting the panel's clip
-/// explicitly (`--clip`) so a moved playhead can't retarget it.
-fn open_effect_command(app: &mut App, cmd: &str) {
-    let Some(st) = fx_state(app) else { return };
-    let before = fx_clip(app).map_or(0, |c| c.effects.len());
-    app.fx_return = Some((st, before));
-    app.mode = Mode::Command(format!("effect {cmd}--clip {} ", st.clip));
+fn form_effect(form: &FxForm) -> Result<Effect, String> {
+    let value = |i: usize| form.fields.get(i).map_or("", |f| f.value.trim());
+    let int = |i: usize, name: &str| -> Result<u32, String> {
+        let v = value(i);
+        if v.is_empty() {
+            return Err(format!("{name} is required"));
+        }
+        v.parse()
+            .map_err(|_| format!("{name} must be a whole number"))
+    };
+    let opt_int = |i: usize, name: &str| -> Result<Option<u32>, String> {
+        let v = value(i);
+        if v.is_empty() {
+            return Ok(None);
+        }
+        v.parse()
+            .map(Some)
+            .map_err(|_| format!("{name} must be a whole number"))
+    };
+    let opt_float = |i: usize, name: &str| -> Result<Option<f64>, String> {
+        let v = value(i);
+        if v.is_empty() {
+            return Ok(None);
+        }
+        v.parse()
+            .map(Some)
+            .map_err(|_| format!("{name} must be a number"))
+    };
+    let args = match form.kind {
+        "crop" => EffectArgs {
+            w: Some(int(0, "width")?),
+            h: Some(int(1, "height")?),
+            x: opt_int(2, "x")?,
+            y: opt_int(3, "y")?,
+            ..Default::default()
+        },
+        "scale" => EffectArgs {
+            w: Some(int(0, "width")?),
+            h: Some(int(1, "height")?),
+            ..Default::default()
+        },
+        "eq" => EffectArgs {
+            brightness: opt_float(0, "brightness")?,
+            contrast: opt_float(1, "contrast")?,
+            saturation: opt_float(2, "saturation")?,
+            ..Default::default()
+        },
+        "lut" => {
+            let path = value(0);
+            if path.is_empty() {
+                return Err("lut needs a path".to_string());
+            }
+            EffectArgs {
+                path: Some(path.to_string()),
+                ..Default::default()
+            }
+        }
+        other => return Err(format!("unknown effect {other:?}")),
+    };
+    effect_from_args(form.kind, args).map_err(|e| e.to_string())
 }
 
-/// Effects panel keys: list motion, drop/clear, add (pre-filled `:` line),
-/// and undo.
+/// Keys while the add form is open: type into the focused field, tab/enter to
+/// move, enter on the last applies, esc cancels.
+fn fx_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
+    let Some(form) = fx_state(app).and_then(|s| s.form.clone()) else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => {
+            set_fx_form(app, None);
+            app.set_message("effects");
+        }
+        KeyCode::Tab | KeyCode::Down => fx_move_focus(app, 1),
+        KeyCode::BackTab | KeyCode::Up => fx_move_focus(app, -1),
+        KeyCode::Enter => {
+            if form.focus + 1 < form.fields.len() {
+                fx_move_focus(app, 1);
+            } else {
+                apply_fx_form(app, player);
+            }
+        }
+        KeyCode::Backspace => fx_edit_field(app, |v| {
+            v.pop();
+        }),
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            fx_edit_field(app, String::clear);
+        }
+        KeyCode::Char(c)
+            if form
+                .fields
+                .get(form.focus)
+                .is_some_and(|f| field_accepts(f.kind, c)) =>
+        {
+            fx_edit_field(app, |v| v.push(c));
+        }
+        _ => {}
+    }
+}
+
+/// Add a cross-dissolve at the playhead (`X`, or `xx` from Normal — the first
+/// `x` opens the panel and the second lands here). A count is the length in
+/// frames; without one it is a second.
+fn add_transition(app: &mut App, player: &dyn Mpv, frames: Option<i64>) {
+    let len = match frames {
+        Some(n) => GapLen::Frames(n),
+        None => GapLen::Seconds(1.0),
+    };
+    run_action(
+        app,
+        player,
+        &Action::Transition {
+            track: app.active(),
+            at: app.playhead,
+            kind: TransitionKind::Dissolve,
+            len,
+        },
+    );
+}
+
+/// Effects panel keys: list motion, drop/clear, add (structured form), undo.
 fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
-    let Some(st) = fx_state(app) else { return };
-    let Some(clip) = clip_by_id(&app.project, st.clip) else {
+    if fx_state(app).is_some_and(|st| st.form.is_some()) {
+        fx_form_key(app, player, key);
+        return;
+    }
+    let Some((clip, sel)) = fx_state(app).map(|s| (s.clip, s.sel)) else {
+        return;
+    };
+    let Some(c) = clip_by_id(&app.project, clip) else {
         // The clip vanished (an undo of the insert that made it): leave.
         close_fx(app);
         return;
     };
-    let n = clip.effects.len();
+    let n = c.effects.len();
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('X') => close_fx(app),
+        KeyCode::Esc | KeyCode::Char('q') => close_fx(app),
         KeyCode::Char('j') | KeyCode::Down => {
-            set_fx_sel(app, (st.sel + 1).min(n.saturating_sub(1)));
+            set_fx_sel(app, (sel + 1).min(n.saturating_sub(1)));
         }
-        KeyCode::Char('k') | KeyCode::Up => set_fx_sel(app, st.sel.saturating_sub(1)),
+        KeyCode::Char('k') | KeyCode::Up => set_fx_sel(app, sel.saturating_sub(1)),
         KeyCode::Char('d') => {
             if n == 0 {
                 app.set_message("no effects to drop");
@@ -1943,8 +2201,8 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 player,
                 &Action::RemoveEffect {
                     track: app.active(),
-                    clip: st.clip,
-                    index: Some(st.sel.min(n - 1)),
+                    clip,
+                    index: Some(sel.min(n - 1)),
                 },
             );
             clamp_fx_sel(app);
@@ -1959,17 +2217,20 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                 player,
                 &Action::ClearEffects {
                     track: app.active(),
-                    clip: st.clip,
+                    clip,
                 },
             );
             set_fx_sel(app, 0);
         }
-        // Adding opens the one existing grammar instead of a second
-        // parameter UI; Enter lands back on the list (`fx_return`).
-        KeyCode::Char('c') => open_effect_command(app, "crop "),
-        KeyCode::Char('s') => open_effect_command(app, "scale "),
-        KeyCode::Char('e') => open_effect_command(app, "eq "),
-        KeyCode::Char('l') => open_effect_command(app, "lut "),
+        // Adding asks for the values in labelled fields instead of leaving a
+        // `:effect …` line to complete by hand.
+        KeyCode::Char('c') => open_effect_form(app, "crop"),
+        KeyCode::Char('s') => open_effect_form(app, "scale"),
+        KeyCode::Char('e') => open_effect_form(app, "eq"),
+        KeyCode::Char('l') => open_effect_form(app, "lut"),
+        // `xx`: the first `x` opened the panel; keep the old transition
+        // gesture working from here.
+        KeyCode::Char('x') => add_transition(app, player, None),
         KeyCode::Char('u') => {
             do_undo(app, player);
             clamp_fx_sel(app);
@@ -2201,8 +2462,11 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         }
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('m') => open_pool(app, player),
-        // `X` — the effects panel for the clip under the playhead.
-        KeyCode::Char('X') => open_fx(app),
+        // `x` — the effects panel for the clip under the playhead.
+        KeyCode::Char('x') => open_fx(app),
+        // `X` — cross-dissolve at the boundary; a count is the duration in
+        // frames (default 1 s). `xx` does the same from inside the panel.
+        KeyCode::Char('X') => add_transition(app, player, had_count.then_some(mult as i64)),
         // `t`/`T` cycle the active track; `<N>t` jumps to track N (1-based).
         KeyCode::Char('t') => {
             let n = app.project.timeline.tracks.len();
@@ -2236,25 +2500,6 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         // `R` opens the speed prompt for the clip under the playhead; the
         // command line is pre-filled so it reads as `:speed `.
         KeyCode::Char('R') => app.mode = Mode::Command("speed ".to_string()),
-        // `x` — cross-dissolve at the boundary; a count is the duration in
-        // frames (default 1 s).
-        KeyCode::Char('x') => {
-            let len = if had_count {
-                GapLen::Frames(mult as i64)
-            } else {
-                GapLen::Seconds(1.0)
-            };
-            run_action(
-                app,
-                player,
-                &Action::Transition {
-                    track: app.active(),
-                    at: app.playhead,
-                    kind: TransitionKind::Dissolve,
-                    len,
-                },
-            );
-        }
         KeyCode::Char(':') => app.mode = Mode::Command(String::new()),
         _ => {}
     }
@@ -3498,6 +3743,13 @@ fn render(f: &mut Frame, app: &App) {
     // the timeline is allowed to hide a track.
     let (timeline_h, keys, msg_h) =
         panel_heights(app.project.timeline.tracks.len(), f.area().height);
+    // The add form carries its own key hints and needs the rows for its
+    // fields; drop the bottom cheat-sheet while it is open.
+    let keys = if is_fx(app) && fx_state(app).is_some_and(|st| st.form.is_some()) {
+        0
+    } else {
+        keys
+    };
     let [status, timeline, info, keys_area, msg_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(timeline_h),
@@ -3598,19 +3850,25 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         ];
     }
     if is_fx(app) {
+        if fx_state(app).is_some_and(|st| st.form.is_some()) {
+            return vec![
+                "new effect — type in the focused field, tab/↑↓ moves",
+                "enter next · enter on last applies · ctrl-u clears · esc cancels",
+            ];
+        }
         return vec![
             "effects — rows apply in order at export; the monitor re-renders",
             "j/k select · d drop · D clear all · u undo · Ctrl-r redo",
-            "c crop · s scale · e eq · l lut · X/esc close",
+            "c crop · s scale · e eq · l lut · x transition · q/esc close",
         ];
     }
     vec![
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
         "motion     j/k cuts · w/b clips · n/N gaps · < > (, .) clip start/end",
         "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
-        "           R speed · x transition · e/E extend · [ ] side · m pool",
+        "           R speed · X transition · e/E extend · [ ] side · m pool",
         "extend     e/E enter · [ ] side · m pool · u undo · r reload · : cmd · q quit",
-        "effects    X panel · c/s/e/l add · d/D drop/clear (in the panel)",
+        "effects    x panel · c/s/e/l add · d/D drop/clear (in the panel)",
         "tracks     t/T cycle · <N>t jump to N · :track add video|audio",
     ]
 }
@@ -4154,15 +4412,18 @@ fn paint_run(
 }
 
 /// The effects panel takes over the info pane: one row per effect, in the
-/// order they apply at export. Adding opens the `:` line pre-filled, so
-/// parameters use the one existing grammar.
+/// order they apply at export. Adding asks for the values in a labelled form
+/// (`render_fx_form`); applying runs the same `AddEffect` as the CLI.
 fn render_fx(f: &mut Frame, area: Rect, app: &App) {
     use ratatui::widgets::{List, ListItem, ListState, Paragraph};
     let st = fx_state(app);
     let clip = fx_clip(app);
-    let title = clip
-        .map(|c| format!(" effects → clip #{} ", c.id))
-        .unwrap_or_else(|| " effects ".to_string());
+    let form = st.and_then(|s| s.form.as_ref());
+    let title = match (clip, form) {
+        (Some(c), Some(f)) => format!(" new {} → clip #{} ", f.kind, c.id),
+        (Some(c), None) => format!(" effects → clip #{} ", c.id),
+        (None, _) => " effects ".to_string(),
+    };
     let block = Block::bordered().title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -4174,6 +4435,10 @@ fn render_fx(f: &mut Frame, area: Rect, app: &App) {
         );
         return;
     };
+    if let Some(form) = form {
+        render_fx_form(f, inner, form);
+        return;
+    }
     if clip.effects.is_empty() {
         f.render_widget(
             Paragraph::new("(no effects)   c crop · s scale · e eq · l lut")
@@ -4203,6 +4468,45 @@ fn render_fx(f: &mut Frame, area: Rect, app: &App) {
     let mut list_state = ListState::default();
     list_state.select(sel);
     f.render_stateful_widget(List::new(items), inner, &mut list_state);
+}
+
+/// The add form: one labelled field per parameter, the focused value
+/// highlighted, and the navigation line underneath.
+fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
+    use ratatui::widgets::Paragraph;
+    let mut lines: Vec<Line> = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            let value = &field.value;
+            let shown = if i == form.focus {
+                format!("{value}▏")
+            } else if value.is_empty() {
+                "…".to_string()
+            } else {
+                value.clone()
+            };
+            let style = if i == form.focus {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<11}", field.label),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(format!("[{shown}]"), style),
+            ])
+        })
+        .collect();
+    lines.push(Line::from(""));
+    lines.push(
+        Line::from("tab/↑↓ field · enter next · enter on last applies · esc cancels")
+            .style(Style::default().fg(Color::DarkGray)),
+    );
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
@@ -4730,7 +5034,7 @@ mod tests {
             ),
             (
                 "lll",
-                "x",
+                "X",
                 2.0,
                 "a transition lands on the blend's first frame",
             ),
@@ -7695,11 +7999,15 @@ mod tests {
         let mut app = App::new(asset_project(), temp_project_path("fx-open"));
         app.loaded = true;
         app.playhead = 1.0;
-        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('x'));
         assert!(is_fx(&app));
         assert_eq!(
             fx_state(&app),
-            Some(FxState { clip: 1, sel: 0 }),
+            Some(&FxState {
+                clip: 1,
+                sel: 0,
+                form: None
+            }),
             "clip #1 is under the playhead"
         );
         assert_eq!(app.message, "effects");
@@ -7707,7 +8015,7 @@ mod tests {
         let mut app = App::new(asset_project(), temp_project_path("fx-gap"));
         app.loaded = true;
         app.playhead = 4.0; // the gap between the clips
-        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('x'));
         assert!(!is_fx(&app));
         assert!(app.message.contains("onto a clip"), "{}", app.message);
 
@@ -7723,7 +8031,7 @@ mod tests {
         app.loaded = true;
         app.active_track = ai;
         app.playhead = 0.5;
-        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('x'));
         assert!(!is_fx(&app));
         assert!(app.message.contains("video clips"), "{}", app.message);
     }
@@ -7745,7 +8053,7 @@ mod tests {
         };
         set_effects(&mut app, 1, vec![scale.clone(), crop.clone()]);
 
-        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('j'));
         assert_eq!(fx_state(&app).unwrap().sel, 1);
         handle_key(&mut app, &fake, key('d'));
@@ -7771,45 +8079,97 @@ mod tests {
             saturation: 1.0,
         };
         set_effects(&mut app, 1, vec![eff.clone(), eff.clone()]);
-        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('D'));
         assert!(fx_clip(&app).unwrap().effects.is_empty());
         handle_key(&mut app, &fake, key('u'));
         assert_eq!(fx_clip(&app).unwrap().effects, vec![eff.clone(), eff]);
     }
 
-    // Adding from the panel opens the `:` line pre-filled with `--clip`, and
-    // Enter lands back on the list with the cursor on the appended row.
+    // Adding from the panel asks for the values in labelled fields, refuses a
+    // missing required one, then lands back on the list with the cursor on the
+    // appended row.
     #[test]
-    fn effects_panel_add_returns_to_the_list_on_the_new_row() {
+    fn effects_panel_form_takes_values_and_returns_to_the_list() {
         let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let mut app = App::new(asset_project(), temp_project_path("fx-add"));
         app.loaded = true;
         app.playhead = 1.0;
-        set_effects(
-            &mut app,
-            1,
-            vec![nle_core::timeline::Effect::Scale { w: 2, h: 2 }],
-        );
-        handle_key(&mut app, &fake, key('X'));
-        handle_key(&mut app, &fake, key('e'));
+        set_effects(&mut app, 1, vec![Effect::Scale { w: 2, h: 2 }]);
+
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('c'));
         assert!(
-            matches!(&app.mode, Mode::Command(c) if c == "effect eq --clip 1 "),
+            matches!(
+                fx_state(&app).and_then(|s| s.form.as_ref()).map(|f| f.kind),
+                Some("crop")
+            ),
             "{:?}",
             app.mode
         );
-        for c in "--brightness 0.5".chars() {
+
+        // An empty width is refused at apply time (it would be `crop=0`).
+        for _ in 0..3 {
+            handle_key(&mut app, &fake, tab);
+        }
+        handle_key(&mut app, &fake, enter);
+        assert!(app.message.contains("width is required"), "{}", app.message);
+        assert!(fx_state(&app).unwrap().form.is_some(), "still editing");
+
+        // Cancel, reopen, and type w/h through the fields.
+        handle_key(&mut app, &fake, esc);
+        handle_key(&mut app, &fake, key('c'));
+        for c in "160".chars() {
             handle_key(&mut app, &fake, key(c));
         }
-        handle_key(
-            &mut app,
-            &fake,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        );
+        handle_key(&mut app, &fake, tab);
+        for c in "120".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, enter); // → x (pre-filled 0)
+        handle_key(&mut app, &fake, enter); // → y (pre-filled 0)
+        handle_key(&mut app, &fake, enter); // apply
 
         assert!(is_fx(&app), "the panel comes back");
-        assert_eq!(fx_clip(&app).unwrap().effects.len(), 2);
+        assert!(fx_state(&app).unwrap().form.is_none());
+        assert_eq!(
+            fx_clip(&app).unwrap().effects.last(),
+            Some(&Effect::Crop {
+                x: 0,
+                y: 0,
+                w: 160,
+                h: 120
+            })
+        );
         assert_eq!(fx_state(&app).unwrap().sel, 1, "on the new row");
+    }
+
+    // `e` opens the `eq` form with the neutral defaults; enter through them
+    // without typing anything.
+    #[test]
+    fn effects_panel_eq_form_defaults_are_neutral() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-eq"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('e'));
+        for _ in 0..2 {
+            handle_key(&mut app, &fake, enter);
+        }
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            fx_clip(&app).unwrap().effects.last(),
+            Some(&Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0
+            })
+        );
     }
 
     // The panel renders the kind + parameters, and says how to add when the
@@ -7836,7 +8196,11 @@ mod tests {
                 },
             ],
         );
-        app.mode = Mode::Fx(FxState { clip: 1, sel: 1 });
+        app.mode = Mode::Fx(FxState {
+            clip: 1,
+            sel: 1,
+            form: None,
+        });
         let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
         term.draw(|f| render_fx(f, f.area(), &app)).unwrap();
         let buf = term.backend().buffer().clone();
@@ -7848,7 +8212,11 @@ mod tests {
         assert!(text.contains("160×120 at 2,4"), "{text}");
         assert!(text.contains("b 0.1 · c 1 · s 1"), "{text}");
 
-        app.mode = Mode::Fx(FxState { clip: 2, sel: 0 });
+        app.mode = Mode::Fx(FxState {
+            clip: 2,
+            sel: 0,
+            form: None,
+        });
         let mut term = Terminal::new(TestBackend::new(60, 6)).unwrap();
         term.draw(|f| render_fx(f, f.area(), &app)).unwrap();
         let buf = term.backend().buffer().clone();
@@ -7946,7 +8314,7 @@ mod tests {
         app.loaded = true;
         app.playhead = 3.0; // asset_project's clip|gap cut
         let fake = FakeMpv::new();
-        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('X'));
         let track = app.project.timeline.video_track().unwrap();
         assert!(
             track
@@ -7966,7 +8334,7 @@ mod tests {
         app.loaded = true;
         app.playhead = 3.0; // asset_project's clip|gap cut
         let fake = FakeMpv::new();
-        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('X'));
         assert_eq!(app.playhead, 2.0, "the blend's first frame");
         handle_key(&mut app, &fake, key('d'));
         handle_key(&mut app, &fake, key('d'));
@@ -8053,7 +8421,7 @@ mod tests {
         app.loaded = true;
         app.playhead = 3.0;
         let fake = FakeMpv::new();
-        handle_key(&mut app, &fake, key('x')); // blend [2, 3)
+        handle_key(&mut app, &fake, key('X')); // blend [2, 3)
         assert_eq!(app.playhead, 2.0, "on the blend");
         handle_key(&mut app, &fake, key('e'));
         assert!(
@@ -8072,7 +8440,7 @@ mod tests {
         app.loaded = true;
         app.playhead = 3.0;
         let fake = FakeMpv::new();
-        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('X'));
         assert_eq!(app.playhead, 2.0, "on the blend");
         handle_key(&mut app, &fake, key('y'));
         handle_key(&mut app, &fake, key('y'));
