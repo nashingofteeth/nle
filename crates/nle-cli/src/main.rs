@@ -1080,8 +1080,9 @@ fn cmd_edit(project_path: &Path, dump: bool, dump_size: &str, dump_keys: &str) -
         &media_title,
     )?;
     player.observe()?;
-    let edl = preview::build_composite_edl(&project)?;
-    player.load(&edl, Some(secs_f64(&project.playhead)));
+    // The TUI builds the monitor's EDL off-thread (proxy renders can be
+    // seconds), so it appears immediately with progress instead of hanging
+    // here before the terminal is initialized.
     tui::run(project, project_path.to_path_buf(), player)?;
     Ok(())
 }

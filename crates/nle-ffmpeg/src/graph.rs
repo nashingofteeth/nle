@@ -22,7 +22,9 @@ use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-use crate::trim::{Encoder, FfmpegError, device_args, run_ffmpeg_opt, video_encode_args};
+use crate::trim::{
+    Encoder, FfmpegError, device_args, run_ffmpeg_opt, run_ffmpeg_progress, video_encode_args,
+};
 
 pub const AUDIO_RATE: u32 = 48_000;
 pub const AUDIO_LAYOUT: &str = "stereo";
@@ -616,17 +618,32 @@ pub struct ExportSpec {
 
 /// Compile the graph and run the export. Returns the plan on success.
 pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, true)
+    run_export(project, spec, true, None)
 }
 
 /// [`export`] for a caller whose stderr is a terminal UI: ffmpeg's chatter
 /// (and our own `$ ffmpeg …` line) is swallowed rather than painted over the
 /// screen. A failure still carries ffmpeg's reason.
 pub fn export_quiet(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, false)
+    run_export(project, spec, false, None)
 }
 
-fn run_export(project: &Project, spec: &ExportSpec, echo: bool) -> Result<ExportPlan, ExportError> {
+/// [`export_quiet`] reporting the output position (seconds) as it renders —
+/// the monitor turns this into the proxy progress in its status row.
+pub fn export_quiet_progress(
+    project: &Project,
+    spec: &ExportSpec,
+    progress: &mut dyn FnMut(f64),
+) -> Result<ExportPlan, ExportError> {
+    run_export(project, spec, false, Some(progress))
+}
+
+fn run_export(
+    project: &Project,
+    spec: &ExportSpec,
+    echo: bool,
+    mut progress: Option<&mut dyn FnMut(f64)>,
+) -> Result<ExportPlan, ExportError> {
     let plan = compile_export(project)?;
     let (graph, vmap) = apply_encoder_tail(plan.graph.clone(), spec.encoder);
 
@@ -668,7 +685,11 @@ fn run_export(project: &Project, spec: &ExportSpec, echo: bool) -> Result<Export
     if echo {
         eprintln!("$ ffmpeg {}", args.join(" "));
     }
-    run_ffmpeg_opt(&args, echo)?;
+    if let Some(cb) = progress.as_mut() {
+        run_ffmpeg_progress(&args, echo, &mut **cb)?;
+    } else {
+        run_ffmpeg_opt(&args, echo)?;
+    }
     Ok(plan) // script deleted on drop, after ffmpeg is done
 }
 

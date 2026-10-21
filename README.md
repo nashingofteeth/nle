@@ -105,6 +105,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 # Tip: everything is undoable; the project file is written after every edit.
 # The bottom "keys" panel always shows the current mode's cheat-sheet and the
 # latest notice.
+# While the monitor rebuilds after an edit, the status row shows a spinner and
+# "proxies 2/5 · 43%" — proxy renders run in the background, so the TUI stays
+# responsive (the monitor keeps the previous frame until the new one is ready).
 
 # Project workflow
 $N init

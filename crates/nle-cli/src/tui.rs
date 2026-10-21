@@ -371,6 +371,30 @@ struct Job {
     rx: std::sync::mpsc::Receiver<Result<String, String>>,
 }
 
+/// A monitor preview rebuild in flight. Proxy renders are seconds of ffmpeg,
+/// so the EDL is built on a worker while the status row shows progress.
+struct PreviewJob {
+    rx: std::sync::mpsc::Receiver<PreviewMsg>,
+}
+
+enum PreviewMsg {
+    /// `(finished renders, total renders, fraction of the one in flight)`.
+    Progress {
+        done: usize,
+        total: usize,
+        frac: f64,
+    },
+    Done(Result<String, String>),
+}
+
+/// What the status row shows while a preview renders.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PreviewProgress {
+    pub done: usize,
+    pub total: usize,
+    pub frac: f64,
+}
+
 pub struct App {
     pub project: Project,
     pub path: PathBuf,
@@ -412,6 +436,16 @@ pub struct App {
     pub active_track: usize,
     /// The background render/import, if one is running.
     job: Option<Job>,
+    /// The monitor's EDL being built off-thread (proxy renders); `None` when
+    /// idle.
+    preview: Option<PreviewJob>,
+    /// An edit landed while a preview rendered: build again when it ends.
+    preview_dirty: bool,
+    /// Off in tests and `--dump` (no worker, no monitor): only the real TUI
+    /// pays for proxy renders.
+    preview_enabled: bool,
+    /// Progress for the status row while `preview` runs.
+    pub preview_progress: Option<PreviewProgress>,
     /// Session files as we last read/wrote them (see [`Seen`]).
     seen: Seen,
     /// A foreign change arrived while a mode held state; reload when back
@@ -443,6 +477,10 @@ impl App {
             last_pool_sel: 0,
             active_track: 0,
             job: None,
+            preview: None,
+            preview_dirty: false,
+            preview_enabled: false,
+            preview_progress: None,
             seen: Seen::default(),
             reload_pending: false,
         };
@@ -751,6 +789,10 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     app.register = load_register(&app.path);
     // Open where `nle seek` (or the last session) left the playhead.
     app.playhead = secs(&app.project.playhead);
+    // Build the monitor off-thread before the first frame: a cold proxy can
+    // take seconds and the status row will show it.
+    app.preview_enabled = true;
+    start_preview(&mut app);
     // Media title (MPRIS "Now playing") follows the clip under the playhead.
     let mut last_media_title: Option<String> = None;
     // When the playhead was last seen moving, for the idle flush below.
@@ -782,6 +824,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         // A finished worker reports in (export, or an importer that just
         // rewrote the project).
         poll_job(&mut app, &player);
+        poll_preview(&mut app, &player);
 
         // The stored playhead follows the transport: after a moment of
         // stillness, write where the cursor landed (`nle seek` reads it).
@@ -896,7 +939,7 @@ fn watch_foreign(app: &mut App) -> bool {
 /// Reload the project (and its undo history) from disk and rebuild the
 /// preview at the current playhead. Lets you edit `nle.json` in another
 /// window (e.g. vim) and watch it here.
-fn reload_project(app: &mut App, player: &dyn Mpv) -> anyhow::Result<()> {
+fn reload_project(app: &mut App, _player: &dyn Mpv) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
     app.project = project;
     app.active_track = app
@@ -907,11 +950,11 @@ fn reload_project(app: &mut App, player: &dyn Mpv) -> anyhow::Result<()> {
     app.register = load_register(&app.path);
     // Adopt the file's playhead: a shell may have moved it (`nle seek`).
     app.playhead = secs(&app.project.playhead);
-    let edl = preview::build_composite_edl(&app.project)?;
-    player.load(&edl, Some(app.playhead));
     // Everything on disk is ours again.
     app.note_seen();
     app.reload_pending = false;
+    // The monitor rebuilds off-thread (a cold proxy could take seconds).
+    start_preview(app);
     Ok(())
 }
 
@@ -1204,16 +1247,16 @@ fn leave_pool_command(app: &mut App, _player: &dyn Mpv) {
     app.reload_requested = true;
 }
 
-fn close_pool(app: &mut App, player: &dyn Mpv) {
+fn close_pool(app: &mut App, _player: &dyn Mpv) {
     let resume = pool_resume(app);
     if let Some(sel) = pool_sel(app) {
         app.last_pool_sel = sel; // capture on exit so reopening returns here
     }
     app.mode = Mode::Normal;
-    if let Ok(edl) = preview::build_composite_edl(&app.project) {
-        player.load(&edl, Some(resume.max(0.0)));
-    }
     app.playhead = resume;
+    // The monitor was on the pooled asset; rebuild the timeline EDL (from the
+    // cache unless something changed) and reload when it is ready.
+    start_preview(app);
     app.set_message("timeline");
 }
 
@@ -1784,6 +1827,87 @@ fn poll_job(app: &mut App, player: &dyn Mpv) {
         }
         Err(TryRecvError::Empty) => {}
     }
+}
+
+/// Rebuild the monitor's EDL at the current playhead, off-thread: a proxy
+/// render is seconds of ffmpeg, and blocking the key handler froze the UI.
+/// A second edit while one runs just marks it dirty — the finished render
+/// still warms the cache — and the newest build follows.
+fn start_preview(app: &mut App) {
+    if !app.preview_enabled {
+        return;
+    }
+    if app.preview.is_some() {
+        app.preview_dirty = true;
+        return;
+    }
+    let project = app.project.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.preview = Some(PreviewJob { rx });
+    app.preview_dirty = false;
+    app.preview_progress = Some(PreviewProgress::default());
+    std::thread::spawn(move || {
+        let progress_tx = tx.clone();
+        let mut report = move |done, total, frac| {
+            let _ = progress_tx.send(PreviewMsg::Progress { done, total, frac });
+        };
+        let result =
+            preview::build_composite_edl_with(&project, &mut report).map_err(|e| e.to_string());
+        let _ = tx.send(PreviewMsg::Done(result));
+    });
+}
+
+/// Drain the preview worker: progress feeds the status row, and a completed
+/// (non-stale) build loads the monitor at wherever the playhead is now. While
+/// the pool is open its asset keeps the monitor — `close_pool` rebuilds.
+fn poll_preview(app: &mut App, player: &dyn Mpv) {
+    use std::sync::mpsc::TryRecvError;
+    loop {
+        let Some(res) = app.preview.as_ref().map(|j| j.rx.try_recv()) else {
+            return;
+        };
+        match res {
+            Ok(PreviewMsg::Progress { done, total, frac }) => {
+                app.preview_progress = Some(PreviewProgress { done, total, frac });
+            }
+            Ok(PreviewMsg::Done(result)) => {
+                let stale = app.preview_dirty;
+                let pool = is_pool(app);
+                app.preview = None;
+                app.preview_progress = None;
+                if stale {
+                    app.preview_dirty = false;
+                    if !pool {
+                        start_preview(app);
+                    }
+                } else if !pool {
+                    match result {
+                        Ok(url) => player.load(&url, Some(app.playhead)),
+                        Err(e) => preview_failed(app, &e.to_string()),
+                    }
+                }
+                return;
+            }
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                app.preview = None;
+                app.preview_progress = None;
+                preview_failed(app, "worker died");
+                return;
+            }
+        }
+    }
+}
+
+/// Keep the timeline's notice: a monitor problem must not erase what
+/// happened to the model (the same rule as the old inline rebuild).
+fn preview_failed(app: &mut App, why: &str) {
+    let msg = if app.message.is_empty() {
+        format!("preview failed: {why}")
+    } else {
+        format!("{} — preview failed: {why}", app.message)
+    };
+    app.set_message(&msg);
 }
 
 /// The `:` parser's defaults: the playhead, the active track, and the
@@ -3005,19 +3129,9 @@ fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
         crate::log::line(&format!("load pool preview #{sel}"));
         load_pool_preview(app, player);
     } else {
-        match preview::build_composite_edl(&app.project) {
-            Ok(edl) => {
-                crate::log::line(&format!("load timeline EDL at {:.3}", app.playhead));
-                player.load(&edl, Some(app.playhead));
-            }
-            Err(e) => {
-                // Keep the edit's notice — a monitor problem shouldn't
-                // erase what happened to the timeline.
-                crate::log::line(&format!("preview rebuild failed: {e}"));
-                let prev = app.message.clone();
-                app.set_message(&format!("{prev} — preview rebuild failed: {e}"));
-            }
-        }
+        // Proxy renders are seconds of ffmpeg: build the EDL off-thread and
+        // let the status row show progress. A newer edit supersedes this one.
+        start_preview(app);
     }
 }
 
@@ -4056,7 +4170,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" nle ", style.add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {name} · "), style),
         Span::styled(
@@ -4068,8 +4182,47 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             total_style,
         ),
         Span::styled(format!("{icon} · {mode}{count}"), style),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    ];
+    if let Some(p) = app.preview_progress {
+        spans.push(Span::styled(
+            format!(" · {}", preview_indicator(p, app.preview_dirty)),
+            style.add_modifier(Modifier::BOLD).fg(Color::Yellow),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A 10-frame spinner for the status row. Time-based, so it animates with the
+/// loop's ~50 ms tick without extra app state.
+fn spinner() -> &'static str {
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let i = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_millis() / 100) as usize % FRAMES.len())
+        .unwrap_or(0);
+    FRAMES[i]
+}
+
+/// The status-row preview indicator: `⠋ proxies 2/5 · 43% · queued`. The
+/// fraction is (finished + this render's progress) / total.
+fn preview_indicator(p: PreviewProgress, dirty: bool) -> String {
+    let done = p.done.min(p.total);
+    let pct = if p.total > 0 {
+        (((p.done as f64 + p.frac) / p.total as f64) * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u32
+    } else {
+        0
+    };
+    let mut s = if p.total > 0 {
+        format!("{} proxies {done}/{} · {pct}%", spinner(), p.total)
+    } else {
+        format!("{} building preview…", spinner())
+    };
+    if dirty {
+        s.push_str(" · queued");
+    }
+    s
 }
 
 /// Make track `idx` active (clamped) and return its label. Leaves the monitor
@@ -7966,6 +8119,128 @@ mod tests {
         handle_key(&mut app, &fake, key('u'));
         assert_eq!(app.project.media.len(), 2, "undo restored the spare");
         assert!(app.project.asset(spare).is_some());
+    }
+
+    // The status row carries the preview job's progress: finished/total, the
+    // percentage (including the render in flight), and "queued" when a newer
+    // edit is waiting.
+    #[test]
+    fn the_status_row_shows_preview_progress() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let row = |app: &App| -> String {
+            let mut term = Terminal::new(TestBackend::new(100, 1)).unwrap();
+            term.draw(|f| render_status(f, f.area(), app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..100u16).map(|x| buf[(x, 0)].symbol()).collect()
+        };
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let before = row(&app);
+        assert!(!before.contains("proxies"), "{before}");
+
+        app.preview_progress = Some(PreviewProgress {
+            done: 1,
+            total: 3,
+            frac: 0.5,
+        });
+        let mid = row(&app);
+        assert!(mid.contains("proxies 1/3 · 50%"), "{mid}");
+
+        app.preview_dirty = true;
+        let queued = row(&app);
+        assert!(queued.contains("50% · queued"), "{queued}");
+
+        // Before the plan counts its renders, it says it is building.
+        app.preview_progress = Some(PreviewProgress::default());
+        let planning = row(&app);
+        assert!(planning.contains("building preview"), "{planning}");
+    }
+
+    // The worker's progress and completion: the EDL loads at the playhead in
+    // force when it lands, and the indicator clears.
+    #[test]
+    fn poll_preview_loads_the_built_edl() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob { rx });
+        app.preview_progress = Some(PreviewProgress::default());
+
+        tx.send(PreviewMsg::Progress {
+            done: 1,
+            total: 2,
+            frac: 0.25,
+        })
+        .unwrap();
+        poll_preview(&mut app, &fake);
+        assert_eq!(
+            app.preview_progress,
+            Some(PreviewProgress {
+                done: 1,
+                total: 2,
+                frac: 0.25
+            })
+        );
+        assert!(app.preview.is_some());
+
+        app.playhead = 1.5;
+        tx.send(PreviewMsg::Done(Ok("edl://built".into()))).unwrap();
+        poll_preview(&mut app, &fake);
+        assert_eq!(
+            fake.calls(),
+            vec![Call::Load("edl://built".into(), Some(1.5))]
+        );
+        assert!(app.preview.is_none() && app.preview_progress.is_none());
+    }
+
+    // A build that finishes after a newer edit is discarded — its EDL is
+    // stale — and the queued build starts instead.
+    #[test]
+    fn an_obsolete_preview_is_not_loaded() {
+        let fake = FakeMpv::new();
+        let mut p = asset_project();
+        p.timeline.tracks[0].segments.remove(1); // C1 | C2: no gap, no proxy
+        let mut app = App::new(p, temp_project_path("preview-stale"));
+        app.preview_enabled = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob { rx });
+        app.preview_dirty = true;
+        tx.send(PreviewMsg::Done(Ok("edl://old".into()))).unwrap();
+        poll_preview(&mut app, &fake);
+        assert!(fake.calls().is_empty(), "the stale EDL is not loaded");
+        assert!(app.preview.is_some(), "the queued build starts");
+        assert!(!app.preview_dirty);
+    }
+
+    // A monitor failure must not erase what happened to the timeline: the
+    // notice is kept and the reason appended.
+    #[test]
+    fn a_preview_failure_keeps_the_edit_notice() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.set_message("effect on clip #1");
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob { rx });
+        tx.send(PreviewMsg::Done(Err("boom".into()))).unwrap();
+        poll_preview(&mut app, &fake);
+        assert_eq!(app.message, "effect on clip #1 — preview failed: boom");
+        assert!(app.preview.is_none());
+    }
+
+    // While the pool owns the monitor, a finished timeline build must not
+    // replace the asset preview.
+    #[test]
+    fn a_preview_finishing_in_the_pool_does_not_steal_the_monitor() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        open_pool_mode(&mut app, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob { rx });
+        tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
+            .unwrap();
+        poll_preview(&mut app, &fake);
+        assert!(fake.calls().is_empty(), "the pool asset stays");
+        assert!(app.preview.is_none());
     }
 
     /// Give one clip an explicit effect list (the panel tests don't need the

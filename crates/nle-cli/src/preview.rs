@@ -318,31 +318,101 @@ fn transition_spans(project: &Project) -> Vec<(Seconds, Seconds)> {
 /// - a window where another track is audible — that span plays the rendered
 ///   *composite* (video `overlay`ed, audio `amix`ed), merged with its
 ///   neighbours so one render covers the run.
+///
+/// Render progress: `(finished, total, fraction of the render in flight)`.
+pub type ProgressFn<'a> = &'a mut dyn FnMut(usize, usize, f64);
+
 pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
-    let windows = composite_windows(project)?;
-    let spans = composite_spans(&windows, &transition_spans(project));
+    composite_segments_with(project, &mut |_, _, _| {})
+}
+
+/// One proxy plan step. `Window` may or may not need a proxy; `Span` always
+/// renders a composite. Kept as a list so the caller can count the renders
+/// before starting (the status row needs "2/5").
+enum Step<'a> {
+    Window(Window<'a>),
+    Span(Seconds, Seconds),
+}
+
+/// [`composite_segments`] with render progress: `(finished, total, fraction of
+/// the one in flight)`.
+pub fn composite_segments_with(
+    project: &Project,
+    progress: ProgressFn<'_>,
+) -> Result<Vec<Segment>, PreviewError> {
+    let steps = composite_steps(project)?;
+    let total = steps
+        .iter()
+        .filter(|s| step_needs_proxy(project, s))
+        .count();
+    // Announce the plan before the first render, so a fully cached build still
+    // shows "0/2" instead of "building…" until it finishes.
+    progress(0, total, 0.0);
+    let mut done = 0;
     let mut segs: Vec<Segment> = Vec::new();
-    let mut i = 0;
-    for (start, end) in spans {
-        while i < windows.len() && windows[i].start < start {
-            push_window(project, &windows[i], &mut segs)?;
-            i += 1;
+    for step in steps {
+        match step {
+            Step::Window(window) => {
+                push_window(
+                    project,
+                    &window,
+                    &mut segs,
+                    &mut *progress,
+                    &mut done,
+                    total,
+                )?;
+            }
+            Step::Span(start, end) => {
+                let mut report = |f: f64| progress(done, total, f);
+                let path = crate::proxy::composite_proxy_with(project, start, end, &mut report)?;
+                done += 1;
+                segs.push(Segment::Clip {
+                    path,
+                    start: Seconds::from_integer(0),
+                    length: end - start,
+                });
+            }
         }
-        let path = crate::proxy::composite_proxy(project, start, end)?;
-        segs.push(Segment::Clip {
-            path,
-            start: Seconds::from_integer(0),
-            length: end - start,
-        });
-        while i < windows.len() && windows[i].end <= end {
-            i += 1;
-        }
-    }
-    while i < windows.len() {
-        push_window(project, &windows[i], &mut segs)?;
-        i += 1;
     }
     Ok(segs)
+}
+
+/// Build the ordered plan without rendering anything: windows outside a mix
+/// span, and the spans themselves.
+fn composite_steps(project: &Project) -> Result<Vec<Step<'_>>, PreviewError> {
+    let windows = composite_windows(project)?;
+    let spans = composite_spans(&windows, &transition_spans(project));
+    let mut it = windows.into_iter().peekable();
+    let mut steps = Vec::new();
+    for (start, end) in spans {
+        while it.peek().is_some_and(|w| w.start < start) {
+            if let Some(w) = it.next() {
+                steps.push(Step::Window(w));
+            }
+        }
+        steps.push(Step::Span(start, end));
+        while it.peek().is_some_and(|w| w.end <= end) {
+            it.next();
+        }
+    }
+    for w in it {
+        steps.push(Step::Window(w));
+    }
+    Ok(steps)
+}
+
+fn step_needs_proxy(project: &Project, step: &Step<'_>) -> bool {
+    match step {
+        Step::Span(..) => true,
+        Step::Window(w) => window_needs_proxy(project, w),
+    }
+}
+
+fn window_needs_proxy(project: &Project, window: &Window<'_>) -> bool {
+    match &window.kind {
+        WindowKind::Segment(seg, _) => crate::proxy::needs_proxy(project, seg),
+        WindowKind::Mix | WindowKind::Gap => false,
+    }
 }
 
 /// One non-composite window: its own source, its proxy, or black.
@@ -350,13 +420,18 @@ fn push_window(
     project: &Project,
     window: &Window<'_>,
     segs: &mut Vec<Segment>,
+    progress: ProgressFn<'_>,
+    done: &mut usize,
+    total: usize,
 ) -> Result<(), PreviewError> {
     let len = window.end - window.start;
     match &window.kind {
         WindowKind::Gap => push_gap(segs, len),
         WindowKind::Segment(seg, offset) => {
             if crate::proxy::needs_proxy(project, seg) {
-                let path = crate::proxy::proxy_for(project, seg)?;
+                let mut report = |f: f64| progress(*done, total, f);
+                let path = crate::proxy::proxy_for_with(project, seg, &mut report)?;
+                *done += 1;
                 segs.push(Segment::Clip {
                     path,
                     start: *offset,
@@ -503,6 +578,14 @@ pub fn build_edl(project: &Project, ti: usize) -> Result<String, PreviewError> {
 /// plays, so a gap falls through to the layer below.
 pub fn build_composite_edl(project: &Project) -> Result<String, PreviewError> {
     edl_from_segments(project, &composite_segments(project)?)
+}
+
+/// [`build_composite_edl`] with render progress.
+pub fn build_composite_edl_with(
+    project: &Project,
+    progress: ProgressFn<'_>,
+) -> Result<String, PreviewError> {
+    edl_from_segments(project, &composite_segments_with(project, progress)?)
 }
 
 /// Render preview segments to an `edl://` URL, generating the cached black
@@ -879,6 +962,40 @@ mod tests {
             } => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
             other => panic!("expected the top clip window, got {other:?}"),
         }
+    }
+
+    // The plan is built before any render so the status row can say "2/5":
+    // count the windows/spans that need a proxy without running ffmpeg.
+    #[test]
+    fn the_proxy_plan_counts_renders_before_starting() {
+        let mut p = Project::new();
+        p.fps = Some(Seconds::new(30, 1));
+        p.video = Some(VideoSettings {
+            width: 320,
+            height: 240,
+        });
+        let _ = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        p.timeline.video_track_mut().unwrap().segments = vec![seg_clip(1, 0, 2), seg_clip(2, 0, 2)];
+        for seg in &mut p.timeline.video_track_mut().unwrap().segments {
+            if let TimelineSegment::Clip(c) = seg {
+                c.effects = vec![Effect::Scale { w: 2, h: 2 }];
+            }
+        }
+        let steps = composite_steps(&p).unwrap();
+        assert_eq!(
+            steps.iter().filter(|s| step_needs_proxy(&p, s)).count(),
+            2,
+            "one render per effect clip"
+        );
+
+        // Without effects the plan still exists but needs no renders.
+        let mut q = Project::new();
+        q.fps = p.fps;
+        q.video = p.video.clone();
+        let _ = q.add_asset("/media/red.mp4".into(), probe_report("10"));
+        q.timeline.video_track_mut().unwrap().segments = vec![seg_clip(1, 0, 2), seg_clip(2, 0, 2)];
+        let steps = composite_steps(&q).unwrap();
+        assert_eq!(steps.iter().filter(|s| step_needs_proxy(&q, s)).count(), 0);
     }
 
     fn project_with_gap() -> Project {

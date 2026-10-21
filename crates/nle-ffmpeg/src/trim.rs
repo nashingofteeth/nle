@@ -161,14 +161,44 @@ pub fn run_ffmpeg(args: &[String]) -> Result<(), FfmpegError> {
 /// the screen — the tail is still captured, so a failure still names the
 /// cause.
 pub fn run_ffmpeg_opt(args: &[String], echo: bool) -> Result<(), FfmpegError> {
+    run_ffmpeg_inner(args, echo, None)
+}
+
+/// Run ffmpeg and report its output position (seconds) as it goes.
+///
+/// Uses `-progress pipe:1`, ffmpeg's machine-readable key/value stream, so
+/// the caller can turn it into a percentage (the monitor's proxy renders can
+/// take seconds). The normal path adds no flags and keeps stdout null, so a
+/// plain export's command line is unchanged.
+pub fn run_ffmpeg_progress(
+    args: &[String],
+    echo: bool,
+    progress: &mut dyn FnMut(f64),
+) -> Result<(), FfmpegError> {
+    run_ffmpeg_inner(args, echo, Some(progress))
+}
+
+fn run_ffmpeg_inner(
+    args: &[String],
+    echo: bool,
+    mut progress: Option<&mut dyn FnMut(f64)>,
+) -> Result<(), FfmpegError> {
     use std::io::{BufRead, BufReader, Write as _};
     use std::process::Stdio;
 
     const TAIL: usize = 8;
-    let mut child = Command::new("ffmpeg")
+    let mut cmd = Command::new("ffmpeg");
+    if progress.is_some() {
+        cmd.args(["-progress", "pipe:1", "-nostats"]);
+    }
+    let mut child = cmd
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(if progress.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::piped())
         .spawn()?;
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -187,12 +217,55 @@ pub fn run_ffmpeg_opt(args: &[String], echo: bool) -> Result<(), FfmpegError> {
         }
         error_lines(&tail.into_iter().collect::<Vec<_>>())
     });
-    let status = child.wait()?;
+    // The progress stream is read on its own thread; we poll the child so the
+    // callback runs on the caller's thread (no shared mutable state).
+    let progress_rx = child.stdout.take().map(|stdout| {
+        let (tx, rx) = std::sync::mpsc::channel::<f64>();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some(seconds) = parse_progress_seconds(&line)
+                    && tx.send(seconds).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        rx
+    });
+    let status = loop {
+        if let (Some(rx), Some(cb)) = (&progress_rx, progress.as_mut()) {
+            while let Ok(t) = rx.try_recv() {
+                (**cb)(t);
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    };
+    // Drain what landed between the last poll and exit.
+    if let (Some(rx), Some(cb)) = (&progress_rx, progress.as_mut()) {
+        while let Ok(t) = rx.try_recv() {
+            (**cb)(t);
+        }
+    }
     let tail = reader.join().unwrap_or_default();
     if !status.success() {
         return Err(FfmpegError::Failed { status, tail });
     }
     Ok(())
+}
+
+/// One `-progress` key/value line. `out_time_us` is microseconds;
+/// `out_time_ms` is a historical misnomer for the same unit. `N/A` (before
+/// the first frame) parses to nothing.
+fn parse_progress_seconds(line: &str) -> Option<f64> {
+    let (key, value) = line.split_once('=')?;
+    if key != "out_time_us" && key != "out_time_ms" {
+        return None;
+    }
+    let micros: f64 = value.trim().parse().ok()?;
+    Some(micros / 1_000_000.0)
 }
 
 /// The reason a failed run failed, out of the last lines of its stderr:
@@ -376,6 +449,17 @@ mod tests {
         s.start = Seconds::from_integer(10);
         s.end = Seconds::from_integer(10);
         assert!(matches!(build_args(&s), Err(TrimError::Range { .. })));
+    }
+
+    #[test]
+    fn progress_lines_parse_to_seconds() {
+        // `out_time_us` is the modern key; `out_time_ms` is the same unit.
+        assert_eq!(parse_progress_seconds("out_time_us=1500000"), Some(1.5));
+        assert_eq!(parse_progress_seconds("out_time_ms=250000"), Some(0.25));
+        // ffmpeg prints `N/A` before the first frame; other keys are ignored.
+        assert_eq!(parse_progress_seconds("out_time_us=N/A"), None);
+        assert_eq!(parse_progress_seconds("frame=12"), None);
+        assert_eq!(parse_progress_seconds("progress=continue"), None);
     }
 
     #[test]

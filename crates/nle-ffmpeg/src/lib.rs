@@ -12,6 +12,7 @@ pub mod trim;
 pub use detect::{DetectError, DetectOptions, Detection, detect};
 pub use graph::{
     CompileError, ExportError, ExportPlan, ExportSpec, compile_export, export, export_quiet,
+    export_quiet_progress,
 };
 // Media types live in core; re-exported here for callers that treat
 // this crate as the media facade.

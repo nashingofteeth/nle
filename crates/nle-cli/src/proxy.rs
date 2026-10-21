@@ -11,9 +11,10 @@ use std::path::PathBuf;
 
 use nle_core::Project;
 use nle_core::Seconds;
+use nle_core::time::secs_f64;
 use nle_core::timeline::{Clip, Effect, Gap, Segment, Track, TrackKind};
 use nle_ffmpeg::graph::ExportSpec;
-use nle_ffmpeg::{Encoder, ExportError, export_quiet};
+use nle_ffmpeg::{Encoder, ExportError, export_quiet_progress};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -139,7 +140,12 @@ fn hash_lut_files(seg: &Segment, hasher: &mut DefaultHasher) {
 /// return the path. The render goes to a temp name (still ending in `.mp4` so
 /// ffmpeg can infer the muxer) and is renamed into place, so a crash mid-render
 /// can't leave a half-written file that a later run would serve.
-fn render_cached(project: &Project, hash: u64) -> Result<PathBuf, ProxyError> {
+fn render_cached(
+    project: &Project,
+    hash: u64,
+    duration: f64,
+    progress: &mut dyn FnMut(f64),
+) -> Result<PathBuf, ProxyError> {
     let dir = proxy_cache_dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{hash:x}.mp4"));
@@ -155,8 +161,15 @@ fn render_cached(project: &Project, hash: u64) -> Result<PathBuf, ProxyError> {
         bitrate: "8M".into(),
     };
     // Quiet: this runs from the monitor's reload, so ffmpeg's chatter would
-    // paint over the TUI. A failure still carries the reason.
-    if let Err(e) = export_quiet(project, &spec) {
+    // paint over the TUI. A failure still carries the reason. The render's
+    // `-progress` stream becomes the fraction of `duration` this proxy has
+    // finished.
+    let mut report = |seconds: f64| {
+        if duration > 0.0 {
+            progress((seconds / duration).clamp(0.0, 1.0));
+        }
+    };
+    if let Err(e) = export_quiet_progress(project, &spec, &mut report) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e.into());
     }
@@ -169,6 +182,15 @@ fn render_cached(project: &Project, hash: u64) -> Result<PathBuf, ProxyError> {
 /// already applies effects and blends transitions — so the proxy is the
 /// one source of truth for "what this segment looks like".
 pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError> {
+    proxy_for_with(project, seg, &mut |_| {})
+}
+
+/// [`proxy_for`] reporting this render's fraction (0–1).
+pub fn proxy_for_with(
+    project: &Project,
+    seg: &Segment,
+    progress: &mut dyn FnMut(f64),
+) -> Result<PathBuf, ProxyError> {
     let (w, h) = match &project.video {
         Some(v) => (v.width, v.height),
         None => return Err(ProxyError::NoSettings),
@@ -177,6 +199,7 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
         return Err(ProxyError::NoSettings);
     }
     let hash = proxy_hash(project, seg, w, h);
+    let duration = secs_f64(&seg.duration());
 
     let mut p = project.clone();
     p.timeline.tracks = vec![Track {
@@ -184,17 +207,19 @@ pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError
         muted: false,
         segments: vec![seg.clone()],
     }];
-    render_cached(&p, hash)
+    render_cached(&p, hash, duration, progress)
 }
 
 /// The cached composite of `[start, end)` — the span rendered the way the
 /// export renders it: every unmuted track's slice, video `overlay`ed and audio
 /// `amix`ed. The monitor plays this where more than one track contributes
-/// audio, which `edl://` (one source per span) cannot express.
-pub fn composite_proxy(
+/// audio, which `edl://` (one source per span) cannot express. Reports this
+/// render's fraction (0–1).
+pub fn composite_proxy_with(
     project: &Project,
     start: Seconds,
     end: Seconds,
+    progress: &mut dyn FnMut(f64),
 ) -> Result<PathBuf, ProxyError> {
     let (w, h) = match &project.video {
         Some(v) => (v.width, v.height),
@@ -205,9 +230,10 @@ pub fn composite_proxy(
     }
     let tracks = slice_tracks(project, start, end);
     let hash = span_hash(project, &tracks, w, h);
+    let duration = secs_f64(&(end - start));
     let mut p = project.clone();
     p.timeline.tracks = tracks;
-    render_cached(&p, hash)
+    render_cached(&p, hash, duration, progress)
 }
 
 /// Every unmuted track's segments covering `[start, end)`, trimmed at the edges
