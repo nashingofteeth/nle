@@ -84,7 +84,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              (--at defaults to the playhead, --track to the active track)
 #   extend:    e/E enter at a boundary — a gap on the right is preferred
 #              (E = ripple) · [ / ] enter on the right / left segment of
-#              a cut (bracket opens toward its side) ·
+#              a cut (bracket opens toward its side) · at a transition either
+#              bracket arms the neighbour's real edge (the blend's far end) ·
 #              navigate to the target (mpv shows the armed material) ·
 #              e commit (replaces what it crosses) · E flip ripple ·
 #              [ ] switch side · < > (, .) switch end in-mode ·

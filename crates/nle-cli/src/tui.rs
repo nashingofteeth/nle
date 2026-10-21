@@ -21,7 +21,9 @@ use nle_core::EditError;
 use nle_core::action::{self, Action, Edge, GapLen, ParseDefaults, ParseError, Target};
 #[cfg(test)]
 use nle_core::edit;
-use nle_core::timeline::{Segment as TimelineSegment, Track, TrackKind, TransitionKind};
+use nle_core::timeline::{
+    Segment as TimelineSegment, Track, TrackKind, TransitionKind, TransitionSource,
+};
 use nle_core::{
     Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_of,
     frame_to_secs, gap_span, load_register, plan_commit, resolve_armed, save_register, track_label,
@@ -2338,6 +2340,9 @@ fn plan_for_armed(
                 .ok_or_else(|| format!("asset #{} is missing", asset_id.asset))?;
             let ain = secs(&asset_id.asset_in);
             let aout = secs(&asset_id.asset_out);
+            let idx = track
+                .clip_index(id)
+                .ok_or_else(|| "clip vanished".to_string())?;
             let dur_opt = asset.duration().map(|d| secs(&d));
             // Unknown asset duration: no extension room, trim/delete only,
             // and no material strip to show.
@@ -2358,11 +2363,16 @@ fn plan_for_armed(
                     dur_opt.map(|d| (e - aout, e + (d - aout))),
                 )
             };
+            // At a blend's far end the edge's material is the transition
+            // side's outer source, not the clip's visible in/out: red's tail
+            // shows `a.src_out`, blue's head `b.src_in`. Without this the
+            // monitor sat one blend-duration off the armed edge.
+            let src_at_edge =
+                blend_edge_source(track, idx, edge, head).unwrap_or(if head { ain } else { aout });
             // Preview: the whole asset file, so every reachable position
             // shows real frames. mpv 0 maps to the timeline position of
             // source zero (edge minus the edge's source point). Without a
             // known duration, map just the clip's current span.
-            let src_at_edge = if head { ain } else { aout };
             let preview = match dur_opt {
                 Some(d) => {
                     // Trim the preview to the reachable side so mpv stops
@@ -2938,8 +2948,37 @@ fn armed_on_side(project: &Project, t: f64, side: Side, ti: usize) -> Option<(Ar
         acc += secs(&seg.duration());
         let end = acc;
         match seg {
-            // A transition isn't material to arm; skip past it.
-            TimelineSegment::Transition(_) => {}
+            // A blend's far edge is the neighbour's real edge: the clip
+            // before it ends there (`]`), the clip after it starts there
+            // (`[`). At its near edge the same bracket arms the same clip
+            // and `blend_far_end` hops across afterwards.
+            TimelineSegment::Transition(_) => match side {
+                Side::Left if (end - t).abs() < eps => {
+                    if let Some(TimelineSegment::Clip(c)) =
+                        i.checked_sub(1).and_then(|p| track.segments.get(p))
+                    {
+                        return Some((
+                            Armed::Clip {
+                                id: c.id,
+                                head: false,
+                            },
+                            t,
+                        ));
+                    }
+                }
+                Side::Right if (start - t).abs() < eps => {
+                    if let Some(TimelineSegment::Clip(c)) = track.segments.get(i + 1) {
+                        return Some((
+                            Armed::Clip {
+                                id: c.id,
+                                head: true,
+                            },
+                            t,
+                        ));
+                    }
+                }
+                _ => {}
+            },
             TimelineSegment::Clip(c) => match side {
                 Side::Left if (end - t).abs() < eps => {
                     return Some((
@@ -3029,6 +3068,34 @@ fn blend_far_end(
         .then_some((far_end, "the blend is part of the clip — armed its far end"))
 }
 
+/// The material at a blend's far edge: the preceding clip's tail ends on
+/// `a.src_out` (the blend's end), the following clip's head starts on
+/// `b.src_in` (its start). `None` when the edge isn't a blend's far end or
+/// that side is black.
+fn blend_edge_source(track: &Track, clip_idx: usize, edge: f64, head: bool) -> Option<f64> {
+    let ni = if head {
+        clip_idx.checked_sub(1)?
+    } else {
+        clip_idx + 1
+    };
+    let TimelineSegment::Transition(tr) = track.segments.get(ni)? else {
+        return None;
+    };
+    let near = secs(&track.start_of(ni));
+    let far = near + secs(&tr.dur);
+    // A tail's edge is the blend's end; a head's is its start.
+    let (want, side) = if head { (near, &tr.b) } else { (far, &tr.a) };
+    if (edge - want).abs() > 1e-6 {
+        return None;
+    }
+    match side {
+        TransitionSource::Clip {
+            src_in, src_out, ..
+        } => Some(secs(if head { src_in } else { src_out })),
+        TransitionSource::Black => None,
+    }
+}
+
 fn side_hint(side: Side) -> &'static str {
     // Name the *other* bracket: the hint fires on the key that just failed.
     match side {
@@ -3073,10 +3140,15 @@ fn enter_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
 /// the same cut, keeping the ripple flag and playhead.
 fn set_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
     let Some(st) = extend_state(app) else { return };
-    let Some((armed, edge)) = armed_on_side(&app.project, st.edge_pos, side, st.track) else {
+    let Some((armed, mut edge)) = armed_on_side(&app.project, st.edge_pos, side, st.track) else {
         app.set_message(side_hint(side));
         return;
     };
+    // Same hop as entering the mode: a blend beside the cut is part of the
+    // clip, so its edge is the blend's far end.
+    if let Some((far, _)) = blend_far_end(&app.project, st.track, &armed, edge) {
+        edge = far;
+    }
     if armed == st.armed {
         return;
     }
@@ -6845,6 +6917,87 @@ mod tests {
         );
         // Nothing at a non-boundary.
         assert_eq!(armed_on_side(&q, 1.0, Side::Left, 0), None);
+    }
+
+    // A blend's far end is the neighbour's real edge: `]` at its end arms the
+    // preceding clip's tail there (not "no clip ends here"), and `[` at its
+    // start arms the following clip's head there.
+    #[test]
+    fn armed_on_side_reads_a_blends_far_edge() {
+        let p = blend_pair(); // C1 0..2 · blend 2..3 · C2 3..5
+        assert_eq!(
+            armed_on_side(&p, 3.0, Side::Left, 0),
+            Some((Armed::Clip { id: 1, head: false }, 3.0)),
+            "`]` at the blend's end is C1's real tail"
+        );
+        assert_eq!(
+            armed_on_side(&p, 2.0, Side::Right, 0),
+            Some((Armed::Clip { id: 2, head: true }, 2.0)),
+            "`[` at the blend's start is C2's real head"
+        );
+        // The near edges still name the adjacent clip; entering the mode
+        // hops to the far end (`blend_far_end`).
+        assert_eq!(
+            armed_on_side(&p, 2.0, Side::Left, 0),
+            Some((Armed::Clip { id: 1, head: false }, 2.0))
+        );
+        assert_eq!(
+            armed_on_side(&p, 3.0, Side::Right, 0),
+            Some((Armed::Clip { id: 2, head: true }, 3.0))
+        );
+    }
+
+    // Entering from either edge of a blend arms the same real edge, and the
+    // preview maps the material there: a tail at the blend's end reads
+    // `a.src_out`, a head at its start `b.src_in` (it used to be one blend
+    // length off, so the monitor showed the wrong frame).
+    #[test]
+    fn brackets_from_either_blend_edge_arm_the_same_neighbour() {
+        let fake = FakeMpv::new();
+        for (pos, k, armed, edge, off) in [
+            (2.0, ']', Armed::Clip { id: 1, head: false }, 3.0, 0.0),
+            (3.0, ']', Armed::Clip { id: 1, head: false }, 3.0, 0.0),
+            (2.0, '[', Armed::Clip { id: 2, head: true }, 2.0, 2.0),
+            (3.0, '[', Armed::Clip { id: 2, head: true }, 2.0, 2.0),
+        ] {
+            let mut app = App::new(blend_pair(), temp_project_path("blend-brackets"));
+            app.loaded = true;
+            app.playhead = pos;
+            handle_key(&mut app, &fake, key(k));
+            match &app.mode {
+                Mode::Extend(st) => {
+                    assert_eq!((st.armed, st.edge_pos), (armed, edge), "{k} at {pos}");
+                    assert_eq!(st.preview_off, off, "{k} at {pos}: preview source");
+                }
+                _ => panic!("{k} at {pos} did not enter: {}", app.message),
+            }
+        }
+    }
+
+    // Switching sides inside extend mode applies the same hop: from the
+    // blend's end, `[` arms the following clip's head at the blend's start.
+    #[test]
+    fn switching_sides_at_a_blend_end_lands_on_the_real_edge() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(blend_pair(), temp_project_path("blend-switch"));
+        app.loaded = true;
+        app.playhead = 2.0;
+        handle_key(&mut app, &fake, key(']')); // C1 tail at the blend's end
+        assert!(matches!(
+            &app.mode,
+            Mode::Extend(st) if st.armed == Armed::Clip { id: 1, head: false }
+        ));
+        handle_key(&mut app, &fake, key('[')); // C2 head at the blend's start
+        assert!(
+            matches!(
+                &app.mode,
+                Mode::Extend(st)
+                    if st.armed == Armed::Clip { id: 2, head: true } && st.edge_pos == 2.0
+            ),
+            "{:?} — {}",
+            app.mode,
+            app.message
+        );
     }
 
     // `<` / `>` (and `,` / `.`): head/tail of the clip under the playhead.
