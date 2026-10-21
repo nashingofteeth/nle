@@ -4172,9 +4172,12 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     } else if !app.loaded {
         "… loading"
     } else if app.paused {
-        "⏸"
+        // Two ASCII cells each. `⏸` has an emoji presentation in some
+        // terminals (a wide white square) while `▶` stays narrow, so the
+        // text after the icon drifted by one cell. These can't.
+        "||"
     } else {
-        "▶"
+        "|>"
     };
     let mode = match &app.mode {
         Mode::Normal => "NORMAL".to_string(),
@@ -8256,6 +8259,26 @@ mod tests {
         let row = status_row(&app);
         assert!(row.contains(r#"=";::;>--"#), "{row}");
         assert!(!row.contains(r#">";::;>--"#), "{row}");
+    }
+
+    // Pause/play use the same number of cells, so `· MODE` doesn't shift when
+    // the transport toggles (the emoji ⏸ was wide, ▶ narrow).
+    #[test]
+    fn the_transport_icons_line_up() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.loaded = true;
+        app.paused = true;
+        let paused = status_row(&app);
+        app.paused = false;
+        let playing = status_row(&app);
+        let col = |row: &str| row.find("· NORMAL").unwrap_or(usize::MAX);
+        assert!(paused.contains("|| · NORMAL"), "{paused}");
+        assert!(playing.contains("|> · NORMAL"), "{playing}");
+        assert_eq!(
+            col(&paused),
+            col(&playing),
+            "the mode text must not move when the transport toggles:\n{paused}\n{playing}"
+        );
     }
 
     // Shortening trims and splits don't remove material, so no chomp.
