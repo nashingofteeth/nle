@@ -16,7 +16,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use nle_core::timeline::{Clip, Segment, TrackKind, TransitionKind, TransitionSource};
+use nle_core::project::Asset;
+use nle_core::timeline::{Clip, Effect, Segment, TrackKind, TransitionKind, TransitionSource};
 use nle_core::{Project, Seconds, format_seconds};
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -42,6 +43,8 @@ pub enum CompileError {
     MissingAsset(u32),
     #[error("transitions aren't exported yet (M5)")]
     Transition,
+    #[error("asset #{0} has no picture size — cannot resolve a percentage crop")]
+    MissingGeometry(u32),
 }
 
 #[derive(Debug, Error)]
@@ -77,19 +80,27 @@ enum Piece {
 
 /// The per-clip effect filters, joined for the chain — empty when there
 /// are none, otherwise `f1,f2,` (the trailing comma is the separator before
-/// the normalize `scale`).
-fn clip_effects(c: &Clip) -> String {
+/// the normalize `scale`). A percentage crop resolves against the asset's own
+/// frame (the chain runs before the normalize); other effects ignore it.
+fn clip_effects(c: &Clip, asset: &Asset, fallback: (u32, u32)) -> Result<String, CompileError> {
     if c.effects.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
+    let frame = if c.effects.iter().any(|e| matches!(e, Effect::Crop { .. })) {
+        asset
+            .video_size()
+            .ok_or(CompileError::MissingGeometry(asset.id))?
+    } else {
+        fallback
+    };
     let mut s = c
         .effects
         .iter()
-        .map(|e| e.filter())
+        .map(|e| e.filter(frame))
         .collect::<Vec<_>>()
         .join(",");
     s.push(',');
-    s
+    Ok(s)
 }
 
 /// The video retime stage. At 1× this is exactly the old
@@ -214,7 +225,7 @@ fn compile_single_video(project: &Project) -> Result<ExportPlan, CompileError> {
                     src_dur: format_seconds(&c.source_duration()),
                     out_dur: format_seconds(&c.duration()),
                     speed: c.speed,
-                    effects: clip_effects(c),
+                    effects: clip_effects(c, asset, (w, h))?,
                     has_audio: asset.probe.has_audio(),
                 });
             }
@@ -448,7 +459,7 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
                             "[{input}:v]trim=start={src_start}:duration={src_dur},{setpts},{effects}\
                              scale={w}:{h},setsar=1,fps={fps_s},format=yuva420p[v{ti}_{idx}];\n",
                             setpts = video_setpts(&c.speed),
-                            effects = clip_effects(c),
+                            effects = clip_effects(c, asset, (w, h))?,
                         ));
                         v_labels.push(format!("[v{ti}_{idx}]"));
                     }
@@ -1039,17 +1050,16 @@ mod tests {
         if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
             c.effects = vec![
                 Effect::Crop {
-                    x: 1,
-                    y: 2,
-                    w: 3,
-                    h: 4,
+                    scale: 50.0,
+                    x: 50.0,
+                    y: 50.0,
                 },
                 Effect::Scale { w: 10, h: 20 },
             ];
         }
         let g = compile_export(&p).unwrap().graph;
         // Effects chain after the retime, before the normalize scale.
-        assert!(g.contains("crop=3:4:1:2,scale=10:20,"), "{g}");
+        assert!(g.contains("crop=960:540:480:270,scale=10:20,"), "{g}");
         assert!(g.contains("scale=10:20,scale=1920:1080"), "{g}");
     }
 }

@@ -18,8 +18,9 @@ use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 /// Project file format version. No migration path is kept (see
 /// README "Compatibility: none, by design"): old files are rejected,
 /// never silently misread. v3 added the per-track `muted` flag;
-/// v4 added the per-clip `speed` rate; v5 added the stored playhead.
-pub const PROJECT_VERSION: u32 = 6;
+/// v4 added the per-clip `speed` rate; v5 added the stored playhead;
+/// v7 stores `crop` as percentages (scale/x/y) instead of pixel w/h/x/y.
+pub const PROJECT_VERSION: u32 = 7;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {

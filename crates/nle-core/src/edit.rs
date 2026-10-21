@@ -31,7 +31,8 @@ pub const MAX_HISTORY: usize = 100;
 /// it as a `rational_ser` fraction like every other time in the Atom.
 /// v9 persists the redo stack too, so `nle redo` works across processes.
 /// v10 adds `Change::Tracks` (track add/mute/rm are undoable).
-pub const HISTORY_VERSION: u32 = 12;
+/// v13 follows the project's percentage `crop` (segments carry effects).
+pub const HISTORY_VERSION: u32 = 13;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -7631,10 +7632,9 @@ mod tests {
         };
         let scale = Effect::Scale { w: 2, h: 2 };
         let crop = Effect::Crop {
-            x: 0,
-            y: 0,
-            w: 3,
-            h: 3,
+            scale: 50.0,
+            x: 50.0,
+            y: 50.0,
         };
 
         let mut p = fixture();

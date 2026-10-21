@@ -1958,10 +1958,9 @@ fn form_for(kind: &'static str) -> FxForm {
     };
     let fields = match kind {
         "crop" => vec![
-            field("width", "", FieldKind::Int),
-            field("height", "", FieldKind::Int),
-            field("x", "0", FieldKind::Int),
-            field("y", "0", FieldKind::Int),
+            field("scale %", "", FieldKind::Float),
+            field("x %", "50", FieldKind::Float),
+            field("y %", "50", FieldKind::Float),
         ],
         "scale" => vec![
             field("width", "", FieldKind::Int),
@@ -2060,15 +2059,6 @@ fn form_effect(form: &FxForm) -> Result<Effect, String> {
         v.parse()
             .map_err(|_| format!("{name} must be a whole number"))
     };
-    let opt_int = |i: usize, name: &str| -> Result<Option<u32>, String> {
-        let v = value(i);
-        if v.is_empty() {
-            return Ok(None);
-        }
-        v.parse()
-            .map(Some)
-            .map_err(|_| format!("{name} must be a whole number"))
-    };
     let opt_float = |i: usize, name: &str| -> Result<Option<f64>, String> {
         let v = value(i);
         if v.is_empty() {
@@ -2080,10 +2070,9 @@ fn form_effect(form: &FxForm) -> Result<Effect, String> {
     };
     let args = match form.kind {
         "crop" => EffectArgs {
-            w: Some(int(0, "width")?),
-            h: Some(int(1, "height")?),
-            x: opt_int(2, "x")?,
-            y: opt_int(3, "y")?,
+            scale: Some(opt_float(0, "scale")?.ok_or_else(|| "scale is required".to_string())?),
+            x: opt_float(1, "x")?,
+            y: opt_float(2, "y")?,
             ..Default::default()
         },
         "scale" => EffectArgs {
@@ -8046,10 +8035,9 @@ mod tests {
         app.playhead = 1.0;
         let scale = nle_core::timeline::Effect::Scale { w: 2, h: 2 };
         let crop = nle_core::timeline::Effect::Crop {
-            x: 0,
-            y: 0,
-            w: 3,
-            h: 3,
+            scale: 50.0,
+            x: 50.0,
+            y: 50.0,
         };
         set_effects(&mut app, 1, vec![scale.clone(), crop.clone()]);
 
@@ -8111,26 +8099,23 @@ mod tests {
             app.mode
         );
 
-        // An empty width is refused at apply time (it would be `crop=0`).
-        for _ in 0..3 {
+        // An empty scale is refused at apply time (the one required field).
+        for _ in 0..2 {
             handle_key(&mut app, &fake, tab);
         }
         handle_key(&mut app, &fake, enter);
-        assert!(app.message.contains("width is required"), "{}", app.message);
+        assert!(app.message.contains("scale is required"), "{}", app.message);
         assert!(fx_state(&app).unwrap().form.is_some(), "still editing");
 
-        // Cancel, reopen, and type w/h through the fields.
+        // Cancel, reopen, type a half-size crop; x/y stay at their centred
+        // defaults.
         handle_key(&mut app, &fake, esc);
         handle_key(&mut app, &fake, key('c'));
-        for c in "160".chars() {
+        for c in "50".chars() {
             handle_key(&mut app, &fake, key(c));
         }
-        handle_key(&mut app, &fake, tab);
-        for c in "120".chars() {
-            handle_key(&mut app, &fake, key(c));
-        }
-        handle_key(&mut app, &fake, enter); // → x (pre-filled 0)
-        handle_key(&mut app, &fake, enter); // → y (pre-filled 0)
+        handle_key(&mut app, &fake, enter); // → x (pre-filled 50)
+        handle_key(&mut app, &fake, enter); // → y (pre-filled 50)
         handle_key(&mut app, &fake, enter); // apply
 
         assert!(is_fx(&app), "the panel comes back");
@@ -8138,10 +8123,9 @@ mod tests {
         assert_eq!(
             fx_clip(&app).unwrap().effects.last(),
             Some(&Effect::Crop {
-                x: 0,
-                y: 0,
-                w: 160,
-                h: 120
+                scale: 50.0,
+                x: 50.0,
+                y: 50.0
             })
         );
         assert_eq!(fx_state(&app).unwrap().sel, 1, "on the new row");
@@ -8184,10 +8168,9 @@ mod tests {
             1,
             vec![
                 nle_core::timeline::Effect::Crop {
-                    x: 2,
-                    y: 4,
-                    w: 160,
-                    h: 120,
+                    scale: 50.0,
+                    x: 50.0,
+                    y: 50.0,
                 },
                 nle_core::timeline::Effect::Eq {
                     brightness: 0.1,
@@ -8209,7 +8192,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("effects → clip #1"), "{text}");
-        assert!(text.contains("160×120 at 2,4"), "{text}");
+        assert!(text.contains("50% at 50,50"), "{text}");
         assert!(text.contains("b 0.1 · c 1 · s 1"), "{text}");
 
         app.mode = Mode::Fx(FxState {
@@ -8499,7 +8482,7 @@ mod tests {
         app.loaded = true;
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key(':'));
-        for c in "effect crop --clip 1 --w 10 --h 10".chars() {
+        for c in "effect crop --clip 1 --scale 50".chars() {
             handle_key(&mut app, &fake, key(c));
         }
         handle_key(
@@ -8514,10 +8497,9 @@ mod tests {
         assert_eq!(
             c.effects,
             vec![nle_core::timeline::Effect::Crop {
-                x: 0,
-                y: 0,
-                w: 10,
-                h: 10
+                scale: 50.0,
+                x: 50.0,
+                y: 50.0
             }]
         );
     }

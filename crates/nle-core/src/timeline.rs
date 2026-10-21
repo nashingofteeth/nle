@@ -42,8 +42,10 @@ pub enum TrackKind {
 /// serializable and safe to hand to the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
-    /// `crop=w:h:x:y`.
-    Crop { x: u32, y: u32, w: u32, h: u32 },
+    /// `crop`, as percentages of the source frame: `scale` is how much of the
+    /// frame to keep (1–100), and `x`/`y` place that box in the leftover
+    /// margin (0 = left/top, 50 = centre, 100 = right/bottom).
+    Crop { scale: f64, x: f64, y: f64 },
     /// `scale=w:h`.
     Scale { w: u32, h: u32 },
     /// `eq=brightness=…:contrast=…:saturation=…`.
@@ -70,7 +72,7 @@ impl Effect {
     /// The parameters as one line — the panel's detail column.
     pub fn details(&self) -> String {
         match self {
-            Effect::Crop { x, y, w, h } => format!("{w}×{h} at {x},{y}"),
+            Effect::Crop { scale, x, y } => format!("{scale}% at {x},{y}"),
             Effect::Scale { w, h } => format!("{w}×{h}"),
             Effect::Eq {
                 brightness,
@@ -86,10 +88,14 @@ impl Effect {
         }
     }
 
-    /// The ffmpeg filter fragment for this effect.
-    pub fn filter(&self) -> String {
+    /// The ffmpeg filter fragment for this effect, applied to a source frame
+    /// of `frame` pixels (only `crop` needs it).
+    pub fn filter(&self, frame: (u32, u32)) -> String {
         match self {
-            Effect::Crop { x, y, w, h } => format!("crop={w}:{h}:{x}:{y}"),
+            Effect::Crop { scale, x, y } => {
+                let (w, h, x, y) = crop_geometry(*scale, *x, *y, frame);
+                format!("crop={w}:{h}:{x}:{y}")
+            }
             Effect::Scale { w, h } => format!("scale={w}:{h}"),
             Effect::Eq {
                 brightness,
@@ -101,6 +107,26 @@ impl Effect {
             Effect::Lut { path } => format!("lut3d=file='{}'", path.replace('\'', r"'\''")),
         }
     }
+}
+
+/// Resolve a percentage crop against the source frame: keep `scale` percent
+/// of each axis, then place that box in the leftover margin (`x`/`y` percent,
+/// 50 = centred). Clamped to the frame so a hand-edited project can't crop
+/// past it.
+fn crop_geometry(scale: f64, x: f64, y: f64, (fw, fh): (u32, u32)) -> (u32, u32, u32, u32) {
+    let keep = |size: u32, pct: f64| {
+        ((size as f64 * pct / 100.0).round() as u32)
+            .max(2)
+            .min(size.max(2))
+    };
+    let (w, h) = (keep(fw, scale), keep(fh, scale));
+    let place =
+        |margin: u32, pct: f64| (((margin as f64) * pct / 100.0).round() as u32).min(margin);
+    let (x, y) = (
+        place(fw.saturating_sub(w), x),
+        place(fh.saturating_sub(h), y),
+    );
+    (w, h, x, y)
 }
 
 /// One piece of media on a track. Its timeline position is derived from
@@ -695,7 +721,7 @@ mod tests {
             Effect::Lut {
                 path: "/luts/a,b:c.cube".into()
             }
-            .filter(),
+            .filter((0, 0)),
             "lut3d=file='/luts/a,b:c.cube'",
             "a comma or colon must not split the graph"
         );
@@ -703,7 +729,7 @@ mod tests {
             Effect::Lut {
                 path: "/luts/it's.cube".into()
             }
-            .filter(),
+            .filter((0, 0)),
             r"lut3d=file='/luts/it'\''s.cube'",
             "a quote is escaped the ffmpeg way"
         );

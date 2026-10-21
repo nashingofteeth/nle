@@ -1025,7 +1025,7 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 
 /// The `:effect` / `nle effect` usage string — one spelling for both
 /// front-ends.
-pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] crop --w --h [--x --y] | \
+pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] crop --scale P [--x P] [--y P] | \
      scale --w --h | eq [--brightness --contrast --saturation] | lut --path P | \
      rm [--index N] | clear";
 
@@ -1036,8 +1036,11 @@ pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] crop --w --h [--x
 pub struct EffectArgs {
     pub w: Option<u32>,
     pub h: Option<u32>,
-    pub x: Option<u32>,
-    pub y: Option<u32>,
+    /// crop: percent of the source frame to keep (1–100).
+    pub scale: Option<f64>,
+    /// crop: placement in the leftover margin (0 = left/top, 50 = centre).
+    pub x: Option<f64>,
+    pub y: Option<f64>,
     pub brightness: Option<f64>,
     pub contrast: Option<f64>,
     pub saturation: Option<f64>,
@@ -1063,12 +1066,25 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
     };
     match kind {
         "crop" => {
-            let (w, h) = dims(a.w, a.h)?;
+            let scale = a
+                .scale
+                .ok_or_else(|| ParseError::Invalid("effect needs --scale".to_string()))?;
+            if !(1.0..=100.0).contains(&scale) {
+                return Err(ParseError::Invalid(
+                    "crop scale must be 1–100 (%)".to_string(),
+                ));
+            }
+            let place = |v: Option<f64>, n: &str| -> Result<f64, ParseError> {
+                let v = v.unwrap_or(50.0);
+                if !(0.0..=100.0).contains(&v) {
+                    return Err(ParseError::Invalid(format!("crop {n} must be 0–100 (%)")));
+                }
+                Ok(v)
+            };
             Ok(Effect::Crop {
-                x: a.x.unwrap_or(0),
-                y: a.y.unwrap_or(0),
-                w,
-                h,
+                scale,
+                x: place(a.x, "x")?,
+                y: place(a.y, "y")?,
             })
         }
         "scale" => {
@@ -1221,8 +1237,9 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     let args = EffectArgs {
                         w: opt_u32(&mut f, "w")?,
                         h: opt_u32(&mut f, "h")?,
-                        x: opt_u32(&mut f, "x")?,
-                        y: opt_u32(&mut f, "y")?,
+                        scale: opt_time(&mut f, "scale")?,
+                        x: opt_time(&mut f, "x")?,
+                        y: opt_time(&mut f, "y")?,
                         brightness: opt_time(&mut f, "brightness")?,
                         contrast: opt_time(&mut f, "contrast")?,
                         saturation: opt_time(&mut f, "saturation")?,
@@ -1453,7 +1470,7 @@ mod tests {
             "undo",
             "redo",
             "transition --at 3",
-            "effect crop --clip 1 --w 10 --h 10",
+            "effect crop --clip 1 --scale 50",
             "effect rm --clip 1 --index 0",
             "effect clear --clip 1",
         ];
@@ -1540,9 +1557,49 @@ mod tests {
             }
         );
         assert_eq!(
-            effect.filter(),
+            effect.filter((0, 0)),
             "eq=brightness=-0.2:contrast=1:saturation=1",
             "the neutral values reach the graph"
+        );
+    }
+
+    #[test]
+    fn crop_is_percentages_with_a_centred_default() {
+        let Action::AddEffect { effect, .. } =
+            parse("effect crop --clip 1 --scale 50", &defaults()).unwrap()
+        else {
+            panic!("expected an effect")
+        };
+        assert_eq!(
+            effect,
+            Effect::Crop {
+                scale: 50.0,
+                x: 50.0,
+                y: 50.0
+            },
+            "x/y default to centred"
+        );
+        // 1920×1080, half size, centred.
+        assert_eq!(effect.filter((1920, 1080)), "crop=960:540:480:270");
+        // Top-left and bottom-right.
+        let Action::AddEffect { effect, .. } =
+            parse("effect crop --clip 1 --scale 50 --x 0 --y 0", &defaults()).unwrap()
+        else {
+            panic!("expected an effect")
+        };
+        assert_eq!(effect.filter((1920, 1080)), "crop=960:540:0:0");
+        let Action::AddEffect { effect, .. } = parse(
+            "effect crop --clip 1 --scale 50 --x 100 --y 100",
+            &defaults(),
+        )
+        .unwrap() else {
+            panic!("expected an effect")
+        };
+        assert_eq!(effect.filter((1920, 1080)), "crop=960:540:960:540");
+        assert_eq!(
+            effect.details(),
+            "50% at 100,100",
+            "the panel/show text says percentages"
         );
     }
 
@@ -1550,7 +1607,10 @@ mod tests {
     fn a_zero_sized_effect_is_refused() {
         let d = ParseDefaults::default();
         for spec in [
-            "effect crop --clip 1 --w 0 --h 10",
+            "effect crop --clip 1 --scale 0",
+            "effect crop --clip 1 --scale 101",
+            "effect crop --clip 1 --scale 50 --x 101",
+            "effect crop --clip 1",
             "effect scale --clip 1 --w 10 --h 0",
         ] {
             assert!(

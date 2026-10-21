@@ -298,12 +298,15 @@ enum Cmd {
         /// crop/scale height
         #[arg(long)]
         h: Option<u32>,
-        /// crop x offset
-        #[arg(long)]
-        x: Option<u32>,
-        /// crop y offset
-        #[arg(long)]
-        y: Option<u32>,
+        /// crop: percent of the source frame to keep (1–100)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        scale: Option<f64>,
+        /// crop: horizontal placement in the leftover margin (0–100; 50 = centre)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        x: Option<f64>,
+        /// crop: vertical placement in the leftover margin (0–100; 50 = centre)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        y: Option<f64>,
         /// eq brightness (0 is neutral)
         #[arg(long, value_name = "F", allow_negative_numbers = true)]
         brightness: Option<f64>,
@@ -783,6 +786,7 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             index,
             w,
             h,
+            scale,
             x,
             y,
             brightness,
@@ -802,6 +806,7 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     EffectArgs {
                         w: *w,
                         h: *h,
+                        scale: *scale,
                         x: *x,
                         y: *y,
                         brightness: *brightness,
@@ -2683,8 +2688,9 @@ mod tests {
                 clip: 1,
                 track: 1,
                 index: None,
-                w: Some(10),
-                h: Some(10),
+                w: None,
+                h: None,
+                scale: Some(50.0),
                 x: None,
                 y: None,
                 brightness: None,
@@ -2699,6 +2705,7 @@ mod tests {
                 index: Some(0),
                 w: None,
                 h: None,
+                scale: None,
                 x: None,
                 y: None,
                 brightness: None,
@@ -2713,6 +2720,7 @@ mod tests {
                 index: None,
                 w: None,
                 h: None,
+                scale: None,
                 x: None,
                 y: None,
                 brightness: None,
