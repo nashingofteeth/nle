@@ -61,18 +61,19 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              track (the timeline draws one row per track)
 #   fx:        x effects panel for the clip under the playhead — j/k select ·
 #              enter edit the selected effect (a blank field keeps the applied
-#              value, shown as "was N") · d drop · D clear · c/s/e/l add
-#              crop/scale/eq/lut; a kind already on the clip opens for editing
-#              instead of stacking (one effect per kind) · the form's fields:
-#              a letter jumps to its field, tab/↑↓ move, enter applies and
-#              closes, ctrl-u clears, esc cancels · u undo · q/esc close; `*`
+#              value, shown as "was N") · d drop · D clear · c/s/e/l/o add
+#              crop/scale/eq/lut/offset; a kind already on the clip opens for
+#              editing instead of stacking (one effect per kind) · the form's
+#              fields: a letter jumps to its field, tab/↑↓ move, enter applies
+#              and closes, ctrl-u clears, esc cancels; in scale, `a` locks the
+#              width/height ratio · u undo · q/esc close; `*`
 #              marks a clip with effects in the row and `nle show` lists them
 #              in order ·
 #              X cross-dissolve at the boundary (count = frames); `xx` also
 #              works — the first x opens the panel, the second applies it and
 #              closes ·
 #              :transition [dissolve|fade] [--dur T|--frames N] ·
-#              :effect [--clip N] crop|scale|eq|lut … · :effect rm [--index N] ·
+#              :effect [--clip N] crop|scale|offset|eq|lut … · :effect rm [--index N] ·
 #              :effect clear (one effect per kind: re-adding a kind replaces
 #              it in place) · rendered at export;
 #              the monitor plays a rendered proxy for effects/speed/transitions,
@@ -163,6 +164,8 @@ $N effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
 $N effect scale --clip 3 --w 50 --h 50 # percent of the picture at this point
 #   100 = default. Scaling down pads transparently, so the track below shows
 #   through; scaling up is a centre zoom. Effects compose in the order added.
+$N effect offset --clip 3 --x 10 --y -5 # percent of the canvas (0 = no move)
+#   Negative moves left/up; the picture is clipped at the canvas edge.
 $N effect eq --clip 3 --brightness -0.2 # contrast/saturation default to 1
 $N effect rm --clip 3                  # drop the last effect (--index N picks)
 $N effect clear --clip 3               # drop them all (one undo step)

@@ -1034,6 +1034,7 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] \
      crop --left P --right P --top P --bottom P (%: 0 = edge, 100 = opposite) | \
      scale --w P --h P (%: 100 = unchanged) | \
+     offset --x P --y P (% of the canvas; negative = left/up) | \
      eq [--brightness --contrast --saturation] | lut --path P | \
      rm [--index N] | clear (one per kind: adding a kind again replaces it)";
 
@@ -1051,6 +1052,9 @@ pub struct EffectArgs {
     pub right: Option<f64>,
     pub top: Option<f64>,
     pub bottom: Option<f64>,
+    /// offset: position shift as percentages of the canvas (0 = no move).
+    pub x: Option<f64>,
+    pub y: Option<f64>,
     pub brightness: Option<f64>,
     pub contrast: Option<f64>,
     pub saturation: Option<f64>,
@@ -1093,6 +1097,10 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
         "scale" => Ok(Effect::Scale {
             w: pct(a.w, "scale width", 100.0, 1.0, 1000.0)?,
             h: pct(a.h, "scale height", 100.0, 1.0, 1000.0)?,
+        }),
+        "offset" => Ok(Effect::Offset {
+            x: pct(a.x, "offset x", 0.0, -100.0, 100.0)?,
+            y: pct(a.y, "offset y", 0.0, -100.0, 100.0)?,
         }),
         // ffmpeg's `eq` is neutral at brightness 0 / contrast 1 /
         // saturation 1: 0 contrast and saturation mean flat and grey.
@@ -1244,6 +1252,8 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                         right: opt_time(&mut f, "right")?,
                         top: opt_time(&mut f, "top")?,
                         bottom: opt_time(&mut f, "bottom")?,
+                        x: opt_time(&mut f, "x")?,
+                        y: opt_time(&mut f, "y")?,
                         brightness: opt_time(&mut f, "brightness")?,
                         contrast: opt_time(&mut f, "contrast")?,
                         saturation: opt_time(&mut f, "saturation")?,
@@ -1679,6 +1689,39 @@ mod tests {
         assert!(Effect::masks(&effects, (320, 240)));
     }
 
+    // Offset moves the picture by a percentage of the canvas; the vacated
+    // area is transparent and the overflow is clipped.
+    #[test]
+    fn offset_moves_the_picture_on_the_canvas() {
+        let Action::AddEffect { effect, .. } =
+            parse("effect offset --clip 1 --x 10 --y -5", &defaults()).unwrap()
+        else {
+            panic!("expected an effect")
+        };
+        assert_eq!(effect, Effect::Offset { x: 10.0, y: -5.0 });
+        assert_eq!(effect.details(), "x 10% · y -5%");
+        // +10% of 640 = 64 px right: the left 64 px is vacated, the right
+        // 64 px of the picture is clipped.
+        let right = Effect::Offset { x: 10.0, y: 0.0 };
+        assert_eq!(
+            Effect::chain(std::slice::from_ref(&right), (640, 360)),
+            "format=yuva420p,crop=576:360:0:0,pad=640:360:64:0:color=black@0"
+        );
+        // -5% of 360 = 18 px up.
+        let up = Effect::Offset { x: 0.0, y: -5.0 };
+        assert_eq!(
+            Effect::chain(std::slice::from_ref(&up), (640, 360)),
+            "format=yuva420p,crop=640:342:0:18,pad=640:360:0:0:color=black@0"
+        );
+        assert!(Effect::masks(&[effect], (640, 360)));
+
+        // 0/0 is a no-op.
+        assert_eq!(
+            Effect::chain(&[Effect::Offset { x: 0.0, y: 0.0 }], (640, 360)),
+            ""
+        );
+    }
+
     #[test]
     fn bad_effect_percentages_are_refused() {
         let d = ParseDefaults::default();
@@ -1688,6 +1731,8 @@ mod tests {
             "effect crop --clip 1 --top 60 --bottom 40",
             "effect scale --clip 1 --w 0",
             "effect scale --clip 1 --h 1001",
+            "effect offset --clip 1 --x 101",
+            "effect offset --clip 1 --y -101",
         ] {
             assert!(
                 matches!(parse(spec, &d), Err(ParseError::Invalid(_))),

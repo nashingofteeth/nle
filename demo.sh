@@ -123,6 +123,7 @@ $N --project showcase.json track add video >/dev/null
 $N --project showcase.json add sun.mp4 --track 2 --at 2.1 --in 0 --out 0.8 >/dev/null
 $N --project showcase.json effect scale --clip 5 --w 50 --h 50 >/dev/null
 $N --project showcase.json effect crop --clip 5 --left 30 >/dev/null
+$N --project showcase.json effect offset --clip 5 --x 0 --y -20 >/dev/null
 $N --project showcase.json track add audio >/dev/null
 $N --project showcase.json add sea.mp4 --track 3 --in 0 --out 2 >/dev/null
 $N --project showcase.json show
@@ -178,10 +179,11 @@ fi
 mid=$(px 2.5 showcase.mp4 318 178)
 cut=$(px 2.5 showcase.mp4 200 180)
 corner=$(px 2.5 showcase.mp4 2 2)
-if warm "$mid" && cool "$cut" && cool "$corner"; then
-  echo "  ✓ overlay scale 50 + crop 30: sun ${mid}; cut strip ${cut} and pad ${corner} show the sea"
+bottom=$(px 2.5 showcase.mp4 318 330)
+if warm "$mid" && cool "$cut" && cool "$corner" && cool "$bottom"; then
+  echo "  ✓ overlay scale 50 + crop 30 + offset -20: sun ${mid}; cut ${cut}, pad ${corner} and vacated ${bottom} show the sea"
 else
-  echo "  ✗ overlay/scale/crop wrong (centre ${mid}, cut ${cut}, corner ${corner})"; exit 1
+  echo "  ✗ overlay/scale/crop/offset wrong (centre ${mid}, cut ${cut}, corner ${corner}, bottom ${bottom})"; exit 1
 fi
 grey_px=$(px 3.2 showcase.mp4 318 178)
 if greyish "$grey_px"; then

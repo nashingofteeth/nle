@@ -310,6 +310,12 @@ enum Cmd {
         /// crop: inset from the bottom edge (percent)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         bottom: Option<f64>,
+        /// offset: horizontal shift (percent of the canvas; negative = left)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        x: Option<f64>,
+        /// offset: vertical shift (percent of the canvas; negative = up)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        y: Option<f64>,
         /// eq brightness (0 is neutral)
         #[arg(long, value_name = "F", allow_negative_numbers = true)]
         brightness: Option<f64>,
@@ -811,6 +817,8 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             right,
             top,
             bottom,
+            x,
+            y,
             brightness,
             contrast,
             saturation,
@@ -832,6 +840,8 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                         right: *right,
                         top: *top,
                         bottom: *bottom,
+                        x: *x,
+                        y: *y,
                         brightness: *brightness,
                         contrast: *contrast,
                         saturation: *saturation,
@@ -2735,6 +2745,8 @@ mod tests {
                 right: Some(10.0),
                 top: None,
                 bottom: None,
+                x: None,
+                y: None,
                 brightness: None,
                 contrast: None,
                 saturation: None,
@@ -2751,6 +2763,8 @@ mod tests {
                 right: None,
                 top: None,
                 bottom: None,
+                x: None,
+                y: None,
                 brightness: None,
                 contrast: None,
                 saturation: None,
@@ -2767,6 +2781,8 @@ mod tests {
                 right: None,
                 top: None,
                 bottom: None,
+                x: None,
+                y: None,
                 brightness: None,
                 contrast: None,
                 saturation: None,

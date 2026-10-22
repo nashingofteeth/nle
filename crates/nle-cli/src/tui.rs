@@ -299,6 +299,10 @@ pub struct FxForm {
     /// `Some(index)` when the form edits an existing effect in place;
     /// `None` appends a new one.
     pub editing: Option<usize>,
+    /// Scale only: keep the width/height ratio while typing (`a` toggles).
+    pub lock: bool,
+    /// The ratio to preserve when `lock` is on (`width / height`).
+    pub aspect: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2131,34 +2135,39 @@ fn close_fx(app: &mut App) {
     app.set_message("timeline");
 }
 
-/// The "add" form for an effect kind. Width/height start at 100; `eq` starts
-/// neutral; crop starts at 0. Each numeric field's first letter is its jump
-/// key; the path field takes every letter as text.
+/// The "add" form for an effect kind. Every input starts blank; the neutral
+/// value is shown as "was N" beside it and is used if the field is left blank.
+/// Each numeric field's first letter is its jump key; the path field takes
+/// every letter as text.
 fn form_for(kind: &'static str) -> FxForm {
-    let field = |label, value: &str, kind, key: Option<char>| FxField {
+    let field = |label, previous: Option<&str>, kind, key: Option<char>| FxField {
         label,
-        value: value.to_string(),
-        previous: None,
+        value: String::new(),
+        previous: previous.map(str::to_string),
         kind,
         key,
     };
     let fields = match kind {
         "crop" => vec![
-            field("left %", "0", FieldKind::Float, Some('l')),
-            field("right %", "0", FieldKind::Float, Some('r')),
-            field("top %", "0", FieldKind::Float, Some('t')),
-            field("bottom %", "0", FieldKind::Float, Some('b')),
+            field("left %", Some("0"), FieldKind::Float, Some('l')),
+            field("right %", Some("0"), FieldKind::Float, Some('r')),
+            field("top %", Some("0"), FieldKind::Float, Some('t')),
+            field("bottom %", Some("0"), FieldKind::Float, Some('b')),
         ],
         "scale" => vec![
-            field("width %", "100", FieldKind::Float, Some('w')),
-            field("height %", "100", FieldKind::Float, Some('h')),
+            field("width %", Some("100"), FieldKind::Float, Some('w')),
+            field("height %", Some("100"), FieldKind::Float, Some('h')),
+        ],
+        "offset" => vec![
+            field("x %", Some("0"), FieldKind::Float, Some('x')),
+            field("y %", Some("0"), FieldKind::Float, Some('y')),
         ],
         "eq" => vec![
-            field("brightness", "0", FieldKind::Float, Some('b')),
-            field("contrast", "1", FieldKind::Float, Some('c')),
-            field("saturation", "1", FieldKind::Float, Some('s')),
+            field("brightness", Some("0"), FieldKind::Float, Some('b')),
+            field("contrast", Some("1"), FieldKind::Float, Some('c')),
+            field("saturation", Some("1"), FieldKind::Float, Some('s')),
         ],
-        "lut" => vec![field("path", "", FieldKind::Path, None)],
+        "lut" => vec![field("path", None, FieldKind::Path, None)],
         _ => Vec::new(),
     };
     FxForm {
@@ -2166,6 +2175,8 @@ fn form_for(kind: &'static str) -> FxForm {
         fields,
         focus: 0,
         editing: None,
+        lock: false,
+        aspect: 1.0,
     }
 }
 
@@ -2174,6 +2185,11 @@ fn form_for(kind: &'static str) -> FxForm {
 fn form_for_effect(effect: &Effect, index: usize) -> FxForm {
     let mut form = form_for(effect.kind());
     form.editing = Some(index);
+    if let Effect::Scale { w, h } = effect
+        && *h > 0.0
+    {
+        form.aspect = *w / *h;
+    }
     let values: Vec<String> = match effect {
         Effect::Crop {
             left,
@@ -2185,6 +2201,7 @@ fn form_for_effect(effect: &Effect, index: usize) -> FxForm {
             .map(|v| v.to_string())
             .collect(),
         Effect::Scale { w, h } => vec![w.to_string(), h.to_string()],
+        Effect::Offset { x, y } => vec![x.to_string(), y.to_string()],
         Effect::Eq {
             brightness,
             contrast,
@@ -2287,6 +2304,45 @@ fn fx_focus(app: &mut App, index: usize) {
     }
 }
 
+/// With the scale form's lock on, mirror the field being typed into the other
+/// axis using the ratio captured when the form opened.
+fn fx_sync_aspect(app: &mut App, edited: usize) {
+    let Some(st) = fx_state_mut(app) else { return };
+    let Some(form) = st.form.as_mut() else { return };
+    if !form.lock || form.kind != "scale" || form.fields.len() != 2 || form.aspect <= 0.0 {
+        return;
+    }
+    let Some(value) = form
+        .fields
+        .get(edited)
+        .and_then(|f| f.value.trim().parse::<f64>().ok())
+    else {
+        return;
+    };
+    if value <= 0.0 {
+        return;
+    }
+    let synced = if edited == 0 {
+        value / form.aspect
+    } else {
+        value * form.aspect
+    };
+    if let Some(other) = form.fields.get_mut(1 - edited) {
+        other.value = fmt_percent(synced);
+    }
+}
+
+/// A percentage for a mirrored field: two decimals, no trailing zeros.
+fn fmt_percent(v: f64) -> String {
+    let s = format!("{v:.2}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 /// Turn the form's strings into the typed effect and apply it. The values go
 /// through `effect_from_args` — the CLI's parser — so the required fields and
 /// neutral defaults can't drift between the two front-ends.
@@ -2356,6 +2412,11 @@ fn form_effect(form: &FxForm) -> Result<Effect, String> {
             h: opt_float(1, "height")?,
             ..Default::default()
         },
+        "offset" => EffectArgs {
+            x: opt_float(0, "x")?,
+            y: opt_float(1, "y")?,
+            ..Default::default()
+        },
         "eq" => EffectArgs {
             brightness: opt_float(0, "brightness")?,
             contrast: opt_float(1, "contrast")?,
@@ -2393,11 +2454,21 @@ fn fx_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         // Enter is the commit: it validates every field and applies. Only tab
         // (or the arrows) moves between fields.
         KeyCode::Enter => apply_fx_form(app, player),
-        KeyCode::Backspace => fx_edit_field(app, |v| {
-            v.pop();
-        }),
+        KeyCode::Backspace => {
+            fx_edit_field(app, |v| {
+                v.pop();
+            });
+            fx_sync_aspect(app, form.focus);
+        }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             fx_edit_field(app, String::clear);
+        }
+        // `a` toggles the scale form's aspect lock; it is not a field mnemonic.
+        KeyCode::Char(c) if form.kind == "scale" && c.eq_ignore_ascii_case(&'a') => {
+            let Some(st) = fx_state_mut(app) else { return };
+            if let Some(form) = st.form.as_mut() {
+                form.lock = !form.lock;
+            }
         }
         KeyCode::Char(c) => {
             let focused = form.fields.get(form.focus);
@@ -2414,6 +2485,7 @@ fn fx_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             }
             if focused.is_some_and(|f| field_accepts(f.kind, c)) {
                 fx_edit_field(app, |v| v.push(c));
+                fx_sync_aspect(app, form.focus);
             }
         }
         _ => {}
@@ -2503,6 +2575,7 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('s') => open_effect_form(app, "scale"),
         KeyCode::Char('e') => open_effect_form(app, "eq"),
         KeyCode::Char('l') => open_effect_form(app, "lut"),
+        KeyCode::Char('o') => open_effect_form(app, "offset"),
         // `xx`: the first `x` opened the panel; the second applies the
         // transition and exits the panel (a failure keeps it open to retry).
         KeyCode::Char('x') => {
@@ -4172,7 +4245,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         return vec![
             "effects — rows apply in order at export; the monitor re-renders",
             "j/k select · enter edit · d drop · D clear all · u undo · Ctrl-r redo",
-            "c/s/e/l add or edit crop/scale/eq/lut · x transition · q/esc close",
+            "c/s/e/l/o add/edit crop/scale/eq/lut/offset · x transition · q close",
         ];
     }
     vec![
@@ -4827,7 +4900,7 @@ fn render_fx(f: &mut Frame, area: Rect, app: &App) {
     }
     if clip.effects.is_empty() {
         f.render_widget(
-            Paragraph::new("(no effects)   c crop · s scale · e eq · l lut")
+            Paragraph::new("(no effects)   c crop · s scale · e eq · l lut · o offset")
                 .style(Style::default().fg(Color::DarkGray)),
             inner,
         );
@@ -4869,6 +4942,7 @@ fn form_hint(kind: &str) -> &'static str {
             "percent of the picture at this point; 100 keeps the size \
              (below 100 reveals the track below)"
         }
+        "offset" => "percent of the canvas; 0 keeps the position (negative moves left/up)",
         "eq" => "neutral values: brightness 0 · contrast 1 · saturation 1",
         "lut" => "path to a .cube 3D LUT file",
         _ => "",
@@ -4922,6 +4996,22 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
             Line::from(spans)
         })
         .collect();
+    if form.kind == "scale" {
+        let mark = if form.lock { "x" } else { " " };
+        let style = if form.lock {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<11}", "lock w/h"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(format!("[{mark}]"), style),
+            Span::styled("  a toggles", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
     lines.push(Line::from(""));
     lines.push(Line::from(form_hint(form.kind)).style(Style::default().fg(Color::DarkGray)));
     lines.push(
@@ -8910,6 +9000,100 @@ mod tests {
         );
     }
 
+    // The offset form takes a shift in percent of the canvas; x/y jump keys.
+    #[test]
+    fn offset_form_takes_x_and_y() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-offset"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('o'));
+        for c in "10".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, key('y')); // jump to the y field
+        for c in "-20".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            clip_by_id(&app.project, 1).effects.last(),
+            Some(&Effect::Offset { x: 10.0, y: -20.0 })
+        );
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    // `a` locks the scale form's axes: typing one mirrors the other.
+    #[test]
+    fn scale_form_lock_keeps_the_aspect() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-lock"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('s'));
+        handle_key(&mut app, &fake, key('a'));
+        for c in "50".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        let form = fx_state(&app).unwrap().form.as_ref().unwrap();
+        assert!(form.lock, "a turned the lock on");
+        assert_eq!(form.fields[1].value, "50", "height mirrors width");
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            clip_by_id(&app.project, 1).effects.last(),
+            Some(&Effect::Scale { w: 50.0, h: 50.0 })
+        );
+    }
+
+    // Editing a 2:1 scale with the lock keeps that ratio, not 1:1.
+    #[test]
+    fn scale_edit_lock_uses_the_applied_ratio() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-lock-edit"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        set_effects(&mut app, 1, vec![Effect::Scale { w: 50.0, h: 25.0 }]);
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, enter); // edit the scale
+        handle_key(&mut app, &fake, key('a'));
+        for c in "40".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        let form = fx_state(&app).unwrap().form.as_ref().unwrap();
+        assert_eq!(form.aspect, 2.0);
+        assert_eq!(form.fields[1].value, "20", "40 / 2:1 = 20");
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            clip_by_id(&app.project, 1).effects,
+            vec![Effect::Scale { w: 40.0, h: 20.0 }]
+        );
+    }
+
+    // Without the lock the axes stay independent.
+    #[test]
+    fn scale_form_without_lock_keeps_axes_independent() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-unlock"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('s'));
+        for c in "50".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            clip_by_id(&app.project, 1).effects.last(),
+            Some(&Effect::Scale { w: 50.0, h: 100.0 })
+        );
+    }
+
     // Enter on a listed effect opens it prefilled; blank fields keep the old
     // value, and the whole edit is one undo step.
     #[test]
@@ -9189,11 +9373,22 @@ mod tests {
         for (kind, hint) in [
             ("crop", "opposite edge"),
             ("scale", "100 keeps the size"),
+            ("offset", "0 keeps the position"),
             ("eq", "contrast 1"),
             ("lut", ".cube"),
         ] {
             let text = render(kind);
             assert!(text.contains(hint), "{kind}: {hint:?}\n{text}");
+            // Every input starts blank; numeric forms show their neutral value
+            // beside it, even when adding (not only when editing).
+            assert!(text.contains("[▏]"), "{kind}: the input is blank\n{text}");
+            if kind != "lut" {
+                assert!(text.contains("was "), "{kind}: no previous value\n{text}");
+            }
+            if kind == "scale" {
+                assert!(text.contains("lock w/h"), "{kind}: no lock row\n{text}");
+                assert!(text.contains("a toggles"), "{kind}: no lock hint\n{text}");
+            }
         }
     }
 

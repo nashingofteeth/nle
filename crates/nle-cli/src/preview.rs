@@ -1025,6 +1025,7 @@ mod tests {
                 bottom: 0.0,
             },
             Effect::Scale { w: 50.0, h: 50.0 },
+            Effect::Offset { x: 10.0, y: 0.0 },
         ] {
             let mut p = composite_project();
             if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {

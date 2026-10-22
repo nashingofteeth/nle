@@ -308,6 +308,26 @@ fn a_crop_masks_in_place_and_reveals_what_is_below() {
         GREEN,
         "the shrunk overlay is centred",
     );
+
+    s.ok(&["effect", "clear", "--clip", "2"]);
+    s.ok(&["effect", "offset", "--clip", "2", "--x", "50"]);
+    s.export("offset.mp4");
+    s.assert_px_at(
+        "offset.mp4",
+        0.5,
+        20,
+        120,
+        RED,
+        "the offset vacates the base",
+    );
+    s.assert_px_at(
+        "offset.mp4",
+        0.5,
+        300,
+        120,
+        GREEN,
+        "the moved overlay is still visible",
+    );
 }
 
 #[test]

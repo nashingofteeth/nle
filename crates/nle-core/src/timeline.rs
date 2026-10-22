@@ -58,6 +58,10 @@ pub enum Effect {
     /// (100 = unchanged). Below 100% it shrinks about its centre and pads
     /// transparently, so a lower track shows through; above 100% is a zoom.
     Scale { w: f64, h: f64 },
+    /// `offset`, as percentages of the canvas: `x` moves right (negative
+    /// left), `y` moves down (negative up). The picture is clipped to the
+    /// canvas and the vacated area is transparent, so a lower track shows.
+    Offset { x: f64, y: f64 },
     /// `eq=brightness=…:contrast=…:saturation=…`.
     Eq {
         brightness: f64,
@@ -74,6 +78,7 @@ impl Effect {
         match self {
             Effect::Crop { .. } => "crop",
             Effect::Scale { .. } => "scale",
+            Effect::Offset { .. } => "offset",
             Effect::Eq { .. } => "eq",
             Effect::Lut { .. } => "lut",
         }
@@ -89,6 +94,7 @@ impl Effect {
                 bottom,
             } => format!("l{left} r{right} t{top} b{bottom}"),
             Effect::Scale { w, h } => format!("{w}% × {h}%"),
+            Effect::Offset { x, y } => format!("x {x}% · y {y}%"),
             Effect::Eq {
                 brightness,
                 contrast,
@@ -159,6 +165,7 @@ impl Effect {
                 )
             }
             Effect::Scale { w, h } => scale_content(*w, *h, canvas, content),
+            Effect::Offset { x, y } => offset_content(*x, *y, canvas, content),
             Effect::Eq {
                 brightness,
                 contrast,
@@ -268,6 +275,46 @@ fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> 
     if !next.is_full(canvas) {
         chain += &format!(",pad={fw}:{fh}:{}:{}:color=black@0", next.x, next.y);
     }
+    (chain, next)
+}
+
+/// Move the current box by `x`/`y` percent of the canvas, clipping it at the
+/// canvas edge. The vacated area is transparent. At least two pixels of the
+/// picture stay on canvas: a 1 px (or empty) frame can't be cropped on
+/// yuv420p, and a fully off-canvas picture has nothing left to show.
+fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) -> (String, Content) {
+    let (fw, fh) = (i64::from(canvas.0), i64::from(canvas.1));
+    let dx = (fw as f64 * xpct / 100.0).round() as i64;
+    let dy = (fh as f64 * ypct / 100.0).round() as i64;
+    if dx == 0 && dy == 0 {
+        return (String::new(), content);
+    }
+    let nx = (content.x + dx).clamp(2 - content.w, fw - 2);
+    let ny = (content.y + dy).clamp(2 - content.h, fh - 2);
+    // Source offset inside the picture and destination on the canvas.
+    let sx = (-nx).max(0);
+    let sy = (-ny).max(0);
+    let px = nx.max(0);
+    let py = ny.max(0);
+    let vw = (content.w - sx).min(fw - px);
+    let vh = (content.h - sy).min(fh - py);
+    let next = Content {
+        x: px,
+        y: py,
+        w: vw,
+        h: vh,
+    };
+    let mut chain = String::from("format=yuva420p");
+    if !content.is_full(canvas) {
+        chain += &format!(
+            ",crop={}:{}:{}:{}",
+            content.w, content.h, content.x, content.y
+        );
+    }
+    if vw != content.w || vh != content.h {
+        chain += &format!(",crop={vw}:{vh}:{sx}:{sy}");
+    }
+    chain += &format!(",pad={fw}:{fh}:{px}:{py}:color=black@0");
     (chain, next)
 }
 
