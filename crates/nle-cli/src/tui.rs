@@ -2575,6 +2575,15 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             set_fx_sel(app, (sel + 1).min(n.saturating_sub(1)));
         }
         KeyCode::Char('k') | KeyCode::Up => set_fx_sel(app, sel.saturating_sub(1)),
+        // The rows are numbered 1..n: a digit jumps straight to that effect.
+        KeyCode::Char(digit @ '1'..='9') => {
+            let row = digit.to_digit(10).unwrap_or(0) as usize;
+            if row <= n {
+                set_fx_sel(app, row - 1);
+            } else {
+                app.set_message(&format!("no effect #{row}"));
+            }
+        }
         // Selecting an applied effect opens it for editing (blank keeps the
         // current value); `d`/`D` remain the way to remove.
         KeyCode::Enter => open_edit_form(app),
@@ -4284,7 +4293,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         }
         return vec![
             "effects — rows apply in order at export; the monitor re-renders",
-            "j/k select · enter edit · d drop · D clear all · u undo · Ctrl-r redo",
+            "j/k/1-9 select · enter edit · d drop · D clear all · u undo · Ctrl-r redo",
             "c/s/e/l/o add/edit crop/scale/eq/lut/offset · x transition · q close",
         ];
     }
@@ -8884,6 +8893,50 @@ mod tests {
         assert!(fx_clip(&app).unwrap().effects.is_empty());
         handle_key(&mut app, &fake, key('u'));
         assert_eq!(fx_clip(&app).unwrap().effects, vec![eff.clone(), eff]);
+    }
+
+    // Digits jump to the row with that number; out-of-range says so.
+    #[test]
+    fn effects_panel_digits_select_a_row() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-digits"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        set_effects(
+            &mut app,
+            1,
+            vec![
+                Effect::Crop {
+                    left: 10.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                Effect::Eq {
+                    brightness: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                },
+                Effect::Scale { w: 50.0, h: 50.0 },
+            ],
+        );
+        handle_key(&mut app, &fake, key('x'));
+        let sel = |app: &App| fx_state(app).unwrap().sel;
+        handle_key(&mut app, &fake, key('2'));
+        assert_eq!(sel(&app), 1);
+        handle_key(&mut app, &fake, key('3'));
+        assert_eq!(sel(&app), 2);
+        handle_key(&mut app, &fake, key('9'));
+        assert_eq!(sel(&app), 2, "an out-of-range digit leaves the cursor");
+        assert!(app.message.contains("no effect #9"), "{}", app.message);
+
+        // Enter then edits the row the digit selected.
+        handle_key(&mut app, &fake, key('2'));
+        handle_key(&mut app, &fake, enter);
+        let form = fx_state(&app).unwrap().form.as_ref().unwrap();
+        assert_eq!(form.editing, Some(1));
+        assert_eq!(form.kind, "eq");
     }
 
     // Adding from the panel asks for the values in labelled fields, refuses a
