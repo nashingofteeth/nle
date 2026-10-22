@@ -376,6 +376,9 @@ struct Job {
 /// so the EDL is built on a worker while the status row shows progress.
 struct PreviewJob {
     rx: std::sync::mpsc::Receiver<PreviewMsg>,
+    /// When the build started — the status row waits a moment before
+    /// announcing it, so a cached/no-proxy rebuild doesn't flash.
+    started: Instant,
 }
 
 enum PreviewMsg {
@@ -1849,7 +1852,10 @@ fn start_preview(app: &mut App) {
     }
     let project = app.project.clone();
     let (tx, rx) = std::sync::mpsc::channel();
-    app.preview = Some(PreviewJob { rx });
+    app.preview = Some(PreviewJob {
+        rx,
+        started: Instant::now(),
+    });
     app.preview_dirty = false;
     app.preview_progress = Some(PreviewProgress::default());
     std::thread::spawn(move || {
@@ -4180,6 +4186,10 @@ fn asset_metadata(a: &nle_core::Asset) -> Vec<String> {
 const CROC: &str = r#"=";::;>--"#;
 const CHOMP: &str = r#">";::;>--"#;
 const CHOMP_MS: u64 = 250;
+/// How long a preview build runs before the status row announces it. A warm
+/// cache (or a no-proxy timeline) finishes in milliseconds; without this every
+/// edit flashed `building preview…` for a frame.
+const PREVIEW_NOTICE_DELAY: Duration = Duration::from_millis(200);
 
 fn logo(app: &App) -> &'static str {
     match app.chomp_until {
@@ -4280,7 +4290,12 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled(format!("{icon} · {mode}{count}"), style),
     ];
-    if let Some(p) = app.preview_progress {
+    if let Some(p) = app.preview_progress
+        && app
+            .preview
+            .as_ref()
+            .is_some_and(|j| j.started.elapsed() >= PREVIEW_NOTICE_DELAY)
+    {
         spans.push(Span::styled(
             format!(" · {}", preview_indicator(p, app.preview_dirty)),
             style.add_modifier(Modifier::BOLD).fg(Color::Yellow),
@@ -8250,11 +8265,25 @@ mod tests {
         let before = status_row(&app);
         assert!(!before.contains("proxies"), "{before}");
 
+        // A build younger than the notice delay is not announced: a warm cache
+        // finishes in milliseconds and must not flash.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
         app.preview_progress = Some(PreviewProgress {
             done: 1,
             total: 3,
             frac: 0.5,
         });
+        let young = status_row(&app);
+        assert!(!young.contains("proxies"), "no flash: {young}");
+
+        // Past the delay it shows up.
+        if let Some(job) = app.preview.as_mut() {
+            job.started = Instant::now() - PREVIEW_NOTICE_DELAY - Duration::from_millis(1);
+        }
         let mid = status_row(&app);
         assert!(mid.contains("proxies 1/3 · 50%"), "{mid}");
 
@@ -8370,7 +8399,10 @@ mod tests {
         let fake = FakeMpv::new();
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         let (tx, rx) = std::sync::mpsc::channel();
-        app.preview = Some(PreviewJob { rx });
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
         app.preview_progress = Some(PreviewProgress::default());
 
         tx.send(PreviewMsg::Progress {
@@ -8410,7 +8442,10 @@ mod tests {
         let mut app = App::new(p, temp_project_path("preview-stale"));
         app.preview_enabled = true;
         let (tx, rx) = std::sync::mpsc::channel();
-        app.preview = Some(PreviewJob { rx });
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
         app.preview_dirty = true;
         tx.send(PreviewMsg::Done(Ok("edl://old".into()))).unwrap();
         poll_preview(&mut app, &fake);
@@ -8427,7 +8462,10 @@ mod tests {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.set_message("effect on clip #1");
         let (tx, rx) = std::sync::mpsc::channel();
-        app.preview = Some(PreviewJob { rx });
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
         tx.send(PreviewMsg::Done(Err("boom".into()))).unwrap();
         poll_preview(&mut app, &fake);
         assert_eq!(app.message, "effect on clip #1 — preview failed: boom");
@@ -8442,7 +8480,10 @@ mod tests {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         open_pool_mode(&mut app, 0);
         let (tx, rx) = std::sync::mpsc::channel();
-        app.preview = Some(PreviewJob { rx });
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
         tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
             .unwrap();
         poll_preview(&mut app, &fake);
