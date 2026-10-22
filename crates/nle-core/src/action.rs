@@ -1035,7 +1035,7 @@ pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] \
      crop --left P --right P --top P --bottom P (%: 0 = edge, 100 = opposite) | \
      scale --w P --h P (%: 100 = unchanged) | \
      eq [--brightness --contrast --saturation] | lut --path P | \
-     rm [--index N] | clear";
+     rm [--index N] | clear (one per kind: adding a kind again replaces it)";
 
 /// The parameters of an effect call, before the kind picks which of them
 /// apply. Shared by the `:cmd` grammar and the CLI so a new kind can't drift

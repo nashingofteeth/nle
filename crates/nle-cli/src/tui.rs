@@ -2204,7 +2204,20 @@ fn form_for_effect(effect: &Effect, index: usize) -> FxForm {
 }
 
 fn open_effect_form(app: &mut App, kind: &'static str) {
-    if fx_state(app).is_none() {
+    let Some((clip, sel)) = fx_state(app).map(|s| (s.clip, s.sel)) else {
+        return;
+    };
+    // One effect per kind: if this kind is already on the clip, its add key
+    // opens that row for editing instead of stacking a duplicate.
+    let index = clip_by_id(&app.project, clip).and_then(|c| {
+        if c.effects.get(sel).is_some_and(|e| e.kind() == kind) {
+            Some(sel)
+        } else {
+            c.effects.iter().position(|e| e.kind() == kind)
+        }
+    });
+    if let Some(index) = index {
+        edit_effect_at(app, clip, index);
         return;
     }
     set_fx_form(app, Some(form_for(kind)));
@@ -2218,16 +2231,21 @@ fn open_edit_form(app: &mut App) {
     let Some((clip, sel)) = fx_state(app).map(|s| (s.clip, s.sel)) else {
         return;
     };
-    let Some(c) = clip_by_id(&app.project, clip) else {
-        close_fx(app);
-        return;
-    };
-    let Some(effect) = c.effects.get(sel).cloned() else {
+    edit_effect_at(app, clip, sel);
+}
+
+/// Open effect `index` of `clip` as an edit form: blank inputs, old values
+/// shown beside them.
+fn edit_effect_at(app: &mut App, clip: u32, index: usize) {
+    let Some(effect) = clip_by_id(&app.project, clip)
+        .and_then(|c| c.effects.get(index))
+        .cloned()
+    else {
         app.set_message("no effect to edit");
         return;
     };
     let kind = effect.kind();
-    let form = form_for_effect(&effect, sel);
+    let form = form_for_effect(&effect, index);
     set_fx_form(app, Some(form));
     app.set_message(&format!(
         "edit {kind} — blank keeps the old value, enter applies"
@@ -4154,7 +4172,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         return vec![
             "effects — rows apply in order at export; the monitor re-renders",
             "j/k select · enter edit · d drop · D clear all · u undo · Ctrl-r redo",
-            "c crop · s scale · e eq · l lut · x transition · q/esc close",
+            "c/s/e/l add or edit crop/scale/eq/lut · x transition · q/esc close",
         ];
     }
     vec![
@@ -9007,6 +9025,85 @@ mod tests {
         assert!(text.contains("edit crop → clip #1"), "{text}");
         assert!(text.contains("was 30"), "{text}");
         assert!(text.contains("enter applies"), "{text}");
+    }
+
+    // Re-opening a kind that is already applied edits it: no second row.
+    #[test]
+    fn adding_an_existing_kind_opens_it_for_editing() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-nostack"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        set_effects(
+            &mut app,
+            1,
+            vec![Effect::Crop {
+                left: 30.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            }],
+        );
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('c'));
+
+        let form = fx_state(&app).unwrap().form.as_ref().unwrap();
+        assert_eq!(form.editing, Some(0), "c edits the applied crop");
+        assert_eq!(form.fields[0].previous.as_deref(), Some("30"));
+
+        handle_key(&mut app, &fake, key('r'));
+        for c in "10".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            clip_by_id(&app.project, 1).effects,
+            vec![Effect::Crop {
+                left: 30.0,
+                right: 10.0,
+                top: 0.0,
+                bottom: 0.0
+            }],
+            "still one crop row"
+        );
+    }
+
+    // A legacy duplicate (the demo's `crop, crop`) is not stacked further:
+    // the add key edits the row under the cursor.
+    #[test]
+    fn an_existing_duplicate_edits_the_selected_row() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("fx-dup"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        set_effects(
+            &mut app,
+            1,
+            vec![
+                Effect::Crop {
+                    left: 10.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                Effect::Crop {
+                    left: 20.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+            ],
+        );
+        app.mode = Mode::Fx(FxState {
+            clip: 1,
+            sel: 1,
+            form: None,
+        });
+        handle_key(&mut app, &fake, key('c'));
+        let form = fx_state(&app).unwrap().form.as_ref().unwrap();
+        assert_eq!(form.editing, Some(1), "the selected crop is edited");
+        assert_eq!(form.fields[0].previous.as_deref(), Some("20"));
     }
 
     // The panel renders the kind + parameters, and says how to add when the

@@ -1382,12 +1382,14 @@ pub fn add_transition(
     })
 }
 
-/// Append `effect` to clip `clip_id` on the first video track.
+/// Add `effect` to clip `clip_id` on the first video track.
 pub fn add_effect(project: &Project, clip_id: u32, effect: Effect) -> Result<Batch, EditError> {
     add_effect_on(project, video_track_index(project)?, clip_id, effect)
 }
 
-/// Append `effect` to clip `clip_id`'s effect list (on `track`).
+/// Add `effect` to clip `clip_id`'s effect list (on `track`). One effect per
+/// kind: re-adding an existing kind replaces that row in place, so repeated
+/// `:effect crop` (or the panel's `c`) adjusts the crop instead of stacking.
 pub fn add_effect_on(
     project: &Project,
     track: usize,
@@ -1407,8 +1409,18 @@ pub fn add_effect_on(
     let Segment::Clip(c) = &before else {
         return Err(EditError::ClipNotFound(clip_id));
     };
+    let kind = effect.kind();
     let mut c = c.clone();
-    c.effects.push(effect);
+    let desc = match c.effects.iter().position(|e| e.kind() == kind) {
+        Some(i) => {
+            c.effects[i] = effect;
+            format!("edit {kind} on clip #{clip_id}")
+        }
+        None => {
+            c.effects.push(effect);
+            format!("effect on clip #{clip_id}")
+        }
+    };
     let mut ops = vec![EditOp::Replace {
         track,
         index: si,
@@ -1416,10 +1428,7 @@ pub fn add_effect_on(
         after: Segment::Clip(c.clone()),
     }];
     sync_effect_sides(project, track, si, &c, &mut ops);
-    Ok(Batch {
-        ops,
-        desc: format!("effect on clip #{clip_id}"),
-    })
+    Ok(Batch { ops, desc })
 }
 
 /// Replace the effect at `index` on clip `clip_id` (the TUI's edit gesture).
@@ -7825,6 +7834,51 @@ mod tests {
             add_effect_on(&p, ai, 9, Effect::Scale { w: 2.0, h: 2.0 }),
             Err(EditError::EffectsNeedVideo)
         ));
+    }
+
+    // One effect per kind: re-adding a kind replaces the row in place (same
+    // index, one undo step) instead of stacking a second copy.
+    #[test]
+    fn adding_the_same_kind_replaces_the_previous_one() {
+        let effects = |p: &Project| match &p.timeline.video_track().unwrap().segments[0] {
+            Segment::Clip(c) => c.effects.clone(),
+            other => panic!("expected a clip, got {other:?}"),
+        };
+        let mut p = fixture();
+        let mut h = History::default();
+        let eq = Effect::Eq {
+            brightness: 0.1,
+            contrast: 1.0,
+            saturation: 1.0,
+        };
+        let first = Effect::Crop {
+            left: 10.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 0.0,
+        };
+        let second = Effect::Crop {
+            left: 30.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 0.0,
+        };
+        for effect in [eq.clone(), first.clone()] {
+            let batch = add_effect(&p, 1, effect).unwrap();
+            h.apply(&mut p, batch, 0).unwrap();
+        }
+        assert_eq!(effects(&p), vec![eq.clone(), first.clone()]);
+
+        let batch = add_effect(&p, 1, second.clone()).unwrap();
+        assert!(batch.desc.contains("edit crop"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(
+            effects(&p),
+            vec![eq.clone(), second.clone()],
+            "the crop row is replaced in place, after eq"
+        );
+        h.undo(&mut p).unwrap();
+        assert_eq!(effects(&p), vec![eq, first]);
     }
 
     // `:effect rm` drops one effect (default: the last) and `:effect clear`

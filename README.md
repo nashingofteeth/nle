@@ -60,18 +60,21 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              navigation, edits, and the monitor all follow the active
 #              track (the timeline draws one row per track)
 #   fx:        x effects panel for the clip under the playhead — j/k select ·
-#              enter edit the selected effect (blank field keeps the applied
+#              enter edit the selected effect (a blank field keeps the applied
 #              value, shown as "was N") · d drop · D clear · c/s/e/l add
-#              crop/scale/eq/lut (labelled fields: a letter jumps to its
-#              field, tab/↑↓ move, enter applies and closes, ctrl-u clears,
-#              esc cancels) · u undo · q/esc close; `*` marks a clip with
-#              effects in the row and `nle show` lists them in order ·
+#              crop/scale/eq/lut; a kind already on the clip opens for editing
+#              instead of stacking (one effect per kind) · the form's fields:
+#              a letter jumps to its field, tab/↑↓ move, enter applies and
+#              closes, ctrl-u clears, esc cancels · u undo · q/esc close; `*`
+#              marks a clip with effects in the row and `nle show` lists them
+#              in order ·
 #              X cross-dissolve at the boundary (count = frames); `xx` also
 #              works — the first x opens the panel, the second applies it and
 #              closes ·
 #              :transition [dissolve|fade] [--dur T|--frames N] ·
 #              :effect [--clip N] crop|scale|eq|lut … · :effect rm [--index N] ·
-#              :effect clear · rendered at export;
+#              :effect clear (one effect per kind: re-adding a kind replaces
+#              it in place) · rendered at export;
 #              the monitor plays a rendered proxy for effects/speed/transitions,
 #              and for any clip whose picture size isn't the sequence's ·
 #              dd/D removes one, giving the frames it trimmed back ·
