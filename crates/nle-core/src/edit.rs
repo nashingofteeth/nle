@@ -1422,6 +1422,45 @@ pub fn add_effect_on(
     })
 }
 
+/// Replace the effect at `index` on clip `clip_id` (the TUI's edit gesture).
+/// One batch, so one undo puts the old effect back.
+pub fn replace_effect_on(
+    project: &Project,
+    track: usize,
+    clip_id: u32,
+    index: usize,
+    effect: Effect,
+) -> Result<Batch, EditError> {
+    let tr = track_at(project, track)?;
+    if tr.kind != TrackKind::Video {
+        return Err(EditError::EffectsNeedVideo);
+    }
+    let si = tr
+        .clip_index(clip_id)
+        .ok_or(EditError::ClipNotFound(clip_id))?;
+    let before = tr.segments[si].clone();
+    let Segment::Clip(c) = &before else {
+        return Err(EditError::ClipNotFound(clip_id));
+    };
+    if index >= c.effects.len() {
+        return Err(EditError::EffectNotFound(clip_id, index));
+    }
+    let mut after = c.clone();
+    after.effects[index] = effect;
+    let kind = after.effects[index].kind();
+    let mut ops = vec![EditOp::Replace {
+        track,
+        index: si,
+        before,
+        after: Segment::Clip(after.clone()),
+    }];
+    sync_effect_sides(project, track, si, &after, &mut ops);
+    Ok(Batch {
+        ops,
+        desc: format!("edit {kind} on clip #{clip_id}"),
+    })
+}
+
 /// `:effect rm` — drop one effect from a clip. `index = None` drops the last
 /// one (what a shell user gets without counting rows).
 pub fn remove_effect_on(
@@ -7557,11 +7596,20 @@ mod tests {
         let batch = add_effect_on(&p, 0, 1, crop.clone()).unwrap();
         h.apply(&mut p, batch, 0).unwrap();
         let (a, _) = sides(&p);
-        assert_eq!(effects(&a), vec![eq.clone(), crop]);
+        assert_eq!(effects(&a), vec![eq.clone(), crop.clone()]);
 
         h.undo(&mut p).unwrap();
         let (a, _) = sides(&p);
-        assert_eq!(effects(&a), vec![eq], "undo restored the side too");
+        assert_eq!(effects(&a), vec![eq.clone()], "undo restored the side too");
+
+        // Editing a row in place syncs the transition side in the same batch.
+        let batch = replace_effect_on(&p, 0, 1, 0, crop.clone()).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let (a, _) = sides(&p);
+        assert_eq!(effects(&a), vec![crop], "the tail side follows the edit");
+        h.undo(&mut p).unwrap();
+        let (a, _) = sides(&p);
+        assert_eq!(effects(&a), vec![eq], "one undo restores the side");
     }
 
     #[test]
@@ -7837,7 +7885,19 @@ mod tests {
         h.apply(&mut p, batch, 0).unwrap();
         assert!(effects(&p).is_empty());
         h.undo(&mut p).unwrap();
+        assert_eq!(effects(&p), vec![crop.clone(), scale.clone()]);
+
+        // Replacing a row is one batch; undo restores the old effect.
+        let batch = replace_effect_on(&p, 0, 1, 0, scale.clone()).unwrap();
+        assert!(batch.desc.contains("edit"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        assert_eq!(effects(&p), vec![scale.clone(), scale.clone()]);
+        h.undo(&mut p).unwrap();
         assert_eq!(effects(&p), vec![crop, scale]);
+        assert!(matches!(
+            replace_effect_on(&p, 0, 1, 5, Effect::Scale { w: 50.0, h: 50.0 }),
+            Err(EditError::EffectNotFound(1, 5))
+        ));
     }
 
     /// [Clip #1 [0..3) src 0..3] [Clip #2 [3..6) src 0..3] — a plain cut.

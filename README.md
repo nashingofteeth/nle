@@ -60,11 +60,12 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              navigation, edits, and the monitor all follow the active
 #              track (the timeline draws one row per track)
 #   fx:        x effects panel for the clip under the playhead — j/k select ·
-#              d drop · D clear · c/s/e/l add crop/scale/eq/lut (labelled
-#              fields: tab/↑↓ move, enter next, enter on the last applies and
-#              closes the panel, ctrl-u clears, esc cancels) · u undo · q/esc
-#              close; `*` marks a clip with effects in the row and `nle show`
-#              lists them in order ·
+#              enter edit the selected effect (blank field keeps the applied
+#              value, shown as "was N") · d drop · D clear · c/s/e/l add
+#              crop/scale/eq/lut (labelled fields: a letter jumps to its
+#              field, tab/↑↓ move, enter applies and closes, ctrl-u clears,
+#              esc cancels) · u undo · q/esc close; `*` marks a clip with
+#              effects in the row and `nle show` lists them in order ·
 #              X cross-dissolve at the boundary (count = frames); `xx` also
 #              works — the first x opens the panel, the second applies it and
 #              closes ·

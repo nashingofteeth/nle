@@ -287,8 +287,8 @@ pub struct FxState {
     pub form: Option<FxForm>,
 }
 
-/// A structured "add effect" form: one string per parameter. The values are
-/// typed into pre-labelled fields (no shell-style flags in the TUI), then
+/// A structured "add/edit effect" form: one string per parameter. The values
+/// are typed into pre-labelled fields (no shell-style flags in the TUI), then
 /// handed to `effect_from_args` — the same parser the CLI uses — so the
 /// required fields and neutral defaults can't drift.
 #[derive(Debug, Clone, PartialEq)]
@@ -296,13 +296,35 @@ pub struct FxForm {
     pub kind: &'static str,
     pub fields: Vec<FxField>,
     pub focus: usize,
+    /// `Some(index)` when the form edits an existing effect in place;
+    /// `None` appends a new one.
+    pub editing: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FxField {
     pub label: &'static str,
     pub value: String,
+    /// The applied value while editing: shown beside the blank input and used
+    /// when the input is left blank.
+    pub previous: Option<String>,
     pub kind: FieldKind,
+    /// The letter that focuses this field. `None` for text fields, which must
+    /// accept every letter as input.
+    pub key: Option<char>,
+}
+
+impl FxField {
+    /// The string to parse: what was typed, or the previous value while
+    /// editing with the input still blank.
+    fn effective(&self) -> &str {
+        let typed = self.value.trim();
+        if typed.is_empty() {
+            self.previous.as_deref().unwrap_or("")
+        } else {
+            typed
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2109,38 +2131,76 @@ fn close_fx(app: &mut App) {
     app.set_message("timeline");
 }
 
-/// The "add" form for an effect kind. Width/height start empty (a full-frame
-/// crop is not a useful default); `eq` starts neutral; offsets start at 0.
+/// The "add" form for an effect kind. Width/height start at 100; `eq` starts
+/// neutral; crop starts at 0. Each numeric field's first letter is its jump
+/// key; the path field takes every letter as text.
 fn form_for(kind: &'static str) -> FxForm {
-    let field = |label, value: &str, kind| FxField {
+    let field = |label, value: &str, kind, key: Option<char>| FxField {
         label,
         value: value.to_string(),
+        previous: None,
         kind,
+        key,
     };
     let fields = match kind {
         "crop" => vec![
-            field("left %", "0", FieldKind::Float),
-            field("right %", "0", FieldKind::Float),
-            field("top %", "0", FieldKind::Float),
-            field("bottom %", "0", FieldKind::Float),
+            field("left %", "0", FieldKind::Float, Some('l')),
+            field("right %", "0", FieldKind::Float, Some('r')),
+            field("top %", "0", FieldKind::Float, Some('t')),
+            field("bottom %", "0", FieldKind::Float, Some('b')),
         ],
         "scale" => vec![
-            field("width %", "100", FieldKind::Float),
-            field("height %", "100", FieldKind::Float),
+            field("width %", "100", FieldKind::Float, Some('w')),
+            field("height %", "100", FieldKind::Float, Some('h')),
         ],
         "eq" => vec![
-            field("brightness", "0", FieldKind::Float),
-            field("contrast", "1", FieldKind::Float),
-            field("saturation", "1", FieldKind::Float),
+            field("brightness", "0", FieldKind::Float, Some('b')),
+            field("contrast", "1", FieldKind::Float, Some('c')),
+            field("saturation", "1", FieldKind::Float, Some('s')),
         ],
-        "lut" => vec![field("path", "", FieldKind::Path)],
+        "lut" => vec![field("path", "", FieldKind::Path, None)],
         _ => Vec::new(),
     };
     FxForm {
         kind,
         fields,
         focus: 0,
+        editing: None,
     }
+}
+
+/// An "edit" form: same fields, but the inputs start blank and each shows the
+/// applied value beside it. A blank field keeps that value on apply.
+fn form_for_effect(effect: &Effect, index: usize) -> FxForm {
+    let mut form = form_for(effect.kind());
+    form.editing = Some(index);
+    let values: Vec<String> = match effect {
+        Effect::Crop {
+            left,
+            right,
+            top,
+            bottom,
+        } => [left, right, top, bottom]
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect(),
+        Effect::Scale { w, h } => vec![w.to_string(), h.to_string()],
+        Effect::Eq {
+            brightness,
+            contrast,
+            saturation,
+        } => vec![
+            brightness.to_string(),
+            contrast.to_string(),
+            saturation.to_string(),
+        ],
+        Effect::Lut { path } => vec![path.clone()],
+    };
+    for (field, previous) in form.fields.iter_mut().zip(values) {
+        field.value.clear();
+        field.previous = Some(previous);
+    }
+    form
 }
 
 fn open_effect_form(app: &mut App, kind: &'static str) {
@@ -2148,7 +2208,30 @@ fn open_effect_form(app: &mut App, kind: &'static str) {
         return;
     }
     set_fx_form(app, Some(form_for(kind)));
-    app.set_message(&format!("new {kind} — tab between fields, enter applies"));
+    app.set_message(&format!(
+        "new {kind} — letters jump, tab moves, enter applies"
+    ));
+}
+
+/// Enter on a listed effect opens it for editing, prefilled with its values.
+fn open_edit_form(app: &mut App) {
+    let Some((clip, sel)) = fx_state(app).map(|s| (s.clip, s.sel)) else {
+        return;
+    };
+    let Some(c) = clip_by_id(&app.project, clip) else {
+        close_fx(app);
+        return;
+    };
+    let Some(effect) = c.effects.get(sel).cloned() else {
+        app.set_message("no effect to edit");
+        return;
+    };
+    let kind = effect.kind();
+    let form = form_for_effect(&effect, sel);
+    set_fx_form(app, Some(form));
+    app.set_message(&format!(
+        "edit {kind} — blank keeps the old value, enter applies"
+    ));
 }
 
 /// Does a typed character belong in the focused field?
@@ -2177,11 +2260,20 @@ fn fx_move_focus(app: &mut App, delta: isize) {
     form.focus = form.focus.saturating_add_signed(delta).min(last);
 }
 
+/// Focus one field by index (a letter mnemonic).
+fn fx_focus(app: &mut App, index: usize) {
+    let Some(st) = fx_state_mut(app) else { return };
+    let Some(form) = st.form.as_mut() else { return };
+    if index < form.fields.len() {
+        form.focus = index;
+    }
+}
+
 /// Turn the form's strings into the typed effect and apply it. The values go
 /// through `effect_from_args` — the CLI's parser — so the required fields and
 /// neutral defaults can't drift between the two front-ends.
 fn apply_fx_form(app: &mut App, player: &dyn Mpv) {
-    let Some((clip, _)) = fx_state(app).map(|s| (s.clip, s.sel)) else {
+    let Some(clip) = fx_state(app).map(|s| s.clip) else {
         return;
     };
     let Some(form) = fx_state(app).and_then(|s| s.form.clone()) else {
@@ -2194,26 +2286,36 @@ fn apply_fx_form(app: &mut App, player: &dyn Mpv) {
             return;
         }
     };
-    let added = run_action(
+    // An edit that changes nothing is not a history entry: just close.
+    if let Some(i) = form.editing
+        && clip_by_id(&app.project, clip).and_then(|c| c.effects.get(i)) == Some(&effect)
+    {
+        set_fx_form(app, None);
+        app.mode = Mode::Normal;
+        app.set_message("effect unchanged");
+        return;
+    }
+    let applied = run_action(
         app,
         player,
         &Action::AddEffect {
             track: app.active(),
             clip,
             effect,
+            index: form.editing,
         },
     );
     // Applying is the end of the gesture: leave the panel, keeping the
     // action's notice ("effect on clip #N"). A refused value never reaches
     // here, so the form stays open only while there is something to fix.
-    if added {
+    if applied {
         set_fx_form(app, None);
         app.mode = Mode::Normal;
     }
 }
 
 fn form_effect(form: &FxForm) -> Result<Effect, String> {
-    let value = |i: usize| form.fields.get(i).map_or("", |f| f.value.trim());
+    let value = |i: usize| form.fields.get(i).map_or("", FxField::effective);
     let opt_float = |i: usize, name: &str| -> Result<Option<f64>, String> {
         let v = value(i);
         if v.is_empty() {
@@ -2270,26 +2372,31 @@ fn fx_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         }
         KeyCode::Tab | KeyCode::Down => fx_move_focus(app, 1),
         KeyCode::BackTab | KeyCode::Up => fx_move_focus(app, -1),
-        KeyCode::Enter => {
-            if form.focus + 1 < form.fields.len() {
-                fx_move_focus(app, 1);
-            } else {
-                apply_fx_form(app, player);
-            }
-        }
+        // Enter is the commit: it validates every field and applies. Only tab
+        // (or the arrows) moves between fields.
+        KeyCode::Enter => apply_fx_form(app, player),
         KeyCode::Backspace => fx_edit_field(app, |v| {
             v.pop();
         }),
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             fx_edit_field(app, String::clear);
         }
-        KeyCode::Char(c)
-            if form
-                .fields
-                .get(form.focus)
-                .is_some_and(|f| field_accepts(f.kind, c)) =>
-        {
-            fx_edit_field(app, |v| v.push(c));
+        KeyCode::Char(c) => {
+            let focused = form.fields.get(form.focus);
+            // In a numeric form the field labels double as jump keys. A path
+            // field must receive every letter as text, so it is exempt.
+            if focused.is_some_and(|f| f.kind == FieldKind::Float)
+                && let Some(i) = form
+                    .fields
+                    .iter()
+                    .position(|f| f.key == Some(c.to_ascii_lowercase()))
+            {
+                fx_focus(app, i);
+                return;
+            }
+            if focused.is_some_and(|f| field_accepts(f.kind, c)) {
+                fx_edit_field(app, |v| v.push(c));
+            }
         }
         _ => {}
     }
@@ -2338,6 +2445,9 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             set_fx_sel(app, (sel + 1).min(n.saturating_sub(1)));
         }
         KeyCode::Char('k') | KeyCode::Up => set_fx_sel(app, sel.saturating_sub(1)),
+        // Selecting an applied effect opens it for editing (blank keeps the
+        // current value); `d`/`D` remain the way to remove.
+        KeyCode::Enter => open_edit_form(app),
         KeyCode::Char('d') => {
             if n == 0 {
                 app.set_message("no effects to drop");
@@ -4038,12 +4148,12 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         if let Some(form) = fx_state(app).and_then(|st| st.form.as_ref()) {
             return vec![
                 form_hint(form.kind),
-                "enter next · enter on last applies and closes · ctrl-u clears · esc cancels",
+                "letters jump · tab/↑↓ field · enter applies · ctrl-u clears · esc cancels",
             ];
         }
         return vec![
             "effects — rows apply in order at export; the monitor re-renders",
-            "j/k select · d drop · D clear all · u undo · Ctrl-r redo",
+            "j/k select · enter edit · d drop · D clear all · u undo · Ctrl-r redo",
             "c crop · s scale · e eq · l lut · x transition · q/esc close",
         ];
     }
@@ -4675,7 +4785,10 @@ fn render_fx(f: &mut Frame, area: Rect, app: &App) {
     let clip = fx_clip(app);
     let form = st.and_then(|s| s.form.as_ref());
     let title = match (clip, form) {
-        (Some(c), Some(f)) => format!(" new {} → clip #{} ", f.kind, c.id),
+        (Some(c), Some(f)) => {
+            let verb = if f.editing.is_some() { "edit" } else { "new" };
+            format!(" {verb} {} → clip #{} ", f.kind, c.id)
+        }
         (Some(c), None) => format!(" effects → clip #{} ", c.id),
         (None, _) => " effects ".to_string(),
     };
@@ -4745,7 +4858,6 @@ fn form_hint(kind: &str) -> &'static str {
 }
 
 fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
-    use ratatui::widgets::Paragraph;
     let mut lines: Vec<Line> = form
         .fields
         .iter()
@@ -4764,19 +4876,38 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
             } else {
                 Style::default()
             };
-            Line::from(vec![
-                Span::styled(
-                    format!("{:<11}", field.label),
+            let label_style = Style::default().fg(Color::DarkGray);
+            let mut spans = Vec::new();
+            // The first letter is the jump key; underline it so the mnemonic
+            // is visible without a separate key legend.
+            if field.key.is_some() {
+                let mut chars = field.label.chars();
+                if let Some(first) = chars.next() {
+                    spans.push(Span::styled(
+                        first.to_string(),
+                        label_style.add_modifier(Modifier::UNDERLINED),
+                    ));
+                    spans.push(Span::styled(chars.as_str().to_string(), label_style));
+                }
+            } else {
+                spans.push(Span::styled(field.label.to_string(), label_style));
+            }
+            let label_len = field.label.chars().count();
+            spans.push(Span::raw(" ".repeat(11usize.saturating_sub(label_len))));
+            spans.push(Span::styled(format!("[{shown}]"), style));
+            if let Some(previous) = &field.previous {
+                spans.push(Span::styled(
+                    format!("  was {previous}"),
                     Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(format!("[{shown}]"), style),
-            ])
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
     lines.push(Line::from(""));
     lines.push(Line::from(form_hint(form.kind)).style(Style::default().fg(Color::DarkGray)));
     lines.push(
-        Line::from("tab/↑↓ field · enter next · enter on last applies and closes · esc cancels")
+        Line::from("letters jump · tab/↑↓ field · enter applies · ctrl-u clears · esc cancels")
             .style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
@@ -8650,9 +8781,7 @@ mod tests {
         for c in "101".chars() {
             handle_key(&mut app, &fake, key(c));
         }
-        for _ in 0..4 {
-            handle_key(&mut app, &fake, enter); // through right/top/bottom, apply
-        }
+        handle_key(&mut app, &fake, enter); // applies from the first field
         assert!(
             app.message.contains("left must be 0–100"),
             "{}",
@@ -8660,7 +8789,8 @@ mod tests {
         );
         assert!(fx_state(&app).unwrap().form.is_some(), "still editing");
 
-        // Cancel, reopen, and inset 10% from the left and right.
+        // Cancel, reopen, and inset 10% from the left and right. Only tab
+        // moves between fields; enter always commits.
         handle_key(&mut app, &fake, esc);
         handle_key(&mut app, &fake, key('c'));
         handle_key(
@@ -8680,9 +8810,7 @@ mod tests {
         for c in "10".chars() {
             handle_key(&mut app, &fake, key(c));
         }
-        handle_key(&mut app, &fake, enter); // → top (0)
-        handle_key(&mut app, &fake, enter); // → bottom (0)
-        handle_key(&mut app, &fake, enter); // apply
+        handle_key(&mut app, &fake, enter); // apply from the right field
 
         assert!(
             matches!(app.mode, Mode::Normal),
@@ -8705,8 +8833,8 @@ mod tests {
         );
     }
 
-    // `e` opens the `eq` form with the neutral defaults; enter through them
-    // without typing anything.
+    // `e` opens the `eq` form with the neutral defaults; enter applies them
+    // from the first field (it never advances the focus).
     #[test]
     fn effects_panel_eq_form_defaults_are_neutral() {
         let fake = FakeMpv::new();
@@ -8716,9 +8844,6 @@ mod tests {
         app.playhead = 1.0;
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('e'));
-        for _ in 0..2 {
-            handle_key(&mut app, &fake, enter);
-        }
         handle_key(&mut app, &fake, enter);
         assert_eq!(
             clip_by_id(&app.project, 1).effects.last(),
@@ -8729,6 +8854,159 @@ mod tests {
             })
         );
         assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    // Numeric field labels double as jump keys; tab/arrows move by one.
+    #[test]
+    fn effect_form_letters_jump_and_tab_moves() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let back = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        let mut app = App::new(asset_project(), temp_project_path("fx-jump"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('c'));
+
+        handle_key(&mut app, &fake, key('b'));
+        let focus = |app: &App| fx_state(app).unwrap().form.as_ref().unwrap().focus;
+        assert_eq!(focus(&app), 3, "b jumps to bottom");
+        for c in "12".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, tab);
+        assert_eq!(focus(&app), 3, "tab stops at the last field");
+        handle_key(&mut app, &fake, back);
+        assert_eq!(focus(&app), 2, "backtab moves back");
+
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            clip_by_id(&app.project, 1).effects.last(),
+            Some(&Effect::Crop {
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 12.0
+            })
+        );
+    }
+
+    // Enter on a listed effect opens it prefilled; blank fields keep the old
+    // value, and the whole edit is one undo step.
+    #[test]
+    fn selecting_an_effect_opens_it_for_editing() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-edit"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        let old = Effect::Crop {
+            left: 30.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 0.0,
+        };
+        set_effects(&mut app, 1, vec![old.clone()]);
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, enter);
+
+        let form = fx_state(&app).unwrap().form.as_ref().unwrap();
+        assert_eq!(form.editing, Some(0));
+        assert_eq!(form.kind, "crop");
+        assert_eq!(form.fields[0].value, "", "the input starts blank");
+        assert_eq!(form.fields[0].previous.as_deref(), Some("30"));
+
+        // Change only the right inset; left keeps its previous 30.
+        handle_key(&mut app, &fake, key('r'));
+        for c in "10".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, enter);
+        assert_eq!(
+            clip_by_id(&app.project, 1).effects,
+            vec![Effect::Crop {
+                left: 30.0,
+                right: 10.0,
+                top: 0.0,
+                bottom: 0.0
+            }]
+        );
+        assert!(app.message.starts_with("edit crop"), "{}", app.message);
+
+        handle_key(&mut app, &fake, key('u'));
+        assert_eq!(clip_by_id(&app.project, 1).effects, vec![old]);
+    }
+
+    // Applying an edit form without typing anything is not a history entry.
+    #[test]
+    fn a_blank_edit_form_keeps_the_effect() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-noop"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        let old = Effect::Eq {
+            brightness: 0.2,
+            contrast: 1.0,
+            saturation: 1.0,
+        };
+        set_effects(&mut app, 1, vec![old.clone()]);
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, enter);
+        handle_key(&mut app, &fake, enter);
+
+        assert_eq!(clip_by_id(&app.project, 1).effects, vec![old]);
+        assert!(app.message.contains("unchanged"), "{}", app.message);
+        assert!(!app.history.can_undo(), "a no-op is not an undo step");
+        assert!(matches!(app.mode, Mode::Normal));
+    }
+
+    // A path field must receive every letter as text (no mnemonic hijack).
+    #[test]
+    fn a_lut_path_still_takes_letters() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), temp_project_path("fx-lut"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('l'));
+        for c in "a/b.cube".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        assert_eq!(
+            fx_state(&app).unwrap().form.as_ref().unwrap().fields[0].value,
+            "a/b.cube"
+        );
+    }
+
+    // The edit form shows the applied value beside the blank input.
+    #[test]
+    fn the_edit_form_shows_the_old_value_beside_a_blank_input() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let effect = Effect::Crop {
+            left: 30.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 0.0,
+        };
+        app.mode = Mode::Fx(FxState {
+            clip: 1,
+            sel: 0,
+            form: Some(form_for_effect(&effect, 0)),
+        });
+        let mut term = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        term.draw(|f| render_fx(f, f.area(), &app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..12u16)
+            .map(|y| (0..80u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("edit crop → clip #1"), "{text}");
+        assert!(text.contains("was 30"), "{text}");
+        assert!(text.contains("enter applies"), "{text}");
     }
 
     // The panel renders the kind + parameters, and says how to add when the

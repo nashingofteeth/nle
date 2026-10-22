@@ -843,6 +843,7 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     track,
                     clip: *clip,
                     effect,
+                    index: None,
                 }),
             }
         })),

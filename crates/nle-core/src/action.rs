@@ -115,11 +115,13 @@ pub enum Action {
         kind: TransitionKind,
         len: GapLen,
     },
-    /// Append an effect to a clip (`:effect`).
+    /// Append an effect to a clip (`:effect`), or replace the one at `index`
+    /// (the effects panel's edit gesture).
     AddEffect {
         track: usize,
         clip: u32,
         effect: Effect,
+        index: Option<usize>,
     },
     /// Drop one effect from a clip (`:effect rm`).
     RemoveEffect {
@@ -305,12 +307,16 @@ pub fn run_action(
             track,
             clip,
             effect,
+            index,
         } => {
             // A clip id is unique across tracks, so `--clip N` finds its own
             // track (as delete/yank/speed already do) — the `--track` default
             // must not hide a clip that lives elsewhere.
             let ti = resolve_track(project, *track, Target::Clip(*clip))?;
-            let batch = edit::add_effect_on(project, ti, *clip, effect.clone())?;
+            let batch = match index {
+                Some(i) => edit::replace_effect_on(project, ti, *clip, *i, effect.clone())?,
+                None => edit::add_effect_on(project, ti, *clip, effect.clone())?,
+            };
             apply(project, history, batch, from)
         }
         Action::RemoveEffect { track, clip, index } => {
@@ -1249,6 +1255,7 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                         track,
                         clip,
                         effect,
+                        index: None,
                     })
                 }
             }
@@ -1887,6 +1894,7 @@ mod tests {
                     contrast: 1.0,
                     saturation: 1.0,
                 },
+                index: None,
             },
         )
         .unwrap();
