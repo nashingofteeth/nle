@@ -307,9 +307,7 @@ pub struct FxField {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FieldKind {
-    /// Whole number (width/height/offsets).
-    Int,
-    /// Decimal (eq values; `-` is allowed).
+    /// Decimal (percentages, eq values; `-` is allowed).
     Float,
     /// A file path (any printable character).
     Path,
@@ -2121,13 +2119,14 @@ fn form_for(kind: &'static str) -> FxForm {
     };
     let fields = match kind {
         "crop" => vec![
-            field("scale %", "", FieldKind::Float),
-            field("x %", "50", FieldKind::Float),
-            field("y %", "50", FieldKind::Float),
+            field("left %", "0", FieldKind::Float),
+            field("right %", "0", FieldKind::Float),
+            field("top %", "0", FieldKind::Float),
+            field("bottom %", "0", FieldKind::Float),
         ],
         "scale" => vec![
-            field("width", "", FieldKind::Int),
-            field("height", "", FieldKind::Int),
+            field("width %", "100", FieldKind::Float),
+            field("height %", "100", FieldKind::Float),
         ],
         "eq" => vec![
             field("brightness", "0", FieldKind::Float),
@@ -2155,7 +2154,6 @@ fn open_effect_form(app: &mut App, kind: &'static str) {
 /// Does a typed character belong in the focused field?
 fn field_accepts(kind: FieldKind, c: char) -> bool {
     match kind {
-        FieldKind::Int => c.is_ascii_digit(),
         FieldKind::Float => c.is_ascii_digit() || c == '.' || c == '-',
         FieldKind::Path => !c.is_control(),
     }
@@ -2216,14 +2214,6 @@ fn apply_fx_form(app: &mut App, player: &dyn Mpv) {
 
 fn form_effect(form: &FxForm) -> Result<Effect, String> {
     let value = |i: usize| form.fields.get(i).map_or("", |f| f.value.trim());
-    let int = |i: usize, name: &str| -> Result<u32, String> {
-        let v = value(i);
-        if v.is_empty() {
-            return Err(format!("{name} is required"));
-        }
-        v.parse()
-            .map_err(|_| format!("{name} must be a whole number"))
-    };
     let opt_float = |i: usize, name: &str| -> Result<Option<f64>, String> {
         let v = value(i);
         if v.is_empty() {
@@ -2235,14 +2225,15 @@ fn form_effect(form: &FxForm) -> Result<Effect, String> {
     };
     let args = match form.kind {
         "crop" => EffectArgs {
-            scale: Some(opt_float(0, "scale")?.ok_or_else(|| "scale is required".to_string())?),
-            x: opt_float(1, "x")?,
-            y: opt_float(2, "y")?,
+            left: opt_float(0, "left")?,
+            right: opt_float(1, "right")?,
+            top: opt_float(2, "top")?,
+            bottom: opt_float(3, "bottom")?,
             ..Default::default()
         },
         "scale" => EffectArgs {
-            w: Some(int(0, "width")?),
-            h: Some(int(1, "height")?),
+            w: opt_float(0, "width")?,
+            h: opt_float(1, "height")?,
             ..Default::default()
         },
         "eq" => EffectArgs {
@@ -8566,11 +8557,12 @@ mod tests {
         let mut app = App::new(asset_project(), temp_project_path("fx-drop"));
         app.loaded = true;
         app.playhead = 1.0;
-        let scale = nle_core::timeline::Effect::Scale { w: 2, h: 2 };
+        let scale = nle_core::timeline::Effect::Scale { w: 2.0, h: 2.0 };
         let crop = nle_core::timeline::Effect::Crop {
-            scale: 50.0,
-            x: 50.0,
-            y: 50.0,
+            left: 10.0,
+            right: 10.0,
+            top: 0.0,
+            bottom: 0.0,
         };
         set_effects(&mut app, 1, vec![scale.clone(), crop.clone()]);
 
@@ -8618,7 +8610,7 @@ mod tests {
         let mut app = App::new(asset_project(), temp_project_path("fx-add"));
         app.loaded = true;
         app.playhead = 1.0;
-        set_effects(&mut app, 1, vec![Effect::Scale { w: 2, h: 2 }]);
+        set_effects(&mut app, 1, vec![Effect::Scale { w: 2.0, h: 2.0 }]);
 
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('c'));
@@ -8631,23 +8623,47 @@ mod tests {
             app.mode
         );
 
-        // An empty scale is refused at apply time (the one required field).
-        for _ in 0..2 {
-            handle_key(&mut app, &fake, tab);
-        }
-        handle_key(&mut app, &fake, enter);
-        assert!(app.message.contains("scale is required"), "{}", app.message);
-        assert!(fx_state(&app).unwrap().form.is_some(), "still editing");
-
-        // Cancel, reopen, type a half-size crop; x/y stay at their centred
-        // defaults.
-        handle_key(&mut app, &fake, esc);
-        handle_key(&mut app, &fake, key('c'));
-        for c in "50".chars() {
+        // An inset over 100 is refused at apply time and keeps the form open.
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        for c in "101".chars() {
             handle_key(&mut app, &fake, key(c));
         }
-        handle_key(&mut app, &fake, enter); // → x (pre-filled 50)
-        handle_key(&mut app, &fake, enter); // → y (pre-filled 50)
+        for _ in 0..4 {
+            handle_key(&mut app, &fake, enter); // through right/top/bottom, apply
+        }
+        assert!(
+            app.message.contains("left must be 0–100"),
+            "{}",
+            app.message
+        );
+        assert!(fx_state(&app).unwrap().form.is_some(), "still editing");
+
+        // Cancel, reopen, and inset 10% from the left and right.
+        handle_key(&mut app, &fake, esc);
+        handle_key(&mut app, &fake, key('c'));
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        for c in "10".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, tab);
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        for c in "10".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, enter); // → top (0)
+        handle_key(&mut app, &fake, enter); // → bottom (0)
         handle_key(&mut app, &fake, enter); // apply
 
         assert!(
@@ -8663,9 +8679,10 @@ mod tests {
         assert_eq!(
             clip_by_id(&app.project, 1).effects.last(),
             Some(&Effect::Crop {
-                scale: 50.0,
-                x: 50.0,
-                y: 50.0
+                left: 10.0,
+                right: 10.0,
+                top: 0.0,
+                bottom: 0.0
             })
         );
     }
@@ -8708,9 +8725,10 @@ mod tests {
             1,
             vec![
                 nle_core::timeline::Effect::Crop {
-                    scale: 50.0,
-                    x: 50.0,
-                    y: 50.0,
+                    left: 10.0,
+                    right: 10.0,
+                    top: 10.0,
+                    bottom: 10.0,
                 },
                 nle_core::timeline::Effect::Eq {
                     brightness: 0.1,
@@ -8732,7 +8750,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("effects → clip #1"), "{text}");
-        assert!(text.contains("50% at 50,50"), "{text}");
+        assert!(text.contains("l10 r10 t10 b10"), "{text}");
         assert!(text.contains("b 0.1 · c 1 · s 1"), "{text}");
 
         app.mode = Mode::Fx(FxState {
@@ -9064,7 +9082,7 @@ mod tests {
         app.loaded = true;
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key(':'));
-        for c in "effect crop --clip 1 --scale 50".chars() {
+        for c in "effect crop --clip 1 --left 10".chars() {
             handle_key(&mut app, &fake, key(c));
         }
         handle_key(
@@ -9079,9 +9097,10 @@ mod tests {
         assert_eq!(
             c.effects,
             vec![nle_core::timeline::Effect::Crop {
-                scale: 50.0,
-                x: 50.0,
-                y: 50.0
+                left: 10.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0
             }]
         );
     }

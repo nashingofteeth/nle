@@ -42,12 +42,18 @@ pub enum TrackKind {
 /// serializable and safe to hand to the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
-    /// `crop`, as percentages of the source frame: `scale` is how much of the
-    /// frame to keep (1–100), and `x`/`y` place that box in the leftover
-    /// margin (0 = left/top, 50 = centre, 100 = right/bottom).
-    Crop { scale: f64, x: f64, y: f64 },
-    /// `scale=w:h`.
-    Scale { w: u32, h: u32 },
+    /// `crop`, as percentages of the source frame per edge: `left` moves the
+    /// left edge toward the right, `right` the right edge toward the left (and
+    /// the same for `top`/`bottom`). 0 is the frame edge, 100 the opposite
+    /// edge; the two sides of an axis must sum to less than 100.
+    Crop {
+        left: f64,
+        right: f64,
+        top: f64,
+        bottom: f64,
+    },
+    /// `scale`, as percentages of the source frame (100 = unchanged).
+    Scale { w: f64, h: f64 },
     /// `eq=brightness=…:contrast=…:saturation=…`.
     Eq {
         brightness: f64,
@@ -72,8 +78,13 @@ impl Effect {
     /// The parameters as one line — the panel's detail column.
     pub fn details(&self) -> String {
         match self {
-            Effect::Crop { scale, x, y } => format!("{scale}% at {x},{y}"),
-            Effect::Scale { w, h } => format!("{w}×{h}"),
+            Effect::Crop {
+                left,
+                right,
+                top,
+                bottom,
+            } => format!("l{left} r{right} t{top} b{bottom}"),
+            Effect::Scale { w, h } => format!("{w}% × {h}%"),
             Effect::Eq {
                 brightness,
                 contrast,
@@ -92,11 +103,18 @@ impl Effect {
     /// of `frame` pixels (only `crop` needs it).
     pub fn filter(&self, frame: (u32, u32)) -> String {
         match self {
-            Effect::Crop { scale, x, y } => {
-                let (w, h, x, y) = crop_geometry(*scale, *x, *y, frame);
+            Effect::Crop {
+                left,
+                right,
+                top,
+                bottom,
+            } => {
+                let (w, h, x, y) = crop_geometry(*left, *right, *top, *bottom, frame);
                 format!("crop={w}:{h}:{x}:{y}")
             }
-            Effect::Scale { w, h } => format!("scale={w}:{h}"),
+            // Percent of the input frame; the export's later normalize scale
+            // turns the result into the sequence size.
+            Effect::Scale { w, h } => format!("scale=iw*{}:ih*{}", w / 100.0, h / 100.0),
             Effect::Eq {
                 brightness,
                 contrast,
@@ -109,23 +127,24 @@ impl Effect {
     }
 }
 
-/// Resolve a percentage crop against the source frame: keep `scale` percent
-/// of each axis, then place that box in the leftover margin (`x`/`y` percent,
-/// 50 = centred). Clamped to the frame so a hand-edited project can't crop
-/// past it.
-fn crop_geometry(scale: f64, x: f64, y: f64, (fw, fh): (u32, u32)) -> (u32, u32, u32, u32) {
-    let keep = |size: u32, pct: f64| {
-        ((size as f64 * pct / 100.0).round() as u32)
-            .max(2)
-            .min(size.max(2))
-    };
-    let (w, h) = (keep(fw, scale), keep(fh, scale));
-    let place =
-        |margin: u32, pct: f64| (((margin as f64) * pct / 100.0).round() as u32).min(margin);
-    let (x, y) = (
-        place(fw.saturating_sub(w), x),
-        place(fh.saturating_sub(h), y),
-    );
+/// Resolve percentage edge insets against the source frame: each edge moves
+/// that percent of the frame dimension toward its opposite edge (0 = the
+/// frame edge, 100 = the opposite edge). The box is clamped to the frame so a
+/// hand-edited project can't crop past it.
+fn crop_geometry(
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+    (fw, fh): (u32, u32),
+) -> (u32, u32, u32, u32) {
+    let inset = |size: u32, pct: f64| ((size as f64 * pct / 100.0).round() as u32).min(size);
+    let (l, r) = (inset(fw, left), inset(fw, right));
+    let (t, b) = (inset(fh, top), inset(fh, bottom));
+    let w = fw.saturating_sub(l.saturating_add(r)).max(2).min(fw.max(2));
+    let h = fh.saturating_sub(t.saturating_add(b)).max(2).min(fh.max(2));
+    let x = l.min(fw.saturating_sub(w));
+    let y = t.min(fh.saturating_sub(h));
     (w, h, x, y)
 }
 

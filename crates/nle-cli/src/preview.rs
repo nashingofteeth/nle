@@ -938,7 +938,7 @@ mod tests {
         // An effect clip…
         let mut p = composite_project();
         if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
-            c.effects = vec![Effect::Scale { w: 2, h: 2 }];
+            c.effects = vec![Effect::Scale { w: 2.0, h: 2.0 }];
         }
         let windows = composite_windows(&p).unwrap();
         match &windows[1] {
@@ -978,7 +978,7 @@ mod tests {
         p.timeline.video_track_mut().unwrap().segments = vec![seg_clip(1, 0, 2), seg_clip(2, 0, 2)];
         for seg in &mut p.timeline.video_track_mut().unwrap().segments {
             if let TimelineSegment::Clip(c) = seg {
-                c.effects = vec![Effect::Scale { w: 2, h: 2 }];
+                c.effects = vec![Effect::Scale { w: 2.0, h: 2.0 }];
             }
         }
         let steps = composite_steps(&p).unwrap();

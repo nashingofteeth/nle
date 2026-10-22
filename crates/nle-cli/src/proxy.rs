@@ -531,7 +531,7 @@ mod tests {
         // An effect clip and a transition need rendering.
         let mut c = clip();
         if let Segment::Clip(cl) = &mut c {
-            cl.effects = vec![Effect::Scale { w: 2, h: 2 }];
+            cl.effects = vec![Effect::Scale { w: 2.0, h: 2.0 }];
         }
         assert!(needs_proxy(&p, &c), "effects are rendered");
         // …and so does a retimed clip: an EDL entry plays its source at 1×.
@@ -716,7 +716,7 @@ mod tests {
         let a = clip();
         let mut b = clip();
         if let Segment::Clip(cl) = &mut b {
-            cl.effects = vec![Effect::Scale { w: 2, h: 2 }];
+            cl.effects = vec![Effect::Scale { w: 2.0, h: 2.0 }];
         }
         let ha = proxy_hash(&p, &a, 320, 240);
         assert_eq!(ha, proxy_hash(&p, &a, 320, 240), "stable");

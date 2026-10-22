@@ -1070,17 +1070,20 @@ mod tests {
         let mut p = project_with_two_clips();
         if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
             c.effects = vec![
+                // 25% off each edge of 1920×1080.
                 Effect::Crop {
-                    scale: 50.0,
-                    x: 50.0,
-                    y: 50.0,
+                    left: 25.0,
+                    right: 25.0,
+                    top: 25.0,
+                    bottom: 25.0,
                 },
-                Effect::Scale { w: 10, h: 20 },
+                // Half width, full height.
+                Effect::Scale { w: 50.0, h: 100.0 },
             ];
         }
         let g = compile_export(&p).unwrap().graph;
         // Effects chain after the retime, before the normalize scale.
-        assert!(g.contains("crop=960:540:480:270,scale=10:20,"), "{g}");
-        assert!(g.contains("scale=10:20,scale=1920:1080"), "{g}");
+        assert!(g.contains("crop=960:540:480:270,scale=iw*0.5:ih*1,"), "{g}");
+        assert!(g.contains("scale=iw*0.5:ih*1,scale=1920:1080"), "{g}");
     }
 }

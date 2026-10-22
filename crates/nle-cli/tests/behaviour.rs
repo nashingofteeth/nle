@@ -826,10 +826,10 @@ fn cli_only_guards() {
     );
 
     s.base();
-    let out = s.err(&["effect", "crop", "--clip", "1", "--scale", "0"]);
+    let out = s.err(&["effect", "crop", "--clip", "1", "--left", "101"]);
     assert!(
-        out.contains("1–100"),
-        "a zero-scale crop is refused:\n{out}"
+        out.contains("0–100"),
+        "an out-of-range crop inset is refused:\n{out}"
     );
     let out = s.err(&["effect", "lut", "--clip", "1", "--path", ""]);
     assert!(

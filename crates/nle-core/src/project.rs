@@ -19,8 +19,9 @@ use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 /// README "Compatibility: none, by design"): old files are rejected,
 /// never silently misread. v3 added the per-track `muted` flag;
 /// v4 added the per-clip `speed` rate; v5 added the stored playhead;
-/// v7 stores `crop` as percentages (scale/x/y) instead of pixel w/h/x/y.
-pub const PROJECT_VERSION: u32 = 7;
+/// v7 stores `crop` as percentages (scale/x/y) instead of pixel w/h/x/y;
+/// v8 stores `crop` as per-edge percentage insets and `scale` as percentages.
+pub const PROJECT_VERSION: u32 = 8;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {

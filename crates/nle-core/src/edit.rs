@@ -31,8 +31,9 @@ pub const MAX_HISTORY: usize = 100;
 /// it as a `rational_ser` fraction like every other time in the Atom.
 /// v9 persists the redo stack too, so `nle redo` works across processes.
 /// v10 adds `Change::Tracks` (track add/mute/rm are undoable).
-/// v13 follows the project's percentage `crop` (segments carry effects).
-pub const HISTORY_VERSION: u32 = 13;
+/// v13 follows the project's percentage `crop` (segments carry effects);
+/// v14 follows the per-edge crop insets and percentage `scale`.
+pub const HISTORY_VERSION: u32 = 14;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -7497,7 +7498,7 @@ mod tests {
     /// it, so a `:effect` on a clip vanished on the next edit.
     #[test]
     fn edits_preserve_per_clip_effects() {
-        let eff = Effect::Scale { w: 10, h: 10 };
+        let eff = Effect::Scale { w: 10.0, h: 10.0 };
         let set_effects = |p: &mut Project| {
             for seg in &mut p.timeline.video_track_mut().unwrap().segments {
                 if let Segment::Clip(c) = seg {
@@ -7605,7 +7606,7 @@ mod tests {
     #[test]
     fn effects_are_refused_on_an_audio_track() {
         let mut p = fixture();
-        let batch = add_effect(&p, 1, Effect::Scale { w: 2, h: 2 }).unwrap();
+        let batch = add_effect(&p, 1, Effect::Scale { w: 2.0, h: 2.0 }).unwrap();
         assert!(batch.desc.contains("clip #1"), "{}", batch.desc);
 
         let ai = p.timeline.add_track(TrackKind::Audio);
@@ -7616,7 +7617,7 @@ mod tests {
             Seconds::from_integer(2),
         ))];
         assert!(matches!(
-            add_effect_on(&p, ai, 9, Effect::Scale { w: 2, h: 2 }),
+            add_effect_on(&p, ai, 9, Effect::Scale { w: 2.0, h: 2.0 }),
             Err(EditError::EffectsNeedVideo)
         ));
     }
@@ -7630,11 +7631,12 @@ mod tests {
             Segment::Clip(c) => c.effects.clone(),
             other => panic!("expected a clip, got {other:?}"),
         };
-        let scale = Effect::Scale { w: 2, h: 2 };
+        let scale = Effect::Scale { w: 2.0, h: 2.0 };
         let crop = Effect::Crop {
-            scale: 50.0,
-            x: 50.0,
-            y: 50.0,
+            left: 10.0,
+            right: 10.0,
+            top: 0.0,
+            bottom: 0.0,
         };
 
         let mut p = fixture();

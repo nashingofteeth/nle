@@ -292,21 +292,24 @@ enum Cmd {
         /// `rm`: which effect to drop (0-based; default: the last one)
         #[arg(long, value_name = "N")]
         index: Option<usize>,
-        /// crop/scale width
-        #[arg(long)]
-        w: Option<u32>,
-        /// crop/scale height
-        #[arg(long)]
-        h: Option<u32>,
-        /// crop: percent of the source frame to keep (1–100)
+        /// scale: width as a percentage of the source (100 = unchanged)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
-        scale: Option<f64>,
-        /// crop: horizontal placement in the leftover margin (0–100; 50 = centre)
+        w: Option<f64>,
+        /// scale: height as a percentage of the source (100 = unchanged)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
-        x: Option<f64>,
-        /// crop: vertical placement in the leftover margin (0–100; 50 = centre)
+        h: Option<f64>,
+        /// crop: inset from the left edge (0 = the edge, 100 = the opposite)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
-        y: Option<f64>,
+        left: Option<f64>,
+        /// crop: inset from the right edge (percent)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        right: Option<f64>,
+        /// crop: inset from the top edge (percent)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        top: Option<f64>,
+        /// crop: inset from the bottom edge (percent)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        bottom: Option<f64>,
         /// eq brightness (0 is neutral)
         #[arg(long, value_name = "F", allow_negative_numbers = true)]
         brightness: Option<f64>,
@@ -804,9 +807,10 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             index,
             w,
             h,
-            scale,
-            x,
-            y,
+            left,
+            right,
+            top,
+            bottom,
             brightness,
             contrast,
             saturation,
@@ -824,9 +828,10 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     EffectArgs {
                         w: *w,
                         h: *h,
-                        scale: *scale,
-                        x: *x,
-                        y: *y,
+                        left: *left,
+                        right: *right,
+                        top: *top,
+                        bottom: *bottom,
                         brightness: *brightness,
                         contrast: *contrast,
                         saturation: *saturation,
@@ -2725,9 +2730,10 @@ mod tests {
                 index: None,
                 w: None,
                 h: None,
-                scale: Some(50.0),
-                x: None,
-                y: None,
+                left: Some(10.0),
+                right: Some(10.0),
+                top: None,
+                bottom: None,
                 brightness: None,
                 contrast: None,
                 saturation: None,
@@ -2740,9 +2746,10 @@ mod tests {
                 index: Some(0),
                 w: None,
                 h: None,
-                scale: None,
-                x: None,
-                y: None,
+                left: None,
+                right: None,
+                top: None,
+                bottom: None,
                 brightness: None,
                 contrast: None,
                 saturation: None,
@@ -2755,9 +2762,10 @@ mod tests {
                 index: None,
                 w: None,
                 h: None,
-                scale: None,
-                x: None,
-                y: None,
+                left: None,
+                right: None,
+                top: None,
+                bottom: None,
                 brightness: None,
                 contrast: None,
                 saturation: None,
