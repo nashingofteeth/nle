@@ -398,4 +398,4 @@ fi
 rm -f "$LOG" log-check.json
 
 echo
-echo "Play with it:  cd demo-sandbox && ../../target/release/nle show"
+echo "Play with it:  cd demo-sandbox && ../target/release/nle show"
