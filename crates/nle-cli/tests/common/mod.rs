@@ -193,6 +193,46 @@ impl Sandbox {
         assert_eq!(got, rgb, "{label} ({file} @ {t} s)");
     }
 
+    /// One pixel at `(x, y)` — for geometry (crop/scale) where the corner or
+    /// centre of the frame is the interesting part.
+    pub fn px_at(&self, file: &str, t: f64, x: u32, y: u32) -> [u8; 3] {
+        let out = Command::new("ffmpeg")
+            .current_dir(self.path())
+            .args([
+                "-v",
+                "error",
+                "-y",
+                "-ss",
+                &format!("{t}"),
+                "-i",
+                file,
+                "-frames:v",
+                "1",
+                // 2×2 keeps chroma valid on yuv420p; we read its first pixel.
+                "-vf",
+                &format!("crop=2:2:{x}:{y}"),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ])
+            .output()
+            .expect("spawn ffmpeg");
+        assert!(
+            out.status.success(),
+            "ffmpeg sampling {file} at {t} s ({x},{y}):\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.len() >= 3, "no frame at {t} s in {file}");
+        [out.stdout[0], out.stdout[1], out.stdout[2]]
+    }
+
+    pub fn assert_px_at(&self, file: &str, t: f64, x: u32, y: u32, rgb: [u8; 3], label: &str) {
+        let got = self.px_at(file, t, x, y);
+        assert_eq!(got, rgb, "{label} ({file} @ {t} s, {x},{y})");
+    }
+
     pub fn assert_px_ne(&self, file: &str, t: f64, rgb: [u8; 3], label: &str) {
         let got = self.px(file, t);
         assert_ne!(got, rgb, "{label} ({file} @ {t} s)");

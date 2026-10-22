@@ -4732,7 +4732,7 @@ fn form_hint(kind: &str) -> &'static str {
     match kind {
         "crop" => {
             "edge inset % (0 = frame edge, 100 = opposite edge); \
-             left+right and top+bottom must stay under 100"
+             the cut area shows below, else black"
         }
         "scale" => "percent of the source; 100 keeps the size (unequal axes change the aspect)",
         "eq" => "neutral values: brightness 0 · contrast 1 · saturation 1",

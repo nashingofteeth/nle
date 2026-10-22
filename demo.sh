@@ -160,12 +160,13 @@ warm() { # the sun is much redder than blue
   [ "$r" -ge 180 ] && [ $((r - b)) -ge 60 ]
 }
 
-crop_out=$(px 0.5 showcase.mp4 0 180)
-crop_raw=$(px 0.5 sky.mp4 256 180)
-if near "$crop_out" "$crop_raw" 24; then
-  echo "  ✓ crop left 40 keeps the sky at its 40% mark (${crop_out})"
+crop_edge=$(px 0.5 showcase.mp4 2 180)
+crop_kept=$(px 0.5 showcase.mp4 300 180)
+crop_raw=$(px 0.5 sky.mp4 300 180)
+if dark "$crop_edge" && near "$crop_kept" "$crop_raw" 24; then
+  echo "  ✓ crop left 40 masks the edge (${crop_edge}) and keeps the sky in place (${crop_kept})"
 else
-  echo "  ✗ crop not applied (export ${crop_out}, source 40% ${crop_raw})"; exit 1
+  echo "  ✗ crop wrong (masked ${crop_edge}, kept ${crop_kept}, source ${crop_raw})"; exit 1
 fi
 mid=$(px 2.5 showcase.mp4 318 178)
 corner=$(px 2.5 showcase.mp4 2 2)

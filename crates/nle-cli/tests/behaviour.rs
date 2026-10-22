@@ -211,6 +211,65 @@ fn multi_track_overlay_mute_base_promotion() {
 }
 
 #[test]
+fn a_crop_masks_in_place_and_reveals_what_is_below() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
+    s.ok(&["effect", "crop", "--clip", "1", "--left", "50"]);
+    s.export("solo.mp4");
+    // 320×240: the left half is masked, the kept half does not zoom.
+    s.assert_px_at(
+        "solo.mp4",
+        0.5,
+        20,
+        120,
+        BLACK,
+        "a crop with nothing below is black",
+    );
+    s.assert_px_at(
+        "solo.mp4",
+        0.5,
+        300,
+        120,
+        RED,
+        "the kept half stays where it was",
+    );
+
+    // The same crop on an overlay: the masked half shows the track below.
+    s.ok(&["effect", "clear", "--clip", "1"]);
+    s.ok(&["track", "add", "video"]);
+    s.ok(&[
+        "add",
+        "green.mp4",
+        "--track",
+        "2",
+        "--in",
+        "0",
+        "--out",
+        "2",
+    ]);
+    s.ok(&["effect", "crop", "--clip", "2", "--left", "50"]);
+    s.export("over.mp4");
+    s.assert_px_at(
+        "over.mp4",
+        0.5,
+        20,
+        120,
+        RED,
+        "the cropped overlay reveals the base",
+    );
+    s.assert_px_at(
+        "over.mp4",
+        0.5,
+        300,
+        120,
+        GREEN,
+        "the overlay keeps its right half",
+    );
+}
+
+#[test]
 fn a_muted_sole_video_track_has_nothing_to_export() {
     let s = Sandbox::new();
     s.ok(&["init", "--force"]);
@@ -750,6 +809,48 @@ fn a_multi_track_preview_renders_the_composite() {
     s.assert_px(&proxy, 1.0, GREEN, "the overlay is on top");
     assert!(s.has_audio(&proxy), "the composite carries the mix");
     s.assert_dur(&proxy, 2.0, "the span is [1,3)");
+}
+
+#[test]
+fn a_cropped_overlay_previews_the_composite() {
+    // A crop is a mask, so the monitor must render the overlay to reveal the
+    // layer below — the clip's own proxy would show black margins instead.
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "red.mp4", "green.mp4"]);
+    s.ok(&["add", "red.mp4", "--in", "0", "--out", "4"]);
+    s.ok(&["track", "add", "video"]);
+    s.ok(&[
+        "add",
+        "green.mp4",
+        "--track",
+        "2",
+        "--in",
+        "0",
+        "--out",
+        "2",
+    ]);
+    s.ok(&["effect", "crop", "--clip", "2", "--left", "50"]);
+    let edl = s.edl();
+    assert!(
+        edl.contains("red.mp4"),
+        "the uncovered base still plays from source:\n{edl}"
+    );
+    let proxies: Vec<_> = edl_paths(&edl)
+        .into_iter()
+        .filter(|p| p.to_string_lossy().contains("/proxy/"))
+        .collect();
+    assert_eq!(proxies.len(), 1, "one composite span: {proxies:?}");
+    let proxy = proxies[0].display().to_string();
+    s.assert_px_at(&proxy, 0.5, 20, 120, RED, "the crop reveals the base");
+    s.assert_px_at(
+        &proxy,
+        0.5,
+        300,
+        120,
+        GREEN,
+        "the overlay keeps its right half",
+    );
 }
 
 #[test]

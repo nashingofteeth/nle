@@ -24,6 +24,11 @@ use nle_ffmpeg::graph::ExportSpec;
 use nle_ffmpeg::{Encoder, ExportError, export_quiet_progress};
 use thiserror::Error;
 
+/// Bump when the *meaning* of a segment changes — a filter rewrite, a new
+/// normalize — not only its JSON fields. The hash moves, old renders are
+/// abandoned, and a stale proxy can't be served by the new compiler.
+const RENDER_VERSION: u64 = 1;
+
 #[derive(Debug, Error)]
 pub enum ProxyError {
     #[error("no output size or frame rate set — add a clip first")]
@@ -206,6 +211,7 @@ fn is_entry_name(name: &str) -> bool {
 /// reads (path + mtime, so replacing a file invalidates).
 fn proxy_hash(project: &Project, seg: &Segment, w: u32, h: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
+    RENDER_VERSION.hash(&mut hasher);
     if let Ok(s) = serde_json::to_string(seg) {
         s.hash(&mut hasher);
     }
@@ -466,6 +472,7 @@ fn trim_segment(seg: &Segment, offset: Seconds, len: Seconds) -> Segment {
 /// slice reads (path + mtime, so replacing a file invalidates).
 fn span_hash(project: &Project, tracks: &[Track], w: u32, h: u32) -> u64 {
     let mut hasher = DefaultHasher::new();
+    RENDER_VERSION.hash(&mut hasher);
     for track in tracks {
         if let Ok(json) = serde_json::to_string(track) {
             json.hash(&mut hasher);

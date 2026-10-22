@@ -1562,8 +1562,8 @@ mod tests {
     }
 
     // Crop edges are percentages toward the opposite side: 0 = the frame
-    // edge, 100 = the other edge. 25 off each side of 1920×1080 leaves the
-    // middle half.
+    // edge, 100 = the other edge. 25 off each side of 1920×1080 masks the
+    // outer quarter but keeps the middle half in place.
     #[test]
     fn crop_is_percentage_insets() {
         let Action::AddEffect { effect, .. } = parse(
@@ -1582,15 +1582,20 @@ mod tests {
                 bottom: 25.0
             }
         );
-        assert_eq!(effect.filter((1920, 1080)), "crop=960:540:480:270");
+        assert_eq!(
+            effect.filter((1920, 1080)),
+            "format=yuva420p,crop=960:540:480:270,\
+             pad=1920:1080:480:270:color=black@0"
+        );
         assert_eq!(effect.details(), "l25 r25 t25 b25");
 
-        // Omitting all four leaves the frame unchanged (defaults 0).
+        // Omitting all four leaves the frame unchanged (defaults 0) — and
+        // unlike the old zoom crop, it renders no filter at all.
         let Action::AddEffect { effect, .. } = parse("effect crop --clip 1", &defaults()).unwrap()
         else {
             panic!("expected an effect")
         };
-        assert_eq!(effect.filter((1920, 1080)), "crop=1920:1080:0:0");
+        assert_eq!(effect.filter((1920, 1080)), "");
 
         // Asymmetric insets: 10% of 1920 = 192; 25% of 1080 = 270.
         let Action::AddEffect { effect, .. } =
@@ -1598,7 +1603,11 @@ mod tests {
         else {
             panic!("expected an effect")
         };
-        assert_eq!(effect.filter((1920, 1080)), "crop=1728:810:192:270");
+        assert_eq!(
+            effect.filter((1920, 1080)),
+            "format=yuva420p,crop=1728:810:192:270,\
+             pad=1920:1080:192:270:color=black@0"
+        );
     }
 
     // Scale is a percentage of the source frame; 100 (the default) is a

@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nle_core::timeline::{Segment as TimelineSegment, Track};
+use nle_core::timeline::{Effect, Segment as TimelineSegment, Track};
 use nle_core::{Project, Seconds, format_seconds};
 use thiserror::Error;
 
@@ -126,8 +126,9 @@ enum WindowKind<'a> {
     /// One track's material: `edl://` plays the segment (or its proxy),
     /// offset into it.
     Segment(&'a TimelineSegment, Seconds),
-    /// More than one track contributes audio, so the window needs the rendered
-    /// composite — an EDL entry carries one source's sound, not a mix.
+    /// More than one track contributes audio, **or** the top layer is masked
+    /// (a crop) with picture below it — both need the rendered composite
+    /// rather than one source's EDL entry.
     Mix,
     /// Every track is a gap: black.
     Gap,
@@ -197,8 +198,14 @@ fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError>
             a,
             picked.as_ref().map(|(vi, ..)| *vi),
         );
+        // A cropped layer is transparent at its edges, so a lower picture must
+        // show through: that is only expressible as the export's overlay.
+        let masked = match &picked {
+            Some((vi, seg, _)) => masks_edges(seg) && lower_track_has_video(&video, *vi, a),
+            None => false,
+        };
         let kind = match picked {
-            _ if mixed => WindowKind::Mix,
+            _ if mixed || masked => WindowKind::Mix,
             Some((_, seg, seg_start)) => WindowKind::Segment(seg, a - seg_start),
             None => WindowKind::Gap,
         };
@@ -241,6 +248,36 @@ fn other_track_has_audio(
         .enumerate()
         .any(|(vi, t)| Some(vi) != picked && audible_at(t))
         || audio.iter().any(|t| audible_at(t))
+}
+
+/// Does this segment paint only an inner box? A non-zero crop inset makes the
+/// edges transparent, so lower layers belong in the composite.
+fn masks_edges(seg: &TimelineSegment) -> bool {
+    let TimelineSegment::Clip(c) = seg else {
+        return false;
+    };
+    c.effects.iter().any(|e| match e {
+        Effect::Crop {
+            left,
+            right,
+            top,
+            bottom,
+        } => *left > 0.0 || *right > 0.0 || *top > 0.0 || *bottom > 0.0,
+        _ => false,
+    })
+}
+
+/// Is any track *below* `picked` showing picture at `at`? `video` is in
+/// stacking order (bottom first), so everything before `picked` is underneath.
+fn lower_track_has_video(video: &[&Track], picked: usize, at: Seconds) -> bool {
+    video[..picked].iter().any(|t| {
+        t.index_at(at).is_some_and(|si| {
+            matches!(
+                t.segments[si],
+                TimelineSegment::Clip(_) | TimelineSegment::Transition(_)
+            )
+        })
+    })
 }
 
 /// Spans that must be rendered as a composite: runs of `Mix` windows, widened
@@ -963,6 +1000,43 @@ mod tests {
             } => assert!(crate::proxy::needs_proxy(&p, seg), "{seg:?}"),
             other => panic!("expected the top clip window, got {other:?}"),
         }
+    }
+
+    // A crop is transparent at its edges: with picture below, the monitor needs
+    // the export's overlay (a rendered composite), not the clip's own proxy.
+    #[test]
+    fn a_cropped_layer_over_picture_is_a_composite() {
+        let mut p = composite_project();
+        if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
+            c.effects = vec![Effect::Crop {
+                left: 10.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            }];
+        }
+        let mixed: Vec<bool> = composite_windows(&p)
+            .unwrap()
+            .iter()
+            .map(|w| matches!(w.kind, WindowKind::Mix))
+            .collect();
+        assert_eq!(
+            mixed,
+            vec![false, true, false],
+            "the cropped high clip must reveal the low clip"
+        );
+
+        // With nothing below (the low track is a gap), the clip's own proxy
+        // already shows black margins — no composite render is needed.
+        p.timeline.tracks[0].segments = vec![TimelineSegment::Gap(TimelineGap {
+            duration: Seconds::from_integer(4),
+        })];
+        let mixed: Vec<bool> = composite_windows(&p)
+            .unwrap()
+            .iter()
+            .map(|w| matches!(w.kind, WindowKind::Mix))
+            .collect();
+        assert_eq!(mixed, vec![false, false, false]);
     }
 
     // The plan is built before any render so the status row can say "2/5":

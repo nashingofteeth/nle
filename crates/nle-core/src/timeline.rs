@@ -45,7 +45,9 @@ pub enum Effect {
     /// `crop`, as percentages of the source frame per edge: `left` moves the
     /// left edge toward the right, `right` the right edge toward the left (and
     /// the same for `top`/`bottom`). 0 is the frame edge, 100 the opposite
-    /// edge; the two sides of an axis must sum to less than 100.
+    /// edge; the two sides of an axis must sum to less than 100. The kept
+    /// picture stays where it is; the trimmed strips become transparent, so
+    /// an upper track shows through them (black when nothing is below).
     Crop {
         left: f64,
         right: f64,
@@ -110,7 +112,18 @@ impl Effect {
                 bottom,
             } => {
                 let (w, h, x, y) = crop_geometry(*left, *right, *top, *bottom, frame);
-                format!("crop={w}:{h}:{x}:{y}")
+                let (fw, fh) = frame;
+                if (w, h, x, y) == (fw, fh, 0, 0) {
+                    return String::new(); // no inset: nothing to mask
+                }
+                // Keep the picture at its original place and size; the cut
+                // strips are transparent. A later `overlay` (multi-track
+                // export, or the monitor composite) reveals what is below,
+                // while the classic single-track graph drops alpha to black.
+                format!(
+                    "format=yuva420p,crop={w}:{h}:{x}:{y},\
+                     pad={fw}:{fh}:{x}:{y}:color=black@0"
+                )
             }
             // Percent of the *current* frame, then padded/cropped back to it
             // so the canvas size is unchanged: 50% is a half-size picture on
@@ -128,21 +141,11 @@ impl Effect {
         }
     }
 
-    /// The frame size after this effect: a crop changes it, a scale restores
-    /// its canvas (see [`scale_filter`]), and colour effects leave it alone.
+    /// The frame size after this effect. Every current effect keeps its
+    /// canvas — a crop masks in place, a scale pads/crops back to the frame —
+    /// so the tracker stays for the next effect that really does resize.
     pub fn frame_after(&self, frame: (u32, u32)) -> (u32, u32) {
-        match self {
-            Effect::Crop {
-                left,
-                right,
-                top,
-                bottom,
-            } => {
-                let (w, h, _, _) = crop_geometry(*left, *right, *top, *bottom, frame);
-                (w, h)
-            }
-            _ => frame,
-        }
+        frame
     }
 }
 
@@ -168,9 +171,9 @@ fn crop_geometry(
 }
 
 /// Resize to `w`/`h` percent of the current frame, then pad (below 100%) or
-/// crop (above 100%) back to it, centred. Black padding matches the monitor's
-/// topmost-layer fall-through; a scaled clip on an upper export layer covers
-/// what is below it (the same trade-off as the monitor).
+/// crop (above 100%) back to it, centred. The pad is opaque black: `scale` is
+/// a picture-in-picture, not a mask — `crop` is the effect that lets the layer
+/// below show through.
 fn scale_filter(w: f64, h: f64, (fw, fh): (u32, u32)) -> String {
     let size =
         |base: u32, pct: f64| ((base as f64 * pct / 100.0).round() as u32).clamp(2, u32::MAX / 4);

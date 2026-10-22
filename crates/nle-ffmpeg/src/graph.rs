@@ -89,9 +89,9 @@ fn clip_effects(c: &Clip, asset: &Asset, fallback: (u32, u32)) -> Result<String,
 }
 
 /// The effect filters for a chain, joined and comma-terminated (empty when
-/// nothing renders). The frame is tracked through the chain: a crop changes
-/// it, a scale restores its canvas, so a later effect sizes against the
-/// picture it actually sees.
+/// nothing renders). The frame is tracked through the chain so a resize is
+/// resolved against what the previous effect actually left, but every current
+/// effect keeps the canvas (crop masks in place, scale pads back).
 fn effect_chain(
     effects: &[Effect],
     asset: &Asset,
@@ -1096,7 +1096,7 @@ mod tests {
         let mut p = project_with_two_clips();
         if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
             c.effects = vec![
-                // 25% off each edge of 1920×1080.
+                // 25% off each edge of 1920×1080: mask, not zoom.
                 Effect::Crop {
                     left: 25.0,
                     right: 25.0,
@@ -1109,11 +1109,12 @@ mod tests {
         }
         let g = compile_export(&p).unwrap().graph;
         // Effects chain after the retime, before the normalize scale. The
-        // crop leaves a 960×540 frame, so the 50%/100% scale pads a 480×540
-        // picture back onto it.
+        // crop keeps the canvas, so the 50%/100% scale acts on the full frame.
         assert!(
             g.contains(
-                "crop=960:540:480:270,scale=480:540,pad=960:540:240:0:black,scale=1920:1080"
+                "format=yuva420p,crop=960:540:480:270,\
+                 pad=1920:1080:480:270:color=black@0,\
+                 scale=960:1080,pad=1920:1080:480:0:black,scale=1920:1080"
             ),
             "{g}"
         );
