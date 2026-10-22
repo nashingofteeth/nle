@@ -18,7 +18,7 @@ use crate::edit::{self, EditError, History};
 use crate::extend::{self, Armed};
 use crate::project::Project;
 use crate::time::{Seconds, frame_of, frames_to_seconds, grid_time, parse_signed_time, secs_f64};
-use crate::timeline::{Effect, Segment, TrackKind, TransitionKind};
+use crate::timeline::{Effect, MAX_TIMELINE_SECONDS, Segment, TrackKind, TransitionKind};
 
 /// What an action addresses: the segment under a timeline position, a
 /// clip by id (stable across edits), or a segment by index (as printed
@@ -45,6 +45,15 @@ pub enum Edge {
 pub enum GapLen {
     Frames(i64),
     Seconds(f64),
+}
+
+/// How long a transition is or will be. `Percent` is a rate on an existing
+/// blend: 50 = twice as long, 200 = half as long (100 = unchanged).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransitionLen {
+    Frames(i64),
+    Seconds(f64),
+    Percent(f64),
 }
 
 /// Every project-mutating action, addressed explicitly (no hidden
@@ -94,7 +103,8 @@ pub enum Action {
         ripple: bool,
         segment: Option<Segment>,
     },
-    /// Retime a clip; the track ripples to fit (`R`, `:speed`).
+    /// Retime a clip; the track ripples to fit (`R`, `:speed`). `rate` is the
+    /// model rate (1 = normal); the front-ends take a percentage.
     SetSpeed {
         track: usize,
         clip: u32,
@@ -108,12 +118,13 @@ pub enum Action {
         to: f64,
         ripple: bool,
     },
-    /// Add a crossfade at a boundary (`x`, `:transition`).
+    /// Add a crossfade at a boundary (`x`, `:transition`). On an existing
+    /// blend the same command retimes it (frames/dur, or a `Percent` rate).
     Transition {
         track: usize,
         at: f64,
         kind: TransitionKind,
-        len: GapLen,
+        len: TransitionLen,
     },
     /// Append an effect to a clip (`:effect`), or replace the one at `index`
     /// (the effects panel's edit gesture).
@@ -280,27 +291,55 @@ pub fn run_action(
             len,
         } => {
             let fps = project.fps.ok_or(EditError::NoFps)?;
-            let dur = match len {
-                GapLen::Frames(n) => frames_to_seconds(*n, fps),
-                GapLen::Seconds(s) => frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps),
+            let existing = edit::transition_at(project, *track, *at)?;
+            let Some((_, transition, _)) = existing else {
+                // No blend at the position: frames/dur add one; a rate can
+                // only retime an existing blend.
+                let dur = match len {
+                    TransitionLen::Frames(n) => frames_to_seconds(*n, fps),
+                    TransitionLen::Seconds(s) => {
+                        frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps)
+                    }
+                    TransitionLen::Percent(_) => {
+                        return Err(EditError::NoTransition(format!("{at} s")));
+                    }
+                };
+                // `add_transition` ids the blend with the next segment id;
+                // keep it so the playhead can land in the new blend below.
+                let blend_id = project.next_clip_id();
+                let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
+                let mut out = apply(project, history, batch, from)?;
+                land_on_blend(project, *track, blend_id, &mut out);
+                return Ok(out);
             };
-            // `add_transition` ids the blend with the next segment id; keep it
-            // so the playhead can land in the new blend below.
-            let blend_id = project.next_clip_id();
-            let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
+            // An existing blend is retimed; its kind stays.
+            let dur = match len {
+                TransitionLen::Frames(n) => frames_to_seconds(*n, fps),
+                TransitionLen::Seconds(s) => {
+                    frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps)
+                }
+                TransitionLen::Percent(p) => {
+                    if !p.is_finite() || *p <= 0.0 {
+                        return Err(EditError::BadSpeed(format!("{p}")));
+                    }
+                    let old_frames = (transition.dur * fps).round().to_integer();
+                    let frames = ((old_frames as f64 * 100.0 / p).round() as i64).max(1);
+                    if frames as f64 > MAX_TIMELINE_SECONDS as f64 * secs_f64(&fps) {
+                        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+                    }
+                    frames_to_seconds(frames, fps)
+                }
+            };
+            let blend_id = transition.id;
+            let Some(batch) = edit::retime_transition_on(project, *track, *at, dur)? else {
+                return Ok(Outcome {
+                    desc: "transition unchanged".to_string(),
+                    changed: false,
+                    playhead: None,
+                });
+            };
             let mut out = apply(project, history, batch, from)?;
-            // The cut the transition was added to sits in the middle of the
-            // blend (the two neighbours overlap there), so land there rather
-            // than on either edge.
-            if let Some(tr) = project.timeline.track(*track)
-                && let Some(i) = tr
-                    .segments
-                    .iter()
-                    .position(|s| matches!(s, Segment::Transition(t) if t.id == blend_id))
-            {
-                let mid = secs_f64(&tr.start_of(i)) + secs_f64(&tr.segments[i].duration()) / 2.0;
-                out.playhead = Some(frame_of(project.fps.as_ref(), mid));
-            }
+            land_on_blend(project, *track, blend_id, &mut out);
             Ok(out)
         }
         Action::AddEffect {
@@ -475,6 +514,20 @@ fn apply(
         changed: true,
         playhead: None,
     })
+}
+
+/// Park the playhead on the middle of blend `blend_id` after adding/retiming
+/// it: the cut it covers is the overlap point, not either edge.
+fn land_on_blend(project: &Project, track: usize, blend_id: u32, out: &mut Outcome) {
+    if let Some(tr) = project.timeline.track(track)
+        && let Some(i) = tr
+            .segments
+            .iter()
+            .position(|s| matches!(s, Segment::Transition(t) if t.id == blend_id))
+    {
+        let mid = secs_f64(&tr.start_of(i)) + secs_f64(&tr.segments[i].duration()) / 2.0;
+        out.playhead = Some(frame_of(project.fps.as_ref(), mid));
+    }
 }
 
 /// The track an action's target lives on. Position and segment-index
@@ -817,7 +870,7 @@ const BOOL_FLAGS: &[&str] = &["ripple"];
 const SHORT_FLAGS: &[(&str, &str)] = &[("o", "out")];
 
 /// One command line: its verb, `--flag` options, and bare positional
-/// words (`:speed 0.5`, `:track mute 2`). The grammar mirrors the CLI
+/// words (`:speed 50`, `:track mute 2`). The grammar mirrors the CLI
 /// flags — an agent that knows `nle delete --at 3 --ripple` knows
 /// `:delete --at 3 --ripple`. Public so the front-ends' own (non-edit)
 /// commands tokenize the same way.
@@ -1205,17 +1258,32 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     )));
                 }
             };
-            let len = match (opt_usize(&mut f, "frames")?, opt_time(&mut f, "dur")?) {
-                (Some(_), Some(_)) => {
+            let len = match (
+                opt_usize(&mut f, "frames")?,
+                opt_time(&mut f, "dur")?,
+                opt_time(&mut f, "percent")?,
+            ) {
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
                     return Err(ParseError::Invalid(
-                        "use either --frames N or --dur T".to_string(),
+                        "use only one of --frames N, --dur T, or --percent P".to_string(),
                     ));
                 }
-                (Some(n), None) => GapLen::Frames(n as i64),
-                (None, Some(s)) => GapLen::Seconds(s),
-                (None, None) => GapLen::Seconds(1.0),
+                (Some(n), None, None) => TransitionLen::Frames(n as i64),
+                (None, Some(s), None) => TransitionLen::Seconds(s),
+                (None, None, Some(p)) => {
+                    if !p.is_finite() || p <= 0.0 {
+                        return Err(ParseError::Invalid(format!(
+                            "transition percent must be positive (got {p})"
+                        )));
+                    }
+                    TransitionLen::Percent(p)
+                }
+                (None, None, None) => TransitionLen::Seconds(1.0),
             };
-            f.finish(":transition [dissolve|fade] [--at T] [--track N] [--frames N | --dur T]")?;
+            f.finish(
+                ":transition [dissolve|fade] [--at T] [--track N] \
+                 [--frames N | --dur T | --percent P]",
+            )?;
             Ok(Action::Transition {
                 track: t,
                 at: a,
@@ -1301,11 +1369,11 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
             })
         }
         "speed" => {
-            // `:speed 0.5` (the `R` prompt's spelling) or `:speed --rate 0.5 --clip 3`.
-            let rate = f
-                .positional()
-                .or_else(|| f.take("rate"))
-                .ok_or_else(|| ParseError::Invalid("usage: :speed RATE [--clip N]".to_string()))?;
+            // `:speed 50` (the `R` prompt's spelling) or `:speed --rate 50 --clip 3`.
+            // The value is a percentage: 100 = normal, 50 = half, 200 = double.
+            let rate = f.positional().or_else(|| f.take("rate")).ok_or_else(|| {
+                ParseError::Invalid("usage: :speed PERCENT [--clip N]".to_string())
+            })?;
             let rate = parse_rate(&rate)?;
             let clip = opt_u32(&mut f, "clip")?.or(d.clip).ok_or_else(|| {
                 ParseError::Invalid(
@@ -1314,7 +1382,7 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                 )
             })?;
             let track = parse_track(&mut f, d)?;
-            f.finish(":speed RATE [--clip N] [--track N]")?;
+            f.finish(":speed PERCENT [--clip N] [--track N]")?;
             Ok(Action::SetSpeed { track, clip, rate })
         }
         "extend" => {
@@ -1431,19 +1499,17 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
 const TRACK_USAGE: &str =
     "usage: :track add video|audio · :track mute [N] · :track rm N · :track ls";
 
-/// A speed rate: `n/d` or a positive decimal (`1`, `0.5`, `0.8`, `2`).
+/// A speed percentage: `100` = normal, `50` = half, `200` = double. Returns
+/// the model's rate (`percent / 100`, so 1 = normal).
 fn parse_rate(s: &str) -> Result<Seconds, ParseError> {
-    let bad = || ParseError::Invalid(format!("invalid speed {s:?} (try 1, 0.5, 2, or 24/25)"));
-    if let Some(r) = crate::time::parse_rate(s) {
-        return Ok(r);
-    }
-    let v: f64 = s.parse().map_err(|_| bad())?;
-    if !v.is_finite() || v <= 0.0 {
+    let bad = || ParseError::Invalid(format!("invalid speed {s:?} (try 100, 200, or 50)"));
+    let percent: f64 = s.parse().map_err(|_| bad())?;
+    if !percent.is_finite() || percent <= 0.0 {
         return Err(ParseError::Invalid(format!(
             "speed must be positive (got {s:?})"
         )));
     }
-    Seconds::approximate_float(v)
+    Seconds::approximate_float(percent / 100.0)
         .filter(|r| *r > Seconds::from_integer(0))
         .ok_or_else(bad)
 }
@@ -1475,7 +1541,7 @@ mod tests {
             "delete",
             "yank",
             "paste",
-            "speed 2 --clip 1",
+            "speed 200 --clip 1",
             "extend --clip 1 --edge in --to 2",
             "purge",
             "track add video",
@@ -1808,7 +1874,7 @@ mod tests {
             Ok(Action::Split { track: 5, at: 7.5 })
         );
         assert_eq!(
-            parse("speed 0.5", &defaults()),
+            parse("speed 50", &defaults()),
             Ok(Action::SetSpeed {
                 track: 5,
                 clip: 42,
@@ -2010,6 +2076,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_transition_action_retimes_an_existing_blend() {
+        let mut p = fixture();
+        let mut reg = None;
+        let action = |len| Action::Transition {
+            track: 0,
+            at: 4.0,
+            kind: TransitionKind::Dissolve,
+            len,
+        };
+        let dur = |p: &Project| {
+            p.timeline
+                .video_track()
+                .unwrap()
+                .segments
+                .iter()
+                .find_map(|s| match s {
+                    Segment::Transition(t) => Some(t.dur),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        run(&mut p, &mut reg, &action(TransitionLen::Frames(30))).unwrap();
+        assert_eq!(dur(&p), Seconds::from_integer(1));
+
+        // The original cut is the blend's far edge, and still addresses it.
+        let out = run(&mut p, &mut reg, &action(TransitionLen::Frames(15))).unwrap();
+        assert!(out.changed);
+        assert!(out.desc.contains("15 frames"), "{}", out.desc);
+        assert_eq!(dur(&p), Seconds::new(1, 2));
+
+        // A rate is relative to the current length: 50% doubles it.
+        run(&mut p, &mut reg, &action(TransitionLen::Percent(50.0))).unwrap();
+        assert_eq!(dur(&p), Seconds::from_integer(1));
+
+        // 100% is a no-op, not a history entry.
+        let out = run(&mut p, &mut reg, &action(TransitionLen::Percent(100.0))).unwrap();
+        assert!(!out.changed);
+        assert!(out.desc.contains("unchanged"), "{}", out.desc);
+
+        // A rate with no blend at the position refuses.
+        let out = run(
+            &mut p,
+            &mut reg,
+            &Action::Transition {
+                track: 0,
+                at: 0.5,
+                kind: TransitionKind::Dissolve,
+                len: TransitionLen::Percent(50.0),
+            },
+        );
+        assert!(matches!(out, Err(EditError::NoTransition(_))));
+    }
+
     // The cut a transition is added to sits in the middle of the new blend
     // (the neighbours overlap there), so the playhead lands on its midpoint —
     // not on either edge.
@@ -2024,7 +2144,7 @@ mod tests {
                 track: 0,
                 at: 4.0,
                 kind: TransitionKind::Dissolve,
-                len: GapLen::Frames(30),
+                len: TransitionLen::Frames(30),
             },
         )
         .unwrap();

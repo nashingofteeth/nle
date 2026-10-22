@@ -32,6 +32,14 @@ the export's `xfade` chain.
   ungraded picture inside the blend. The proxy hash includes the side's LUTs
   too.
   Extend mode hops to the blend's far end (`blend_far_end`).
+- **Retime resizes the blend, not the sides' rates.** `retime_transition_on`
+  (the `x`/`X` frames form, `R`'s `--percent`, and `transition --frames/--dur`)
+  replaces `dur` and scales each clip side's span by `new/old`, so the
+  neighbour keeps its rate and gives up or takes back the extra material. Two
+  clip sides change the timeline by `-delta` (a longer blend shortens it); a
+  black side leaves it. The original cut is the blend's far edge, so `--at`
+  accepts it too; insufficient handles refuse (`BlendNoHandle`); one undo
+  batch.
 - **Speed.** A speed change retimes the sides the retimed clip owns
   (`set_speed_on`): the blend's `dur` and the cut (`a.src_out` / `b.src_in`)
   stay put and the inner edge follows (it is also the neighbour's in/out), so

@@ -87,7 +87,7 @@ fn lengths_and_rates() {
             ("speed abc", &[&["speed", "1", "abc"]]),
             ("speed 1/0", &[&["speed", "1", "1/0"]]),
             ("speed 0.000001", &[&["speed", "1", "0.000001"]]),
-            ("speed 100 (sub-frame)", &[&["speed", "2", "100"]]),
+            ("speed 10000 (sub-frame)", &[&["speed", "2", "10000"]]),
             ("speed 1e18", &[&["speed", "1", "1000000000000000000"]]),
             (
                 "speed i64::MAX/1",
@@ -316,7 +316,7 @@ fn effects() {
                 "effect then speed then delete",
                 &[
                     &["effect", "eq", "--clip", "1"],
-                    &["speed", "1", "2"],
+                    &["speed", "1", "200"],
                     &["delete", "--clip", "1"],
                 ],
             ),
@@ -348,15 +348,34 @@ fn speeds_next_to_transitions() {
                 "speed the clip out of a transition",
                 &[
                     &["transition", "--at", "3", "--frames", "15"],
-                    &["speed", "2", "2"],
+                    &["speed", "2", "200"],
                 ],
             ),
             (
                 "speed a transition id",
                 &[
                     &["transition", "--at", "3", "--frames", "15"],
-                    &["speed", "4", "2"],
+                    &["speed", "4", "200"],
                 ],
+            ),
+            (
+                "transition percent 0",
+                &[&["transition", "--at", "3", "--percent", "0"]],
+            ),
+            (
+                "transition percent with no blend",
+                &[&["transition", "--at", "1", "--percent", "50"]],
+            ),
+            (
+                "tiny transition percent on a blend",
+                &[
+                    &["transition", "--at", "3", "--frames", "15"],
+                    &["transition", "--at", "3", "--percent", "0.000001"],
+                ],
+            ),
+            (
+                "transition i64::MAX frames",
+                &[&["transition", "--at", "3", "--frames", "9223372036854775807"]],
             ),
         ],
     );
@@ -722,7 +741,7 @@ fn hostile_projects() {
         (
             "speed a project with a broken transition",
             "h_span.json",
-            &["speed", "1", "2"],
+            &["speed", "1", "200"],
         ),
     ];
     for &(label, project, argv) in cases {

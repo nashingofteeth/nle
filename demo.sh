@@ -116,7 +116,7 @@ $N --project showcase.json add sun.mp4 --at 4 --in 0 --out 1 >/dev/null
 $N --project showcase.json transition --at 2 --frames 30 >/dev/null
 $N --project showcase.json effect crop --clip 1 --left 40 >/dev/null
 $N --project showcase.json effect eq --clip 3 --saturation 0 >/dev/null
-$N --project showcase.json speed 3 2 >/dev/null
+$N --project showcase.json speed 3 200 >/dev/null
 # An upper track: scale it down (the transparent pad reveals the sea), then
 # crop the scaled picture itself. Plus an audio bed.
 $N --project showcase.json track add video >/dev/null
@@ -223,6 +223,17 @@ if output_has audio ffprobe -v error -select_streams a -show_entries stream=code
 else
   echo "  ✗ showcase export has no audio"; exit 1
 fi
+
+# Retime the existing blend in place: 15 frames gives the neighbours 0.5 s
+# back, so the timeline grows from 3.5 s to 4 s.
+$N --project showcase.json transition --at 2 --frames 15 >/dev/null
+if $N --project showcase.json show | head -1 | grep -q '· 4 s ·' \
+  && $N --project showcase.json show | grep -q '(15f)'; then
+  echo "  ✓ transition retimed to 15f (timeline 4 s)"
+else
+  echo "  ✗ transition retime wrong:"; $N --project showcase.json show | head -4; exit 1
+fi
+$N --project showcase.json transition --at 2 --frames 30 >/dev/null
 
 echo "== EDL (CMX3600) import =="
 cat > demo.edl <<'EOF'
@@ -347,7 +358,7 @@ $N --project edit.json trim-out --at 3                           # #1 0–3, gap
 $N --project edit.json extend --clip 1 --edge out --to 4         # #1 grows back over the gap
 $N --project edit.json split --at 5                              # #2 4–5, #3 5–8
 $N --project edit.json gap --dur 0.5 --at 5                      # 15-frame gap 5–5.5
-$N --project edit.json speed 3 2                                 # #3 at 2×: 5.5–7
+$N --project edit.json speed 3 200                                 # #3 at 200%: 5.5–7
 $N --project edit.json show
 $N --project edit.json export -o edit.mp4 >/dev/null
 echo "  expect: red 0–4 · blue 4–5 · black 5–5.5 · blue 5.5–7"

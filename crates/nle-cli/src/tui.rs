@@ -20,16 +20,17 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use nle_core::Batch;
 use nle_core::EditError;
 use nle_core::action::{
-    self, Action, Edge, EffectArgs, GapLen, ParseDefaults, ParseError, Target, effect_from_args,
+    self, Action, Edge, EffectArgs, GapLen, ParseDefaults, ParseError, Target, TransitionLen,
+    effect_from_args,
 };
-#[cfg(test)]
 use nle_core::edit;
 use nle_core::timeline::{
     Effect, Segment as TimelineSegment, Track, TrackKind, TransitionKind, TransitionSource,
 };
 use nle_core::{
     Armed, Clip, CommitKind, History, Project, Seconds, clip_span, commit_batch, frame_of,
-    frame_to_secs, gap_span, load_register, plan_commit, resolve_armed, save_register, track_label,
+    frame_to_secs, gap_span, load_register, plan_commit, resolve_armed, save_register, secs_f64,
+    track_label,
 };
 
 use crate::mpv::{Mpv, PlaybackState};
@@ -248,6 +249,7 @@ pub enum Mode {
     Extend(ExtendState),
     Pool(PoolState),
     Fx(FxState),
+    Transition(TransitionForm),
 }
 
 /// Extend-mode session state. All bounds are timeline seconds; `hi` is
@@ -275,6 +277,18 @@ pub struct PoolState {
     pub sel: usize,
     pub pos: f64,
     pub resume: f64,
+}
+
+/// A one-field transition length form, opened by `x`/`X` when the playhead
+/// is inside a blend. `frames` is the typed text (blank = keep `current`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitionForm {
+    pub id: u32,
+    /// The blend's start (the action targets it).
+    pub start: f64,
+    pub kind: TransitionKind,
+    pub frames: String,
+    pub current: i64,
 }
 
 /// Effects-panel state: the clip whose effects are listed, the row under the
@@ -1108,6 +1122,8 @@ pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         extend_key(app, player, key);
     } else if is_pool(app) {
         pool_key(app, player, key);
+    } else if matches!(app.mode, Mode::Transition(_)) {
+        transition_form_key(app, player, key);
     } else if is_fx(app) {
         fx_key(app, player, key);
     } else {
@@ -2134,6 +2150,101 @@ fn open_fx(app: &mut App) {
     app.set_message("effects");
 }
 
+/// The blend at the playhead on the active track: id, start, kind, frames.
+fn transition_target(app: &App) -> Option<(u32, f64, TransitionKind, i64)> {
+    let fps = app.project.fps?;
+    let (_, tr, start) = edit::transition_at(&app.project, app.active(), app.playhead)
+        .ok()
+        .flatten()?;
+    let frames = (tr.dur * fps).round().to_integer();
+    Some((tr.id, secs_f64(&start), tr.kind, frames))
+}
+
+/// Open the transition length form, optionally pre-filled with a count.
+fn open_transition_form(app: &mut App, prefill: Option<i64>) {
+    let Some((id, start, kind, current)) = transition_target(app) else {
+        app.set_message("move the playhead onto a transition to change its length");
+        return;
+    };
+    app.mode = Mode::Transition(TransitionForm {
+        id,
+        start,
+        kind,
+        frames: prefill.map(|n| n.to_string()).unwrap_or_default(),
+        current,
+    });
+    app.set_message(&format!("transition #{id} — enter frames, enter applies"));
+}
+
+/// Transition form keys: digits edit the frame count; enter applies.
+fn transition_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.set_message("timeline");
+        }
+        KeyCode::Enter => apply_transition_form(app, player),
+        KeyCode::Backspace => {
+            if let Mode::Transition(f) = &mut app.mode {
+                f.frames.pop();
+            }
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Mode::Transition(f) = &mut app.mode {
+                f.frames.clear();
+            }
+        }
+        KeyCode::Char(c) if c.is_ascii_digit() => {
+            if let Mode::Transition(f) = &mut app.mode {
+                f.frames.push(c);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn apply_transition_form(app: &mut App, player: &dyn Mpv) {
+    let Some(form) = (match &app.mode {
+        Mode::Transition(f) => Some(f.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    let text = form.frames.trim();
+    let frames = if text.is_empty() {
+        form.current
+    } else {
+        match text.parse::<i64>() {
+            Ok(n) => n,
+            Err(_) => {
+                app.set_message("frames must be a whole number");
+                return;
+            }
+        }
+    };
+    if frames < 1 {
+        app.set_message("frames must be at least 1");
+        return;
+    }
+    if frames == form.current {
+        app.mode = Mode::Normal;
+        app.set_message(&format!("transition #{} unchanged", form.id));
+        return;
+    }
+    if run_action(
+        app,
+        player,
+        &Action::Transition {
+            track: app.active(),
+            at: form.start,
+            kind: form.kind,
+            len: TransitionLen::Frames(frames),
+        },
+    ) {
+        app.mode = Mode::Normal;
+    }
+}
+
 /// Close the panel. Unlike the pool it hasn't moved the monitor, so there is
 /// nothing to reload.
 fn close_fx(app: &mut App) {
@@ -2541,8 +2652,8 @@ fn fx_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 /// `x` opens the panel and the second lands here). Returns whether it landed.
 fn add_transition(app: &mut App, player: &dyn Mpv, frames: Option<i64>) -> bool {
     let len = match frames {
-        Some(n) => GapLen::Frames(n),
-        None => GapLen::Seconds(1.0),
+        Some(n) => TransitionLen::Frames(n),
+        None => TransitionLen::Seconds(1.0),
     };
     run_action(
         app,
@@ -2631,7 +2742,9 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         // `xx`: the first `x` opened the panel; the second applies the
         // transition and exits the panel (a failure keeps it open to retry).
         KeyCode::Char('x') => {
-            if add_transition(app, player, None) {
+            if transition_target(app).is_some() {
+                open_transition_form(app, None);
+            } else if add_transition(app, player, None) {
                 app.mode = Mode::Normal;
             }
         }
@@ -2866,12 +2979,25 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         }
         KeyCode::Char('u') => do_undo(app, player),
         KeyCode::Char('m') => open_pool(app, player),
-        // `x` — the effects panel for the clip under the playhead.
-        KeyCode::Char('x') => open_fx(app),
+        // `x` — the effects panel for the clip under the playhead, or the
+        // length form when the playhead is inside a transition (a blend owns
+        // no clip's effects).
+        KeyCode::Char('x') => {
+            if transition_target(app).is_some() {
+                open_transition_form(app, None);
+            } else {
+                open_fx(app);
+            }
+        }
         // `X` — cross-dissolve at the boundary; a count is the duration in
-        // frames (default 1 s). `xx` does the same from inside the panel.
+        // frames (default 1 s). On an existing blend the same key opens its
+        // length form, with the count pre-filled.
         KeyCode::Char('X') => {
-            add_transition(app, player, had_count.then_some(mult as i64));
+            if transition_target(app).is_some() {
+                open_transition_form(app, had_count.then_some(mult as i64));
+            } else {
+                add_transition(app, player, had_count.then_some(mult as i64));
+            }
         }
         // `t`/`T` cycle the active track; `<N>t` jumps to track N (1-based).
         KeyCode::Char('t') => {
@@ -2905,7 +3031,13 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('q') => app.quit = true,
         // `R` opens the speed prompt for the clip under the playhead; the
         // command line is pre-filled so it reads as `:speed `.
-        KeyCode::Char('R') => app.mode = Mode::Command("speed ".to_string()),
+        KeyCode::Char('R') => {
+            app.mode = Mode::Command(if transition_target(app).is_some() {
+                "transition --percent ".to_string()
+            } else {
+                "speed ".to_string()
+            });
+        }
         KeyCode::Char(':') => app.mode = Mode::Command(String::new()),
         _ => {}
     }
@@ -4203,6 +4335,8 @@ fn render(f: &mut Frame, app: &App) {
         render_pool(f, info, app);
     } else if is_fx(app) {
         render_fx(f, info, app);
+    } else if matches!(app.mode, Mode::Transition(_)) {
+        render_transition_form(f, info, app);
     } else {
         render_info(f, info, app);
     }
@@ -4285,6 +4419,12 @@ fn hints_for(app: &App) -> Vec<&'static str> {
             "j/k assets · { } list ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
             "space play · enter insert · i import · d remove · u undo · m/esc close",
             "tracks     t/T target · <N>t jump · insert goes to the active track",
+        ];
+    }
+    if matches!(app.mode, Mode::Transition(_)) {
+        return vec![
+            "transition length — frames, then enter (blank keeps it)",
+            "digits edit · ctrl-u clears · esc cancels",
         ];
     }
     if is_fx(app) {
@@ -4481,6 +4621,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         }
         Mode::Pool(_) => "POOL".to_string(),
         Mode::Fx(_) => "EFFECTS".to_string(),
+        Mode::Transition(_) => "TRANSITION".to_string(),
     };
     let count = app.count.map(|c| format!("{c}")).unwrap_or_default();
 
@@ -5064,6 +5205,39 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
             .style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+}
+
+fn render_transition_form(f: &mut Frame, area: Rect, app: &App) {
+    let Mode::Transition(form) = &app.mode else {
+        return;
+    };
+    let block = Block::bordered().title(format!(" transition #{} ", form.id));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let shown = if form.frames.is_empty() {
+        "▏".to_string()
+    } else {
+        format!("{}▏", form.frames)
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{:<11}", "frames"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("[{shown}]"),
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("  was {}", form.current),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from("enter applies · esc cancels").style(Style::default().fg(Color::DarkGray)),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
@@ -6019,7 +6193,7 @@ mod tests {
             Action::Split { track: 0, at: 1.0 }
         );
         assert_eq!(
-            action::parse("speed 0.5", &d).unwrap(),
+            action::parse("speed 50", &d).unwrap(),
             Action::SetSpeed {
                 track: 0,
                 clip: 1,
@@ -8405,7 +8579,7 @@ mod tests {
         app.playhead = 0.5; // inside clip #1 [0..3)
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('R')); // -> :speed
-        for c in "0.5".chars() {
+        for c in "50".chars() {
             handle_key(&mut app, &fake, key(c));
         }
         handle_key(
@@ -8413,7 +8587,7 @@ mod tests {
             &fake,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
-        // clip #1 at 0.5x: its 3s of source now occupy 6s of timeline, so the
+        // clip #1 at 50%: its 3s of source now occupy 6s of timeline, so the
         // gap and clip #2 slide right (a speed change always ripples).
         let track = app.project.timeline.video_track().unwrap();
         let TimelineSegment::Clip(c) = &track.segments[0] else {
@@ -9667,6 +9841,180 @@ mod tests {
             "a transition was added: {:?}",
             track.segments
         );
+    }
+
+    // Inside a blend `x` opens the transition length form, not the clip's
+    // effects panel; entering frames retimes in one batch.
+    #[test]
+    fn x_on_a_transition_opens_the_length_form() {
+        let mut app = App::new(asset_project(), temp_project_path("trans-form"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('X')); // a 1 s dissolve at the clip|gap cut
+        assert_eq!(app.playhead, 2.5, "inside the new blend");
+
+        handle_key(&mut app, &fake, key('x'));
+        let Mode::Transition(form) = &app.mode else {
+            panic!("expected the transition form, got {:?}", app.mode)
+        };
+        assert_eq!((form.current, form.start), (30, 2.0));
+        assert!(matches!(form.kind, TransitionKind::Dissolve));
+
+        for c in "15".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(app.mode, Mode::Normal), "{:?}", app.mode);
+        let track = app.project.timeline.video_track().unwrap();
+        let blend = track
+            .segments
+            .iter()
+            .find_map(|s| match s {
+                TimelineSegment::Transition(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(blend.dur, Seconds::new(1, 2));
+        assert!(app.message.contains("retime transition"), "{}", app.message);
+    }
+
+    // `X` on a blend opens the same form; a count pre-fills the frames.
+    #[test]
+    fn x_and_a_count_edit_the_transition_frames() {
+        let mut app = App::new(asset_project(), temp_project_path("trans-x"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('X'));
+
+        handle_key(&mut app, &fake, key('1'));
+        handle_key(&mut app, &fake, key('5'));
+        handle_key(&mut app, &fake, key('X'));
+        let Mode::Transition(form) = &app.mode else {
+            panic!("expected the transition form, got {:?}", app.mode)
+        };
+        assert_eq!(form.frames, "15", "the count pre-fills the field");
+        assert_eq!(form.current, 30);
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+
+        // Without a count the input starts blank and shows the current value.
+        handle_key(&mut app, &fake, key('X'));
+        let Mode::Transition(form) = &app.mode else {
+            panic!("expected the transition form, got {:?}", app.mode)
+        };
+        assert!(form.frames.is_empty());
+        assert_eq!(form.current, 15);
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+    }
+
+    // A blank form keeps the length; a refusal keeps the form open.
+    #[test]
+    fn a_transition_form_keeps_the_length_on_blank_or_refusal() {
+        let mut app = App::new(asset_project(), temp_project_path("trans-blank"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('X'));
+        handle_key(&mut app, &fake, key('x'));
+
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(app.mode, Mode::Normal));
+        assert!(app.message.contains("unchanged"), "{}", app.message);
+
+        // A count larger than the clip's handle is refused in place.
+        handle_key(&mut app, &fake, key('X'));
+        for c in "10000".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(app.mode, Mode::Transition(_)),
+            "the form stays open: {:?}",
+            app.mode
+        );
+        assert!(app.message.contains("no more tail"), "{}", app.message);
+    }
+
+    // `R` on a blend pre-fills the transition rate command; 50% doubles it.
+    #[test]
+    fn r_on_a_transition_prefills_the_rate_command() {
+        let mut app = App::new(asset_project(), temp_project_path("trans-r"));
+        app.loaded = true;
+        app.playhead = 3.0;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('X'));
+
+        handle_key(&mut app, &fake, key('R'));
+        assert!(
+            matches!(app.mode, Mode::Command(ref s) if s == "transition --percent "),
+            "{:?}",
+            app.mode
+        );
+        for c in "50".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let track = app.project.timeline.video_track().unwrap();
+        let blend = track
+            .segments
+            .iter()
+            .find_map(|s| match s {
+                TimelineSegment::Transition(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(blend.dur, Seconds::from_integer(2), "50% is twice as long");
+    }
+
+    // The form shows the current length beside the blank input.
+    #[test]
+    fn the_transition_form_renders_current_frames() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.mode = Mode::Transition(TransitionForm {
+            id: 4,
+            start: 2.0,
+            kind: TransitionKind::Dissolve,
+            frames: "15".into(),
+            current: 30,
+        });
+        let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
+        term.draw(|f| render_transition_form(f, f.area(), &app))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..8u16)
+            .map(|y| (0..60u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("transition #4"), "{text}");
+        assert!(text.contains("frames"), "{text}");
+        assert!(text.contains("was 30"), "{text}");
     }
 
     // `X` lands in the middle of the new blend — the cut the transition was

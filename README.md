@@ -74,8 +74,11 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              in order ·
 #              X cross-dissolve at the boundary (count = frames); `xx` also
 #              works — the first x opens the panel, the second applies it and
-#              closes ·
-#              :transition [dissolve|fade] [--dur T|--frames N] ·
+#              closes · on an existing transition, x or X opens its length
+#              form (frames; a count pre-fills it) and R opens
+#              `:transition --percent` — 50 = twice as long, 200 = half ·
+#              :transition [dissolve|fade] [--dur T|--frames N|--percent P] ·
+#              on an existing blend --frames/--dur/--percent retime it ·
 #              :effect [--clip N] crop|scale|offset|eq|lut … · :effect rm [--index N] ·
 #              :effect clear (one effect per kind: re-adding a kind replaces
 #              it in place) · rendered at export;
@@ -88,7 +91,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              action has both spellings:
 #              :trim-in|out [--ripple] · :split · :gap [--frames N|--dur T] ·
 #              :delete|--yank [--at T|--clip N|--seg N] · :paste [--ripple] ·
-#              :extend --edge in|out --to T [--ripple] · :speed RATE (or R) ·
+#              :extend --edge in|out --to T [--ripple] · :speed PERCENT (or R; 100 = normal) ·
 #              :transition · :effect [rm|clear] · :undo · :redo · :purge · :track … ·
 #              :media ls|rm · :cache prune [--days N] [--dry-run] · :import ·
 #              :add · :show · :seek T · :export -o FILE · :detect FILE ·
@@ -142,7 +145,10 @@ $N import-otio sequence.otio            # OpenTimelineIO (.otio) → project
 #   e.g. a Kdenlive "OpenTimelineIO Export"; media paths come from the file
 #   itself (--media/--remap for moved media; --fps forces the rate). Kdenlive
 #   rate conforms (timewarp) import as per-clip speed.
-$N speed 3 0.5                          # clip #3 at half speed (--track N, 1-based)
+$N speed 3 50                           # clip #3 at 50% (--track N, 1-based)
+$N transition --at 3 --frames 20        # dissolve; on an existing blend it
+#   retimes (--percent 50 = twice as long); frames are whole project frames
+#   and a longer clip↔clip blend consumes more of both neighbours
 $N purge-stumps                        # drop sub-frame stumps; snap to the grid
 #   --track N cleans just that track (1-based).
 

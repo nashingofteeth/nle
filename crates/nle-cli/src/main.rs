@@ -54,9 +54,9 @@ use nle_core::project::wrong_kind;
 use nle_core::time::{parse_signed_time, parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Clip, Gap, Segment, Timeline, Track, TrackKind};
 use nle_core::{
-    Action, Asset, Edge, GapLen, Project, Seconds, Target, TransitionKind, VideoSettings,
-    format_seconds, frame_of, load_register, parse_rate, parse_time, run_action, save_register,
-    track_label,
+    Action, Asset, Edge, GapLen, Project, Seconds, Target, TransitionKind, TransitionLen,
+    VideoSettings, format_seconds, frame_of, load_register, parse_rate, parse_time, run_action,
+    save_register, track_label,
 };
 use nle_ffmpeg::detect::{DetectOptions, detect};
 use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
@@ -128,7 +128,7 @@ enum Cmd {
     Speed {
         /// Clip id (from `nle show`)
         id: u32,
-        /// New speed: 1, 2, 0.5, 0.8, 24/25 … (a rate, not a duration)
+        /// New speed in percent: 100 = normal, 50 = half, 200 = double
         #[arg(allow_negative_numbers = true)]
         rate: String,
         /// Track number (1-based; default 1)
@@ -274,6 +274,9 @@ enum Cmd {
         /// Length as a time (alternative to --frames)
         #[arg(long, value_name = "TIME", allow_negative_numbers = true)]
         dur: Option<String>,
+        /// Retime an existing transition: rate percent (50 = twice as long)
+        #[arg(long, value_name = "P", allow_negative_numbers = true)]
+        percent: Option<f64>,
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
         track: usize,
@@ -783,6 +786,7 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
             at,
             frames,
             dur,
+            percent,
             track,
         } => Some(cli_index(*track, "--track").and_then(|track| {
             let at = cli_time(at)?;
@@ -793,11 +797,19 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     return Err(format!("unknown kind {other:?} — use dissolve or fade"));
                 }
             };
-            let len = match (frames, dur) {
-                (Some(_), Some(_)) => return Err("use either --frames or --dur".to_string()),
-                (Some(n), None) => GapLen::Frames(*n),
-                (None, Some(d)) => GapLen::Seconds(cli_time(d)?),
-                (None, None) => GapLen::Seconds(1.0),
+            let len = match (frames, dur, percent) {
+                (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                    return Err("use only one of --frames, --dur, or --percent".to_string());
+                }
+                (Some(n), None, None) => TransitionLen::Frames(*n),
+                (None, Some(d), None) => TransitionLen::Seconds(cli_time(d)?),
+                (None, None, Some(p)) => {
+                    if !p.is_finite() || *p <= 0.0 {
+                        return Err(format!("transition percent must be positive (got {p})"));
+                    }
+                    TransitionLen::Percent(*p)
+                }
+                (None, None, None) => TransitionLen::Seconds(1.0),
             };
             Ok(Action::Transition {
                 track,
@@ -1434,8 +1446,11 @@ pub(crate) fn show_report(project: &Project) -> String {
             match seg {
                 Segment::Transition(t) => {
                     let end = cursor + t.dur;
+                    let frames = project
+                        .fps
+                        .map_or(0, |fps| (t.dur * fps).round().to_integer());
                     out += &format!(
-                        "      [{si}] ⟶ transition #{} {}–{}\n",
+                        "      [{si}] ⟶ transition #{} {}–{} ({frames}f)\n",
                         t.id,
                         format_seconds(&cursor),
                         format_seconds(&end)
@@ -1578,18 +1593,14 @@ fn parse_fps_arg(s: &str) -> Result<Seconds> {
 
 /// A speed accepts `n/d` or a positive decimal (`1`, `0.5`, `0.8`, `2`).
 fn parse_speed_arg(s: &str) -> Result<Seconds> {
-    if let Some(r) = parse_rate(s) {
-        return Ok(r);
-    }
-    let v: f64 = s
-        .parse()
-        .with_context(|| format!("invalid speed {s:?} (try 1, 0.5, 2, or 24/25)"))?;
-    if !v.is_finite() || v <= 0.0 {
+    let bad = || format!("invalid speed {s:?} (try 100, 200, or 50)");
+    let percent: f64 = s.parse().with_context(bad)?;
+    if !percent.is_finite() || percent <= 0.0 {
         bail!("speed must be positive (got {s:?})");
     }
-    Seconds::approximate_float(v)
+    Seconds::approximate_float(percent / 100.0)
         .filter(|r| *r > Seconds::from_integer(0))
-        .with_context(|| format!("speed {s:?} is not representable"))
+        .with_context(bad)
 }
 
 /// Match a reel/clip name to a pooled asset in three tiers — exact
@@ -2732,6 +2743,7 @@ mod tests {
                 at: "1".into(),
                 frames: Some(3),
                 dur: None,
+                percent: None,
                 track: 1,
             },
             Cmd::Effect {

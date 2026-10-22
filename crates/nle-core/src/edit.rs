@@ -46,6 +46,8 @@ pub enum EditError {
     SegmentNotFound(usize),
     #[error("a transition can't be split or trimmed — remove it (dd) instead")]
     Transition,
+    #[error("no transition at {0} — --percent only retimes an existing blend")]
+    NoTransition(String),
     #[error("a fade's black side has no clip to trim through")]
     NoClipSide,
     #[error("transition #{id} can't absorb the trim — {detail}")]
@@ -1380,6 +1382,194 @@ pub fn add_transition(
         ops,
         desc: format!("transition ({what}) at {}", stamp(project, &t)),
     })
+}
+
+/// The transition containing `at` on `track`: its segment index, a clone,
+/// and its start. `None` when the position is not inside a blend.
+pub fn transition_at(
+    project: &Project,
+    track: usize,
+    at: f64,
+) -> Result<Option<(usize, Transition, Seconds)>, EditError> {
+    let t = snap(project, at)?;
+    let tr = track_at(project, track)?;
+    let Some(mut si) = tr.index_at(t) else {
+        return Ok(None);
+    };
+    if !matches!(tr.segments[si], Segment::Transition(_)) {
+        // The original cut is the blend's far edge; accept it too.
+        if si > 0 && tr.start_of(si) == t && matches!(tr.segments[si - 1], Segment::Transition(_)) {
+            si -= 1;
+        } else {
+            return Ok(None);
+        }
+    }
+    match &tr.segments[si] {
+        Segment::Transition(tt) => Ok(Some((si, tt.clone(), tr.start_of(si)))),
+        _ => Ok(None),
+    }
+}
+
+/// Resize an existing transition to `dur`, keeping each clip side's rate.
+/// A longer blend takes more material from both neighbours (and shortens a
+/// clip↔clip timeline by the added length); a shorter one gives it back.
+/// `None` when the length is unchanged. `at` is any time inside the blend.
+pub fn retime_transition_on(
+    project: &Project,
+    track: usize,
+    at: f64,
+    dur: Seconds,
+) -> Result<Option<Batch>, EditError> {
+    let fps = project.fps.ok_or(EditError::NoFps)?;
+    let t = snap(project, at)?;
+    let tr = track_at(project, track)?;
+    if tr.kind != TrackKind::Video {
+        return Err(EditError::TransitionsNeedVideo);
+    }
+    let mut si = tr.index_at(t).ok_or(EditError::NoSegment)?;
+    if !matches!(tr.segments[si], Segment::Transition(_))
+        && si > 0
+        && tr.start_of(si) == t
+        && matches!(tr.segments[si - 1], Segment::Transition(_))
+    {
+        si -= 1; // the original cut is the blend's far edge
+    }
+    let Segment::Transition(trans) = tr.segments[si].clone() else {
+        return Err(EditError::NoTransition(stamp(project, &t)));
+    };
+    let frames = (dur * fps).round().to_integer();
+    if frames < 1 {
+        return Err(EditError::TooShort);
+    }
+    let new_dur = frames_to_seconds(frames, fps);
+    if new_dur > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
+    if new_dur == trans.dur {
+        return Ok(None);
+    }
+    let factor = new_dur / trans.dur;
+
+    let mut a_op: Option<EditOp> = None;
+    let mut b_op: Option<EditOp> = None;
+    let a = match &trans.a {
+        TransitionSource::Black => TransitionSource::Black,
+        TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+            effects,
+        } => {
+            let Some(Segment::Clip(c)) = si.checked_sub(1).and_then(|i| tr.segments.get(i)) else {
+                return Err(EditError::NoClipSide);
+            };
+            if c.asset != *asset || c.asset_out != *src_in {
+                return Err(EditError::NoClipSide);
+            }
+            let new_in = *src_out - (*src_out - *src_in) * factor;
+            if new_in < c.asset_in {
+                return Err(EditError::BlendNoHandle {
+                    id: trans.id,
+                    detail: format!("clip #{} has no more tail", c.id),
+                });
+            }
+            let left = (new_in - c.asset_in) / c.speed;
+            if at_least_a_frame(project, &left).is_err() {
+                return Err(EditError::BlendNoHandle {
+                    id: trans.id,
+                    detail: format!("clip #{} would be under a frame", c.id),
+                });
+            }
+            a_op = Some(EditOp::Replace {
+                track,
+                index: si - 1,
+                before: Segment::Clip(c.clone()),
+                after: Segment::Clip(Clip {
+                    asset_out: new_in,
+                    ..c.clone()
+                }),
+            });
+            TransitionSource::Clip {
+                asset: *asset,
+                src_in: new_in,
+                src_out: *src_out,
+                effects: effects.clone(),
+            }
+        }
+    };
+    let b = match &trans.b {
+        TransitionSource::Black => TransitionSource::Black,
+        TransitionSource::Clip {
+            asset,
+            src_in,
+            src_out,
+            effects,
+        } => {
+            let Some(Segment::Clip(c)) = tr.segments.get(si + 1) else {
+                return Err(EditError::NoClipSide);
+            };
+            if c.asset != *asset || c.asset_in != *src_out {
+                return Err(EditError::NoClipSide);
+            }
+            let new_out = *src_in + (*src_out - *src_in) * factor;
+            if new_out > c.asset_out {
+                return Err(EditError::BlendNoHandle {
+                    id: trans.id,
+                    detail: format!("clip #{} has no more head", c.id),
+                });
+            }
+            let right = (c.asset_out - new_out) / c.speed;
+            if at_least_a_frame(project, &right).is_err() {
+                return Err(EditError::BlendNoHandle {
+                    id: trans.id,
+                    detail: format!("clip #{} would be under a frame", c.id),
+                });
+            }
+            b_op = Some(EditOp::Replace {
+                track,
+                index: si + 1,
+                before: Segment::Clip(c.clone()),
+                after: Segment::Clip(Clip {
+                    asset_in: new_out,
+                    ..c.clone()
+                }),
+            });
+            TransitionSource::Clip {
+                asset: *asset,
+                src_in: *src_in,
+                src_out: new_out,
+                effects: effects.clone(),
+            }
+        }
+    };
+    let mut ops: Vec<EditOp> = Vec::new();
+    ops.extend(a_op);
+    ops.push(EditOp::Replace {
+        track,
+        index: si,
+        before: Segment::Transition(trans.clone()),
+        after: Segment::Transition(Transition {
+            dur: new_dur,
+            a,
+            b,
+            ..trans.clone()
+        }),
+    });
+    ops.extend(b_op);
+    // Each clip side gives/gets `delta` of visible time; the blend gives it
+    // back, so two clip sides change the total by `-delta` and a fade's one
+    // clip side leaves it alone.
+    let delta = new_dur - trans.dur;
+    let clip_sides = i64::from(matches!(trans.a, TransitionSource::Clip { .. }))
+        + i64::from(matches!(trans.b, TransitionSource::Clip { .. }));
+    let total_delta = delta - delta * clip_sides;
+    if tr.end() + total_delta > Seconds::from_integer(MAX_TIMELINE_SECONDS) {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
+    Ok(Some(Batch {
+        ops,
+        desc: format!("retime transition #{} to {frames} frames", trans.id),
+    }))
 }
 
 /// Add `effect` to clip `clip_id` on the first video track.
@@ -7659,6 +7849,123 @@ mod tests {
             Seconds::from_integer(5),
             "length unchanged"
         );
+    }
+
+    #[test]
+    fn retime_transition_keeps_each_sides_rate() {
+        // [A src 0..4] [B src 0..4], a 1 s dissolve at the cut; retiming to
+        // 2 s takes another second from each side, to 0.5 s gives it back.
+        let mut p = Project::new();
+        p.fps = Some(Seconds::from_integer(30));
+        let (a, _) = p.add_asset("/media/red.mp4".into(), probe_report("10"));
+        let clip = |id, in_, out| {
+            Segment::Clip(Clip {
+                id,
+                asset: a,
+                asset_in: Seconds::from_integer(in_),
+                asset_out: Seconds::from_integer(out),
+                speed: Seconds::from_integer(1),
+                effects: Vec::new(),
+            })
+        };
+        p.timeline.video_track_mut().unwrap().segments = vec![clip(1, 0, 4), clip(2, 0, 4)];
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            4.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        let segs = |p: &Project| p.timeline.video_track().unwrap().segments.clone();
+        // 2 s: each clip keeps 2 s and the blend covers 2 s of each.
+        let batch = retime_transition_on(&p, 0, 4.0, Seconds::from_integer(2))
+            .unwrap()
+            .expect("a change");
+        h.apply(&mut p, batch, 0).unwrap();
+        let segs_now = segs(&p);
+        let Segment::Transition(t) = &segs_now[1] else {
+            panic!("expected a blend")
+        };
+        assert_eq!(t.dur, Seconds::from_integer(2));
+        match (&segs_now[0], &segs_now[2]) {
+            (Segment::Clip(a), Segment::Clip(b)) => {
+                assert_eq!(
+                    (a.asset_out, b.asset_in),
+                    (Seconds::from_integer(2), Seconds::from_integer(2))
+                );
+                assert_eq!(
+                    (a.duration(), b.duration()),
+                    (Seconds::from_integer(2), Seconds::from_integer(2))
+                );
+            }
+            other => panic!("expected clips, got {other:?}"),
+        }
+        assert_eq!(p.timeline.end(), Seconds::from_integer(6), "8 - 2");
+
+        // One undo restores the 1 s blend and both edges.
+        h.undo(&mut p).unwrap();
+        let back = segs(&p);
+        let Segment::Transition(t) = &back[1] else {
+            panic!("expected a blend")
+        };
+        assert_eq!(t.dur, Seconds::from_integer(1));
+        match (&back[0], &back[2]) {
+            (Segment::Clip(a), Segment::Clip(b)) => {
+                assert_eq!(
+                    (a.asset_out, b.asset_in),
+                    (Seconds::from_integer(3), Seconds::from_integer(1))
+                );
+            }
+            other => panic!("expected clips, got {other:?}"),
+        }
+
+        // Growing past the handles refuses.
+        assert!(matches!(
+            retime_transition_on(&p, 0, 4.0, Seconds::from_integer(5)),
+            Err(EditError::BlendNoHandle { .. })
+        ));
+        // A no-op length is not a batch.
+        assert!(
+            retime_transition_on(&p, 0, 4.0, Seconds::from_integer(1))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retime_a_fade_keeps_the_timeline_length() {
+        // fixture(): [C1 src 1..3] [gap 1] [C2 src 0..2]; a 1 s fade at 2.0.
+        let mut p = fixture();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            2.0,
+            TransitionKind::FadeBlack,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        // Shrink to 0.5 s: the clip gets half a second back, the black side
+        // has no material, and the timeline stays 5 s.
+        let batch = retime_transition_on(&p, 0, 2.0, Seconds::new(1, 2))
+            .unwrap()
+            .expect("a change");
+        h.apply(&mut p, batch, 0).unwrap();
+        let track = p.timeline.video_track().unwrap();
+        match &track.segments[0] {
+            Segment::Clip(c) => assert_eq!(c.asset_out, Seconds::new(5, 2)),
+            s => panic!("expected a clip, got {s:?}"),
+        }
+        let Segment::Transition(t) = &track.segments[1] else {
+            panic!("expected a blend")
+        };
+        assert_eq!(t.dur, Seconds::new(1, 2));
+        assert_eq!(p.timeline.end(), Seconds::from_integer(5));
     }
 
     #[test]

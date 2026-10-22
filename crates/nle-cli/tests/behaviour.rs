@@ -120,7 +120,7 @@ fn speed_source_timeline_math() {
     s.ok(&["init", "--force"]);
     s.ok(&["import", "red.mp4"]);
     s.ok(&["add", "red.mp4", "--in", "0", "--out", "4"]);
-    s.ok(&["speed", "1", "2"]);
+    s.ok(&["speed", "1", "200"]);
     s.ok(&["trim-in", "--at", "1"]);
     let show = s.show();
     assert!(
@@ -142,14 +142,14 @@ fn speed_source_timeline_math() {
 #[test]
 fn audio_retiming_keeps_the_audio() {
     let s = Sandbox::new();
-    for (rate, want) in [("2", 1.0), ("0.5", 4.0), ("0.4", 5.0), ("3", 0.666667)] {
+    for (rate, want) in [("200", 1.0), ("50", 4.0), ("40", 5.0), ("300", 0.666667)] {
         s.ok(&["init", "--force"]);
         s.ok(&["import", "red.mp4"]);
         s.ok(&["add", "red.mp4", "--in", "0", "--out", "2"]);
         s.ok(&["speed", "1", rate]);
         s.export("r.mp4");
-        s.assert_dur("r.mp4", want, &format!("a 2 s clip at {rate}×"));
-        assert!(s.has_audio("r.mp4"), "{rate}× keeps its audio");
+        s.assert_dur("r.mp4", want, &format!("a 2 s clip at {rate}%"));
+        assert!(s.has_audio("r.mp4"), "{rate}% keeps its audio");
     }
 }
 
@@ -409,7 +409,7 @@ fn undo_redo_round_trip() {
     s.ok(&["trim-out", "--at", "5"]);
     s.ok(&["gap", "--at", "3", "--frames", "15"]);
     s.ok(&["delete", "--clip", "3", "--ripple"]);
-    s.ok(&["speed", "1", "2"]);
+    s.ok(&["speed", "1", "200"]);
     let after = fs::read(s.file(P)).expect("read the project");
     for _ in 0..5 {
         s.ok(&["undo"]);
@@ -641,6 +641,37 @@ fn transitions() {
 }
 
 #[test]
+fn a_transition_can_be_retimed() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["transition", "--at", "2", "--frames", "15"]);
+    s.export("t.mp4");
+    s.assert_dur("t.mp4", 5.5, "0.5 s blend");
+
+    // The original cut addresses the blend; 30 frames is one second.
+    s.ok(&["transition", "--at", "2", "--frames", "30"]);
+    let show = s.show();
+    assert!(show.contains("(30f)"), "{show}");
+    s.export("t.mp4");
+    s.assert_dur("t.mp4", 5.0, "a longer blend consumes another 0.5 s");
+    s.assert_frames("t.mp4", 150, "30 fps × 5 s");
+
+    // A rate is relative to the current length: 200% halves it.
+    s.ok(&["transition", "--at", "2", "--percent", "200"]);
+    s.export("t.mp4");
+    s.assert_dur("t.mp4", 5.5, "200% → 15 frames again");
+
+    // One undo restores the pre-retime length.
+    s.ok(&["undo"]);
+    let show = s.show();
+    assert!(show.contains("(30f)"), "undo restored 30 frames:\n{show}");
+
+    // A rate with no blend at that position is refused.
+    let out = s.err(&["transition", "--at", "5", "--percent", "50"]);
+    assert!(out.contains("no transition"), "{out}");
+}
+
+#[test]
 fn removing_a_transition_gives_the_frames_back() {
     let s = Sandbox::new();
     s.base();
@@ -687,7 +718,7 @@ fn effects_eq_neutral_values() {
     // Effects and a retime compose: 2 s at 2x is 1 s, still grey.
     s.base();
     s.ok(&["effect", "eq", "--clip", "1", "--saturation", "0"]);
-    s.ok(&["speed", "1", "2"]);
+    s.ok(&["speed", "1", "200"]);
     s.export("fx.mp4");
     s.assert_dur("fx.mp4", 5.0, "an effect clip retimes (1 s + 2 s + 2 s)");
     s.assert_look("fx.mp4", 0.5, Look::Grey, "…and the effect still applies");
@@ -769,7 +800,7 @@ fn an_effect_survives_the_edits_that_rebuild_a_clip() {
 fn a_retimed_clip_previews_from_a_proxy() {
     let s = Sandbox::new();
     s.base();
-    s.ok(&["speed", "1", "2"]);
+    s.ok(&["speed", "1", "200"]);
     let edl = s.edl();
     assert!(
         !edl.contains("red.mp4"),
@@ -787,7 +818,7 @@ fn retiming_a_neighbour_retimes_the_transition_side() {
     let s = Sandbox::new();
     s.base();
     s.ok(&["transition", "--at", "2", "--frames", "15"]);
-    s.ok(&["speed", "1", "2"]);
+    s.ok(&["speed", "1", "200"]);
     // red 0..2 at 2x is 1 s, and the dissolve owns the last 0.5 s of it: the
     // clip keeps 0.5 s and the transition's side plays source 1..2, also at
     // 2x. Before, the clip kept 0.75 s and the transition played its span at
@@ -806,9 +837,9 @@ fn retiming_a_neighbour_retimes_the_transition_side() {
 fn a_rate_that_misses_the_frame_grid_snaps_the_timeline() {
     let s = Sandbox::new();
     s.base();
-    s.ok(&["speed", "1", "0.7"]);
-    // 2 s / 0.7 = 2.857 s = 85.714 frames. The clip takes 86 frames and the
-    // rate becomes 30/43, so every boundary stays on the grid and the source
+    s.ok(&["speed", "1", "70"]);
+    // 2 s at 70% = 2.857 s = 85.714 frames. The clip takes 86 frames and the
+    // rate is 0.7, so every boundary stays on the grid and the source
     // span — the material the user picked — is untouched.
     let show = s.show();
     assert!(
