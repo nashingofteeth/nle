@@ -4035,9 +4035,9 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         ];
     }
     if is_fx(app) {
-        if fx_state(app).is_some_and(|st| st.form.is_some()) {
+        if let Some(form) = fx_state(app).and_then(|st| st.form.as_ref()) {
             return vec![
-                "new effect — type in the focused field, tab/↑↓ moves",
+                form_hint(form.kind),
                 "enter next · enter on last applies and closes · ctrl-u clears · esc cancels",
             ];
         }
@@ -4727,6 +4727,20 @@ fn render_fx(f: &mut Frame, area: Rect, app: &App) {
 
 /// The add form: one labelled field per parameter, the focused value
 /// highlighted, and the navigation line underneath.
+/// What the form's fields expect: units, ranges, and neutral values.
+fn form_hint(kind: &str) -> &'static str {
+    match kind {
+        "crop" => {
+            "edge inset % (0 = frame edge, 100 = opposite edge); \
+             left+right and top+bottom must stay under 100"
+        }
+        "scale" => "percent of the source; 100 keeps the size (unequal axes change the aspect)",
+        "eq" => "neutral values: brightness 0 · contrast 1 · saturation 1",
+        "lut" => "path to a .cube 3D LUT file",
+        _ => "",
+    }
+}
+
 fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
     use ratatui::widgets::Paragraph;
     let mut lines: Vec<Line> = form
@@ -4757,11 +4771,12 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
         })
         .collect();
     lines.push(Line::from(""));
+    lines.push(Line::from(form_hint(form.kind)).style(Style::default().fg(Color::DarkGray)));
     lines.push(
         Line::from("tab/↑↓ field · enter next · enter on last applies and closes · esc cancels")
             .style(Style::default().fg(Color::DarkGray)),
     );
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
 fn render_info(f: &mut Frame, area: Rect, app: &App) {
@@ -8766,6 +8781,42 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("no effects"), "{text}");
+    }
+
+    // Each add form explains what its fields expect: units, ranges, and the
+    // neutral/default values.
+    #[test]
+    fn effect_forms_hint_their_expected_input() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let render = |kind: &'static str| -> String {
+            let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+            app.mode = Mode::Fx(FxState {
+                clip: 1,
+                sel: 0,
+                form: Some(form_for(kind)),
+            });
+            let mut term = Terminal::new(TestBackend::new(100, 16)).unwrap();
+            term.draw(|f| render_fx(f, f.area(), &app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..16u16)
+                .map(|y| {
+                    (0..100u16)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for (kind, hint) in [
+            ("crop", "opposite edge"),
+            ("scale", "100 keeps the size"),
+            ("eq", "contrast 1"),
+            ("lut", ".cube"),
+        ] {
+            let text = render(kind);
+            assert!(text.contains(hint), "{kind}: {hint:?}\n{text}");
+        }
     }
 
     // `t`/`T` change the insert target while the pool is open, without

@@ -1026,7 +1026,8 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 /// The `:effect` / `nle effect` usage string — one spelling for both
 /// front-ends.
 pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] \
-     crop --left P --right P --top P --bottom P | scale --w P --h P | \
+     crop --left P --right P --top P --bottom P (%: 0 = edge, 100 = opposite) | \
+     scale --w P --h P (%: 100 = unchanged) | \
      eq [--brightness --contrast --saturation] | lut --path P | \
      rm [--index N] | clear";
 
