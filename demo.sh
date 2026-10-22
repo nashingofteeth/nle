@@ -21,6 +21,27 @@ gen() { # gen NAME COLOR SIZE RATE DUR FREQ
   fi
 }
 
+# A "real-looking" but synthetic clip: a linear colour gradient with a sine
+# audio bed. Deterministic, and detailed enough that a crop/scale is visible
+# (the flat colour clips above hide geometry effects).
+grad() { # grad NAME SIZE RATE DUR R0 G0 B0 R1 G1 B1 AXIS FREQ
+  local name=$1 size=$2 rate=$3 dur=$4
+  local r0=$5 g0=$6 b0=$7 r1=$8 g1=$9 b1=${10} axis=${11} freq=${12}
+  [ -f "$name" ] && return
+  local w=${size%x*} h=${size#*x} expr
+  if [ "$axis" = x ]; then
+    expr="geq=r='$r0+$((r1 - r0))*X/$((w - 1))':g='$g0+$((g1 - g0))*X/$((w - 1))':b='$b0+$((b1 - b0))*X/$((w - 1))'"
+  else
+    expr="geq=r='$r0+$((r1 - r0))*Y/$((h - 1))':g='$g0+$((g1 - g0))*Y/$((h - 1))':b='$b0+$((b1 - b0))*Y/$((h - 1))'"
+  fi
+  echo "== generating $name (gradient, $size @ $rate, ${dur}s) =="
+  ffmpeg -v error -y \
+    -f lavfi -i "color=c=black:s=$size:d=$dur:r=$rate" \
+    -f lavfi -i "sine=frequency=$freq:duration=$dur" \
+    -vf "$expr" -c:v libx264 -preset fast -crf 20 -pix_fmt yuv420p \
+    -c:a aac -b:a 96k "$name"
+}
+
 # Does a command's combined output contain PATTERN? Captured first, because
 # `cmd | grep -q` under `set -o pipefail` can kill the producer with SIGPIPE
 # (grep exits on the first match) and report failure on a match.
@@ -77,6 +98,97 @@ if output_has audio ffprobe -v error -select_streams a -show_entries stream=code
   echo "  ✓ multi-track export has an audio stream"
 else
   echo "  ✗ multi-track export has no audio"; exit 1
+fi
+
+echo "== showcase: transition · crop · scale overlay · eq · speed =="
+grad sky.mp4 640x360 30 4 11 29 58 255 177 106 x 440
+grad sea.mp4 1280x720 24 4 4 37 58 158 231 255 y 660
+grad sun.mp4 320x240 30 2 254 227 166 254 136 61 y 880
+
+rm -f showcase.json showcase.history.json
+$N --project showcase.json init --force >/dev/null
+$N --project showcase.json import sky.mp4 sea.mp4 sun.mp4 >/dev/null
+$N --project showcase.json add sky.mp4 --in 0 --out 2 >/dev/null
+$N --project showcase.json add sea.mp4 --at 2 --in 0 --out 2 >/dev/null
+$N --project showcase.json add sun.mp4 --at 4 --in 0 --out 1 >/dev/null
+# A dissolve at the cut, effects on both neighbours and the last clip, then a
+# speed change that shortens the tail.
+$N --project showcase.json transition --at 2 --frames 30 >/dev/null
+$N --project showcase.json effect crop --clip 1 --left 40 >/dev/null
+$N --project showcase.json effect eq --clip 3 --saturation 0 >/dev/null
+$N --project showcase.json speed 3 2 >/dev/null
+# An upper track with a half-size (black-padded) picture, and an audio bed.
+$N --project showcase.json track add video >/dev/null
+$N --project showcase.json add sun.mp4 --track 2 --at 2.1 --in 0 --out 0.8 >/dev/null
+$N --project showcase.json effect scale --clip 5 --w 50 --h 50 >/dev/null
+$N --project showcase.json track add audio >/dev/null
+$N --project showcase.json add sea.mp4 --track 3 --in 0 --out 2 >/dev/null
+$N --project showcase.json show
+$N --project showcase.json export -o showcase.mp4 >/dev/null
+
+# Sample one pixel. `crop=2:2` keeps the chroma valid on yuv420p.
+px() { ffmpeg -v error -y -ss "$1" -i "$2" -frames:v 1 -vf "crop=2:2:$3:$4" -f rawvideo -pix_fmt rgb24 - | xxd -p -l 3; }
+chan() { echo $((16#${1:$2:2})); }
+near() { # near A B TOL — every RGB channel within TOL
+  local a=$1 b=$2 tol=$3 i x y d
+  for i in 0 2 4; do
+    x=$(chan "$a" $i); y=$(chan "$b" $i)
+    d=$((x > y ? x - y : y - x))
+    [ "$d" -le "$tol" ] || return 1
+  done
+}
+dark() { # every channel <= 24
+  local i x
+  for i in 0 2 4; do
+    x=$(chan "$1" $i)
+    [ "$x" -le 24 ] || return 1
+  done
+}
+greyish() { # max channel - min channel <= 16
+  local r g b max min v
+  r=$(chan "$1" 0); g=$(chan "$1" 2); b=$(chan "$1" 4)
+  max=$r; min=$r
+  for v in $g $b; do
+    [ "$v" -gt "$max" ] && max=$v
+    [ "$v" -lt "$min" ] && min=$v
+  done
+  [ $((max - min)) -le 16 ]
+}
+warm() { # the sun is much redder than blue
+  local r b
+  r=$(chan "$1" 0); b=$(chan "$1" 4)
+  [ "$r" -ge 180 ] && [ $((r - b)) -ge 60 ]
+}
+
+crop_out=$(px 0.5 showcase.mp4 0 180)
+crop_raw=$(px 0.5 sky.mp4 256 180)
+if near "$crop_out" "$crop_raw" 24; then
+  echo "  ✓ crop left 40 keeps the sky at its 40% mark (${crop_out})"
+else
+  echo "  ✗ crop not applied (export ${crop_out}, source 40% ${crop_raw})"; exit 1
+fi
+mid=$(px 2.5 showcase.mp4 318 178)
+corner=$(px 2.5 showcase.mp4 2 2)
+if warm "$mid" && dark "$corner"; then
+  echo "  ✓ half-size overlay: picture ${mid}, black pad ${corner}"
+else
+  echo "  ✗ overlay/scale wrong (centre ${mid}, corner ${corner})"; exit 1
+fi
+grey_px=$(px 3.2 showcase.mp4 318 178)
+if greyish "$grey_px"; then
+  echo "  ✓ eq saturation 0 is grey (${grey_px})"
+else
+  echo "  ✗ eq not applied (${grey_px})"; exit 1
+fi
+if $N --project showcase.json show | head -1 | grep -q '3.5 s'; then
+  echo "  ✓ transition shortening + 2× speed: 3.5 s timeline"
+else
+  echo "  ✗ unexpected showcase length:"; $N --project showcase.json show | head -1; exit 1
+fi
+if output_has audio ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 showcase.mp4; then
+  echo "  ✓ showcase export has an audio stream"
+else
+  echo "  ✗ showcase export has no audio"; exit 1
 fi
 
 echo "== EDL (CMX3600) import =="
