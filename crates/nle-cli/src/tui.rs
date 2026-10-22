@@ -2307,7 +2307,9 @@ fn fx_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 /// Add a cross-dissolve at the playhead (`X`, or `xx` from Normal — the first
 /// `x` opens the panel and the second lands here). A count is the length in
 /// frames; without one it is a second.
-fn add_transition(app: &mut App, player: &dyn Mpv, frames: Option<i64>) {
+/// Add a cross-dissolve at the playhead (`X`, or `xx` from Normal — the first
+/// `x` opens the panel and the second lands here). Returns whether it landed.
+fn add_transition(app: &mut App, player: &dyn Mpv, frames: Option<i64>) -> bool {
     let len = match frames {
         Some(n) => GapLen::Frames(n),
         None => GapLen::Seconds(1.0),
@@ -2321,7 +2323,7 @@ fn add_transition(app: &mut App, player: &dyn Mpv, frames: Option<i64>) {
             kind: TransitionKind::Dissolve,
             len,
         },
-    );
+    )
 }
 
 /// Effects panel keys: list motion, drop/clear, add (structured form), undo.
@@ -2382,9 +2384,13 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('s') => open_effect_form(app, "scale"),
         KeyCode::Char('e') => open_effect_form(app, "eq"),
         KeyCode::Char('l') => open_effect_form(app, "lut"),
-        // `xx`: the first `x` opened the panel; keep the old transition
-        // gesture working from here.
-        KeyCode::Char('x') => add_transition(app, player, None),
+        // `xx`: the first `x` opened the panel; the second applies the
+        // transition and exits the panel (a failure keeps it open to retry).
+        KeyCode::Char('x') => {
+            if add_transition(app, player, None) {
+                app.mode = Mode::Normal;
+            }
+        }
         KeyCode::Char('u') => {
             do_undo(app, player);
             clamp_fx_sel(app);
@@ -2620,7 +2626,9 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('x') => open_fx(app),
         // `X` — cross-dissolve at the boundary; a count is the duration in
         // frames (default 1 s). `xx` does the same from inside the panel.
-        KeyCode::Char('X') => add_transition(app, player, had_count.then_some(mult as i64)),
+        KeyCode::Char('X') => {
+            add_transition(app, player, had_count.then_some(mult as i64));
+        }
         // `t`/`T` cycle the active track; `<N>t` jumps to track N (1-based).
         KeyCode::Char('t') => {
             let n = app.project.timeline.tracks.len();
@@ -8862,6 +8870,44 @@ mod tests {
             Seconds::from_integer(3),
             "the blend ends on the cut"
         );
+    }
+
+    // `xx` adds the transition and leaves the effects panel; a refused add
+    // keeps it open so it can be retried.
+    #[test]
+    fn xx_adds_a_transition_and_exits_effects_mode() {
+        let mut app = App::new(asset_project(), temp_project_path("xx-exit"));
+        app.loaded = true;
+        app.playhead = 3.0; // clip|gap cut
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('x'));
+        assert!(is_fx(&app), "the first x opens the panel");
+        handle_key(&mut app, &fake, key('x'));
+        assert!(
+            matches!(app.mode, Mode::Normal),
+            "the second x exits the panel: {:?}",
+            app.mode
+        );
+        assert!(app.message.starts_with("transition"), "{}", app.message);
+        assert!(
+            app.project
+                .timeline
+                .video_track()
+                .unwrap()
+                .segments
+                .iter()
+                .any(|s| matches!(s, TimelineSegment::Transition(_))),
+            "the transition landed"
+        );
+        assert_eq!(app.playhead, 2.5, "the new blend's midpoint");
+
+        // Not on a cut: the add fails, so the panel stays open.
+        let mut app = App::new(asset_project(), temp_project_path("xx-fail"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('x'));
+        assert!(is_fx(&app), "a refused transition keeps the panel open");
     }
 
     // A pending `d` is cancelled by any non-starter key, so `d`, `:`, Esc, `d`

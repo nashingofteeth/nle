@@ -66,7 +66,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              close; `*` marks a clip with effects in the row and `nle show`
 #              lists them in order ·
 #              X cross-dissolve at the boundary (count = frames); `xx` also
-#              works — the first x opens the panel, the second applies it ·
+#              works — the first x opens the panel, the second applies it and
+#              closes ·
 #              :transition [dissolve|fade] [--dur T|--frames N] ·
 #              :effect [--clip N] crop|scale|eq|lut … · :effect rm [--index N] ·
 #              :effect clear · rendered at export;
