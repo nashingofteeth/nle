@@ -5291,8 +5291,8 @@ mod tests {
             (
                 "lll",
                 "X",
-                3.0,
-                "a transition keeps the cut it was added to",
+                2.5,
+                "a transition lands in the middle of the blend",
             ),
             ("lll", "dd", 3.0, "deleting the gap lands on the seam"),
             ("ll", "u", 2.0, "undo restores the pre-edit position"),
@@ -8841,16 +8841,16 @@ mod tests {
         );
     }
 
-    // `x` keeps the playhead on the cut it was added to (the blend's end,
-    // where the follower starts), not on the blend's first frame.
+    // `X` lands in the middle of the new blend — the cut the transition was
+    // added to — not on either edge.
     #[test]
-    fn x_keeps_the_playhead_on_the_cut() {
+    fn x_lands_on_the_transition_midpoint() {
         let mut app = App::new(asset_project(), temp_project_path("x-cut"));
         app.loaded = true;
         app.playhead = 3.0; // asset_project's clip|gap cut
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('X'));
-        assert_eq!(app.playhead, 3.0, "the cut stays put");
+        assert_eq!(app.playhead, 2.5, "the middle of the 1 s blend");
         let track = app.project.timeline.video_track().unwrap();
         let blend = track
             .segments
@@ -8935,10 +8935,10 @@ mod tests {
         app.loaded = true;
         app.playhead = 3.0;
         let fake = FakeMpv::new();
-        handle_key(&mut app, &fake, key('X')); // blend [2, 3)
-        // `X` keeps the cut (3.0); step onto the blend to exercise entry.
-        handle_key(&mut app, &fake, key('h'));
-        assert_eq!(app.playhead, 2.0, "on the blend");
+        handle_key(&mut app, &fake, key('X')); // blend [2, 3), playhead 2.5
+        // This test is about entering at the blend's edge; place it there.
+        app.playhead = 2.0;
+        assert_eq!(app.playhead, 2.0, "on the blend's start");
         handle_key(&mut app, &fake, key('e'));
         assert!(
             matches!(&app.mode, Mode::Extend(st) if st.edge_pos == 3.0),
@@ -8957,10 +8957,10 @@ mod tests {
         app.playhead = 3.0;
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('X'));
-        // `X` keeps the cut (3.0); step onto the blend to exercise the
-        // transition anchor.
-        handle_key(&mut app, &fake, key('h'));
-        assert_eq!(app.playhead, 2.0, "on the blend");
+        // The playhead lands mid-blend; this test wants the transition anchor,
+        // which needs the blend itself under the playhead.
+        app.playhead = 2.0;
+        assert_eq!(app.playhead, 2.0, "on the blend's start");
         handle_key(&mut app, &fake, key('y'));
         handle_key(&mut app, &fake, key('y'));
         assert_eq!(app.playhead, 2.0, "the yank left the playhead put");
