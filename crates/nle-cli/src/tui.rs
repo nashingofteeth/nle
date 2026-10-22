@@ -462,8 +462,8 @@ pub struct App {
     /// Remembered pool row so reopening the panel returns there. A sticky UI
     /// preference, not panel state (whether the panel is open is `Mode::Pool`).
     last_pool_sel: usize,
-    /// The scale form's aspect lock is sticky across forms and edits: turning
-    /// it on once keeps later scale forms locked until it is turned off.
+    /// The scale form's aspect lock is sticky across forms and edits and on by
+    /// default; turning it off keeps later scale forms unlocked.
     fx_scale_lock: bool,
     /// Which track edits and navigation act on. Clamped via `active()`.
     pub active_track: usize,
@@ -511,7 +511,7 @@ impl App {
             mpv_error: None,
             exit_message: None,
             last_pool_sel: 0,
-            fx_scale_lock: false,
+            fx_scale_lock: true,
             active_track: 0,
             job: None,
             preview: None,
@@ -2184,7 +2184,9 @@ fn form_for(kind: &'static str) -> FxForm {
         fields,
         focus: 0,
         editing: None,
-        lock: false,
+        // Scale is aspect-locked by default; the App's sticky preference
+        // overrides this when the form is opened.
+        lock: kind == "scale",
         aspect: 1.0,
     }
 }
@@ -9113,20 +9115,21 @@ mod tests {
     fn scale_form_lock_keeps_the_aspect() {
         let fake = FakeMpv::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         let mut app = App::new(asset_project(), temp_project_path("fx-lock"));
         app.loaded = true;
         app.playhead = 1.0;
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('s'));
-        handle_key(&mut app, &fake, key('a')); // jump to the toggle
-        handle_key(&mut app, &fake, space);
-        handle_key(&mut app, &fake, key('w')); // back to width
+        assert!(
+            fx_state(&app).unwrap().form.as_ref().unwrap().lock,
+            "scale starts locked"
+        );
+        handle_key(&mut app, &fake, key('w'));
         for c in "50".chars() {
             handle_key(&mut app, &fake, key(c));
         }
         let form = fx_state(&app).unwrap().form.as_ref().unwrap();
-        assert!(form.lock, "space turned the lock on");
+        assert!(form.lock);
         assert_eq!(form.fields[1].value, "50", "height mirrors width");
         handle_key(&mut app, &fake, enter);
         assert_eq!(
@@ -9152,6 +9155,12 @@ mod tests {
         assert_eq!(focus(&app), 1);
         handle_key(&mut app, &fake, tab);
         assert_eq!(focus(&app), 2, "tab reaches the lock");
+        assert!(
+            fx_state(&app).unwrap().form.as_ref().unwrap().lock,
+            "the lock starts on"
+        );
+        handle_key(&mut app, &fake, space);
+        assert!(!fx_state(&app).unwrap().form.as_ref().unwrap().lock);
         handle_key(&mut app, &fake, space);
         assert!(fx_state(&app).unwrap().form.as_ref().unwrap().lock);
     }
@@ -9168,11 +9177,10 @@ mod tests {
         app.loaded = true;
         app.playhead = 1.0;
 
-        // Apply scale 50×50 with the lock on.
+        // Apply scale 50×50 with the default (on) lock.
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('s'));
-        handle_key(&mut app, &fake, key('a'));
-        handle_key(&mut app, &fake, space);
+        assert!(fx_state(&app).unwrap().form.as_ref().unwrap().lock);
         handle_key(&mut app, &fake, key('w'));
         for c in "50".chars() {
             handle_key(&mut app, &fake, key(c));
@@ -9201,15 +9209,16 @@ mod tests {
     fn scale_edit_lock_uses_the_applied_ratio() {
         let fake = FakeMpv::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         let mut app = App::new(asset_project(), temp_project_path("fx-lock-edit"));
         app.loaded = true;
         app.playhead = 1.0;
         set_effects(&mut app, 1, vec![Effect::Scale { w: 50.0, h: 25.0 }]);
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, enter); // edit the scale
-        handle_key(&mut app, &fake, key('a'));
-        handle_key(&mut app, &fake, space);
+        assert!(
+            fx_state(&app).unwrap().form.as_ref().unwrap().lock,
+            "the edit form starts locked"
+        );
         handle_key(&mut app, &fake, key('w'));
         for c in "40".chars() {
             handle_key(&mut app, &fake, key(c));
@@ -9229,14 +9238,19 @@ mod tests {
     fn scale_form_without_lock_keeps_axes_independent() {
         let fake = FakeMpv::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         let mut app = App::new(asset_project(), temp_project_path("fx-unlock"));
         app.loaded = true;
         app.playhead = 1.0;
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('s'));
+        handle_key(&mut app, &fake, key('a'));
+        handle_key(&mut app, &fake, space); // unlock the default
+        handle_key(&mut app, &fake, key('w'));
         for c in "50".chars() {
             handle_key(&mut app, &fake, key(c));
         }
+        assert!(!fx_state(&app).unwrap().form.as_ref().unwrap().lock);
         handle_key(&mut app, &fake, enter);
         assert_eq!(
             clip_by_id(&app.project, 1).effects.last(),
@@ -9537,6 +9551,7 @@ mod tests {
             }
             if kind == "scale" {
                 assert!(text.contains("aspect lock"), "{kind}: no lock row\n{text}");
+                assert!(text.contains("[x]"), "{kind}: starts unlocked\n{text}");
                 assert!(
                     text.contains("space toggles"),
                     "{kind}: no lock hint\n{text}"
