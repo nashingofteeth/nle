@@ -462,6 +462,9 @@ pub struct App {
     /// Remembered pool row so reopening the panel returns there. A sticky UI
     /// preference, not panel state (whether the panel is open is `Mode::Pool`).
     last_pool_sel: usize,
+    /// The scale form's aspect lock is sticky across forms and edits: turning
+    /// it on once keeps later scale forms locked until it is turned off.
+    fx_scale_lock: bool,
     /// Which track edits and navigation act on. Clamped via `active()`.
     pub active_track: usize,
     /// The background render/import, if one is running.
@@ -508,6 +511,7 @@ impl App {
             mpv_error: None,
             exit_message: None,
             last_pool_sel: 0,
+            fx_scale_lock: false,
             active_track: 0,
             job: None,
             preview: None,
@@ -2242,7 +2246,11 @@ fn open_effect_form(app: &mut App, kind: &'static str) {
         edit_effect_at(app, clip, index);
         return;
     }
-    set_fx_form(app, Some(form_for(kind)));
+    let mut form = form_for(kind);
+    if kind == "scale" {
+        form.lock = app.fx_scale_lock;
+    }
+    set_fx_form(app, Some(form));
     app.set_message(&format!(
         "new {kind} — letters jump, tab moves, enter applies"
     ));
@@ -2267,7 +2275,10 @@ fn edit_effect_at(app: &mut App, clip: u32, index: usize) {
         return;
     };
     let kind = effect.kind();
-    let form = form_for_effect(&effect, index);
+    let mut form = form_for_effect(&effect, index);
+    if kind == "scale" {
+        form.lock = app.fx_scale_lock;
+    }
     set_fx_form(app, Some(form));
     app.set_message(&format!(
         "edit {kind} — blank keeps the old value, enter applies"
@@ -2312,10 +2323,13 @@ fn fx_focus(app: &mut App, index: usize) {
 
 /// Flip the scale form's aspect lock (its toggle field is focused).
 fn fx_toggle_lock(app: &mut App) {
-    let Some(st) = fx_state_mut(app) else { return };
-    if let Some(form) = st.form.as_mut() {
+    let lock = {
+        let Some(st) = fx_state_mut(app) else { return };
+        let Some(form) = st.form.as_mut() else { return };
         form.lock = !form.lock;
-    }
+        form.lock
+    };
+    app.fx_scale_lock = lock;
 }
 
 /// With the scale form's lock on, mirror the field being typed into the other
@@ -9087,6 +9101,46 @@ mod tests {
         assert_eq!(focus(&app), 2, "tab reaches the lock");
         handle_key(&mut app, &fake, space);
         assert!(fx_state(&app).unwrap().form.as_ref().unwrap().lock);
+    }
+
+    // The lock is sticky: reopening the applied scale keeps it on (and
+    // turning it off sticks too).
+    #[test]
+    fn the_scale_lock_persists_across_forms() {
+        let fake = FakeMpv::new();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-lock-sticky"));
+        app.loaded = true;
+        app.playhead = 1.0;
+
+        // Apply scale 50×50 with the lock on.
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('s'));
+        handle_key(&mut app, &fake, key('a'));
+        handle_key(&mut app, &fake, space);
+        handle_key(&mut app, &fake, key('w'));
+        for c in "50".chars() {
+            handle_key(&mut app, &fake, key(c));
+        }
+        handle_key(&mut app, &fake, enter);
+        assert!(app.fx_scale_lock);
+
+        // Reopening the applied effect keeps it locked.
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, enter);
+        let form = fx_state(&app).unwrap().form.as_ref().unwrap();
+        assert!(form.lock, "the edit form reopens locked");
+        assert_eq!(form.editing, Some(0));
+
+        // Turning it off sticks for the next edit too.
+        handle_key(&mut app, &fake, key('a'));
+        handle_key(&mut app, &fake, space);
+        assert!(!app.fx_scale_lock);
+        handle_key(&mut app, &fake, esc);
+        handle_key(&mut app, &fake, enter);
+        assert!(!fx_state(&app).unwrap().form.as_ref().unwrap().lock);
     }
 
     // Editing a 2:1 scale with the lock keeps that ratio, not 1:1.

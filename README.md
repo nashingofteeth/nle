@@ -66,7 +66,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              editing instead of stacking (one effect per kind) · the form's
 #              fields: a letter jumps to its field, tab/↑↓ move, enter applies
 #              and closes, ctrl-u clears, esc cancels; in scale, tab to the
-#              "aspect lock" row (or press `a`) and space toggles it · u undo ·
+#              "aspect lock" row (or press `a`) and space toggles it — the
+#              setting is remembered for later scale forms · u undo ·
 #              q/esc close; `*`
 #              marks a clip with effects in the row and `nle show` lists them
 #              in order ·
