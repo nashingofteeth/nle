@@ -282,24 +282,11 @@ pub fn run_action(
                 GapLen::Frames(n) => frames_to_seconds(*n, fps),
                 GapLen::Seconds(s) => frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps),
             };
-            // `add_transition` ids the blend with the next segment id; keep
-            // it so the playhead can land on the blend itself below.
-            let blend_id = project.next_clip_id();
+            // No playhead override: the caller's anchor keeps the cut the
+            // transition was added to (the blend's end, where the follower
+            // starts). `x` used to jump back to the blend's first frame.
             let batch = edit::add_transition(project, *track, *at, *kind, dur)?;
-            let mut out = apply(project, history, batch, from)?;
-            // Land the playhead on the blend's first frame. The caller's
-            // anchor would otherwise keep the seam timecode, which is now the
-            // blend's *end* — the follower's start — so `dd` would delete the
-            // follower instead of the blend `x` just made.
-            if let Some(tr) = project.timeline.track(*track)
-                && let Some(i) = tr
-                    .segments
-                    .iter()
-                    .position(|s| matches!(s, Segment::Transition(t) if t.id == blend_id))
-            {
-                out.playhead = Some(frame_of(project.fps.as_ref(), secs_f64(&tr.start_of(i))));
-            }
-            Ok(out)
+            apply(project, history, batch, from)
         }
         Action::AddEffect {
             track,
@@ -1828,11 +1815,11 @@ mod tests {
         }
     }
 
-    // `x` lands the playhead on the blend it made — its first frame, not the
-    // seam timecode, which is now the blend's *end* (the follower's start) —
-    // so `dd` right after removes the blend instead of the follower.
+    // Adding a transition keeps the playhead on the cut it was added to — the
+    // blend's end, where the follower starts — instead of jumping back to the
+    // blend's first frame. The caller's anchor resolves that seam.
     #[test]
-    fn a_transition_leaves_the_playhead_on_the_blend() {
+    fn a_transition_keeps_the_cut() {
         let mut p = fixture(); // [Gap][Clip #1 1..4][Gap][Clip #2 6..8]
         let mut reg = None;
         let out = run(
@@ -1846,11 +1833,10 @@ mod tests {
             },
         )
         .unwrap();
-        // The clip gives up 1 s, so the blend owns [3, 4): frame 90.
-        assert_eq!(out.playhead, Some(90), "the blend's first frame");
+        assert_eq!(out.playhead, None, "no override: the anchor keeps the seam");
 
-        // Deleting where the playhead landed removes the blend and hands the
-        // trimmed frames back — `x` then `dd` round-trips.
+        // Deleting at the blend's first frame still removes the blend and
+        // hands the trimmed frames back.
         let out = run(
             &mut p,
             &mut reg,

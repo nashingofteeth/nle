@@ -5291,8 +5291,8 @@ mod tests {
             (
                 "lll",
                 "X",
-                2.0,
-                "a transition lands on the blend's first frame",
+                3.0,
+                "a transition keeps the cut it was added to",
             ),
             ("lll", "dd", 3.0, "deleting the gap lands on the seam"),
             ("ll", "u", 2.0, "undo restores the pre-edit position"),
@@ -8841,28 +8841,27 @@ mod tests {
         );
     }
 
-    // `x` then `dd` round-trips: the playhead lands on the blend, so `dd`
-    // removes the blend rather than the gap after it.
+    // `x` keeps the playhead on the cut it was added to (the blend's end,
+    // where the follower starts), not on the blend's first frame.
     #[test]
-    fn x_then_dd_removes_the_blend_it_made() {
-        let mut app = App::new(asset_project(), temp_project_path("x-then-dd"));
+    fn x_keeps_the_playhead_on_the_cut() {
+        let mut app = App::new(asset_project(), temp_project_path("x-cut"));
         app.loaded = true;
         app.playhead = 3.0; // asset_project's clip|gap cut
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('X'));
-        assert_eq!(app.playhead, 2.0, "the blend's first frame");
-        handle_key(&mut app, &fake, key('d'));
-        handle_key(&mut app, &fake, key('d'));
+        assert_eq!(app.playhead, 3.0, "the cut stays put");
         let track = app.project.timeline.video_track().unwrap();
-        assert!(
-            !track
-                .segments
-                .iter()
-                .any(|s| matches!(s, TimelineSegment::Transition(_))),
-            "the blend is gone: {:?}",
-            track.segments
+        let blend = track
+            .segments
+            .iter()
+            .position(|s| matches!(s, TimelineSegment::Transition(_)))
+            .expect("a transition was added");
+        assert_eq!(
+            track.start_of(blend) + track.segments[blend].duration(),
+            Seconds::from_integer(3),
+            "the blend ends on the cut"
         );
-        assert_eq!(app.playhead, 3.0, "back on the seam the restore leaves");
     }
 
     // A pending `d` is cancelled by any non-starter key, so `d`, `:`, Esc, `d`
@@ -8937,6 +8936,8 @@ mod tests {
         app.playhead = 3.0;
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('X')); // blend [2, 3)
+        // `X` keeps the cut (3.0); step onto the blend to exercise entry.
+        handle_key(&mut app, &fake, key('h'));
         assert_eq!(app.playhead, 2.0, "on the blend");
         handle_key(&mut app, &fake, key('e'));
         assert!(
@@ -8956,6 +8957,9 @@ mod tests {
         app.playhead = 3.0;
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('X'));
+        // `X` keeps the cut (3.0); step onto the blend to exercise the
+        // transition anchor.
+        handle_key(&mut app, &fake, key('h'));
         assert_eq!(app.playhead, 2.0, "on the blend");
         handle_key(&mut app, &fake, key('y'));
         handle_key(&mut app, &fake, key('y'));
