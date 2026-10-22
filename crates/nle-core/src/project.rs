@@ -20,8 +20,9 @@ use crate::timeline::{Segment, Timeline, TimelineError, TrackKind};
 /// never silently misread. v3 added the per-track `muted` flag;
 /// v4 added the per-clip `speed` rate; v5 added the stored playhead;
 /// v7 stores `crop` as percentages (scale/x/y) instead of pixel w/h/x/y;
-/// v8 stores `crop` as per-edge percentage insets and `scale` as percentages.
-pub const PROJECT_VERSION: u32 = 8;
+/// v8 stores `crop` as per-edge percentage insets and `scale` as percentages;
+/// v9 stores each transition side's effects (they render the neighbour).
+pub const PROJECT_VERSION: u32 = 9;
 
 #[derive(Debug, Error)]
 pub enum ProjectError {
@@ -608,6 +609,7 @@ mod tests {
                     asset: 999,
                     src_in: Seconds::from_integer(0),
                     src_out: Seconds::from_integer(1),
+                    effects: Vec::new(),
                 },
                 b: TransitionSource::Black,
             }));
@@ -639,6 +641,7 @@ mod tests {
                     asset: spare,
                     src_in: Seconds::from_integer(0),
                     src_out: Seconds::from_integer(1),
+                    effects: Vec::new(),
                 },
                 b: TransitionSource::Black,
             }));

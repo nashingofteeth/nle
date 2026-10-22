@@ -254,8 +254,20 @@ fn complete(path: &std::path::Path) -> bool {
 /// carries only the LUT's *path*, so editing a `.cube` in place would otherwise
 /// serve the old grade from the cache while export bakes the new one.
 fn hash_lut_files(seg: &Segment, hasher: &mut DefaultHasher) {
-    let Segment::Clip(c) = seg else { return };
-    for e in &c.effects {
+    let mut effects: Vec<&Effect> = Vec::new();
+    match seg {
+        Segment::Clip(c) => effects.extend(c.effects.iter()),
+        Segment::Transition(t) => {
+            // A transition renders its neighbours' material, effects included.
+            for side in [&t.a, &t.b] {
+                if let nle_core::timeline::TransitionSource::Clip { effects: fx, .. } = side {
+                    effects.extend(fx.iter());
+                }
+            }
+        }
+        Segment::Gap(_) => return,
+    }
+    for e in effects {
         if let Effect::Lut { path } = e {
             path.hash(hasher);
             if let Ok(m) = std::fs::metadata(path)
@@ -664,11 +676,13 @@ mod tests {
                     asset: a,
                     src_in: secs(0),
                     src_out: secs(1),
+                    effects: Vec::new(),
                 },
                 b: TransitionSource::Clip {
                     asset: a,
                     src_in: secs(0),
                     src_out: secs(1),
+                    effects: Vec::new(),
                 },
             }),
             Segment::Clip(Clip::new(2, a, secs(0), secs(1))),

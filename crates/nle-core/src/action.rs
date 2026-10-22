@@ -1610,14 +1610,23 @@ mod tests {
             panic!("expected an effect")
         };
         assert_eq!(effect, Effect::Scale { w: 100.0, h: 100.0 });
-        assert_eq!(effect.filter((0, 0)), "scale=iw*1:ih*1");
+        assert_eq!(
+            effect.filter((1920, 1080)),
+            "",
+            "100% renders nothing (the caller drops empty filters)"
+        );
 
         let Action::AddEffect { effect, .. } =
             parse("effect scale --clip 1 --w 50 --h 200", &defaults()).unwrap()
         else {
             panic!("expected an effect")
         };
-        assert_eq!(effect.filter((0, 0)), "scale=iw*0.5:ih*2");
+        // 50%×200% of 1920×1080: a 960×2160 picture padded to 1920×2160 and
+        // cropped back to the centre 1080 rows.
+        assert_eq!(
+            effect.filter((1920, 1080)),
+            "scale=960:2160,pad=1920:2160:480:0:black,crop=1920:1080:0:540"
+        );
         assert_eq!(effect.details(), "50% × 200%");
     }
 

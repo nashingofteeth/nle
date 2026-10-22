@@ -85,24 +85,43 @@ enum Piece {
 /// the normalize `scale`). A percentage crop resolves against the asset's own
 /// frame (the chain runs before the normalize); other effects ignore it.
 fn clip_effects(c: &Clip, asset: &Asset, fallback: (u32, u32)) -> Result<String, CompileError> {
-    if c.effects.is_empty() {
+    effect_chain(&c.effects, asset, fallback)
+}
+
+/// The effect filters for a chain, joined and comma-terminated (empty when
+/// nothing renders). The frame is tracked through the chain: a crop changes
+/// it, a scale restores its canvas, so a later effect sizes against the
+/// picture it actually sees.
+fn effect_chain(
+    effects: &[Effect],
+    asset: &Asset,
+    fallback: (u32, u32),
+) -> Result<String, CompileError> {
+    if effects.is_empty() {
         return Ok(String::new());
     }
-    let frame = if c.effects.iter().any(|e| matches!(e, Effect::Crop { .. })) {
+    let needs_frame = effects
+        .iter()
+        .any(|e| matches!(e, Effect::Crop { .. } | Effect::Scale { .. }));
+    let mut frame = if needs_frame {
         asset
             .video_size()
             .ok_or(CompileError::MissingGeometry(asset.id))?
     } else {
         fallback
     };
-    let mut s = c
-        .effects
-        .iter()
-        .map(|e| e.filter(frame))
-        .collect::<Vec<_>>()
-        .join(",");
-    s.push(',');
-    Ok(s)
+    let mut parts: Vec<String> = Vec::new();
+    for e in effects {
+        let filter = e.filter(frame);
+        if !filter.is_empty() {
+            parts.push(filter);
+        }
+        frame = e.frame_after(frame);
+    }
+    if parts.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!("{},", parts.join(",")))
 }
 
 /// The video retime stage. At 1× this is exactly the old
@@ -388,6 +407,7 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
                                 asset: asset_id,
                                 src_in,
                                 src_out,
+                                effects,
                             } => {
                                 let asset = project
                                     .asset(*asset_id)
@@ -401,9 +421,13 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
                                 // The span renders into `dur`, so its rate is
                                 // source-per-timeline = src_dur / dur.
                                 let speed = (*src_out - *src_in) / dur;
+                                // The side is the neighbour's material, so its
+                                // effects apply here too (the monitor proxy and
+                                // the export use this same chain).
+                                let fx = effect_chain(effects, asset, (w, h))?;
                                 graph.push_str(&format!(
                                     "[{input}:v]trim=start={src_start}:duration={src_dur},\
-                                     {setpts},scale={w}:{h},setsar=1,fps={fps_s},\
+                                     {setpts},{fx}scale={w}:{h},setsar=1,fps={fps_s},\
                                      format=yuva420p[{v}];\n",
                                     setpts = video_setpts(&speed)
                                 ));
@@ -1048,11 +1072,13 @@ mod tests {
                     asset: a,
                     src_in: Seconds::from_integer(2),
                     src_out: Seconds::from_integer(3),
+                    effects: Vec::new(),
                 },
                 b: TransitionSource::Clip {
                     asset: a,
                     src_in: Seconds::from_integer(0),
                     src_out: Seconds::from_integer(1),
+                    effects: Vec::new(),
                 },
             }),
             clip(2, 1, 3),
@@ -1082,8 +1108,46 @@ mod tests {
             ];
         }
         let g = compile_export(&p).unwrap().graph;
-        // Effects chain after the retime, before the normalize scale.
-        assert!(g.contains("crop=960:540:480:270,scale=iw*0.5:ih*1,"), "{g}");
-        assert!(g.contains("scale=iw*0.5:ih*1,scale=1920:1080"), "{g}");
+        // Effects chain after the retime, before the normalize scale. The
+        // crop leaves a 960×540 frame, so the 50%/100% scale pads a 480×540
+        // picture back onto it.
+        assert!(
+            g.contains(
+                "crop=960:540:480:270,scale=480:540,pad=960:540:240:0:black,scale=1920:1080"
+            ),
+            "{g}"
+        );
+    }
+
+    // A transition renders its neighbours' material, so their effects apply to
+    // its sides too — the monitor proxy and the export use the same chain.
+    #[test]
+    fn a_transition_side_applies_the_neighbours_effects() {
+        let mut p = project_with_two_clips(); // C1 0..10 · gap · C2
+        let eq = Effect::Eq {
+            brightness: 0.2,
+            contrast: 1.0,
+            saturation: 1.0,
+        };
+        if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            c.effects = vec![eq];
+        }
+        let mut h = nle_core::edit::History::default();
+        let batch = nle_core::edit::add_transition(
+            &p,
+            0,
+            10.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let g = compile_export(&p).unwrap().graph;
+        assert_eq!(
+            g.matches("eq=brightness=0.2:contrast=1:saturation=1")
+                .count(),
+            2,
+            "once on the clip, once on the transition side:\n{g}"
+        );
     }
 }

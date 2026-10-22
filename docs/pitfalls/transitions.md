@@ -23,6 +23,14 @@ the export's `xfade` chain.
   (`trim_beside_blend_on`).
 - **Extend moves the side with the edge** (`move_blend_edge`); a *ripple*
   extend shifts the side (`shift_blend_side`), or the material plays twice.
+- **A side carries its neighbour's effects.** A transition renders that
+  neighbour's material, so `TransitionSource::Clip` owns a copy of its effect
+  list: `add_transition` copies it, the three effect edits
+  (`add`/`remove`/`clear`) keep it in sync through the same `EditOp` batch
+  (`sync_effect_sides`, so undo restores both), and the export's `xfade`
+  chain applies it. Without this the monitor and export jumped back to the
+  ungraded picture inside the blend. The proxy hash includes the side's LUTs
+  too.
   Extend mode hops to the blend's far end (`blend_far_end`).
 - **Speed.** A speed change retimes the sides the retimed clip owns
   (`set_speed_on`): the blend's `dur` and the cut (`a.src_out` / `b.src_in`)

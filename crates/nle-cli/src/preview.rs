@@ -802,6 +802,7 @@ mod tests {
                 asset: low,
                 src_in: Seconds::from_integer(0),
                 src_out: Seconds::from_integer(1),
+                effects: Vec::new(),
             },
             b: TransitionSource::Black,
         })];

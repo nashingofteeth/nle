@@ -32,8 +32,9 @@ pub const MAX_HISTORY: usize = 100;
 /// v9 persists the redo stack too, so `nle redo` works across processes.
 /// v10 adds `Change::Tracks` (track add/mute/rm are undoable).
 /// v13 follows the project's percentage `crop` (segments carry effects);
-/// v14 follows the per-edge crop insets and percentage `scale`.
-pub const HISTORY_VERSION: u32 = 14;
+/// v14 follows the per-edge crop insets and percentage `scale`;
+/// v15 follows the effects carried on a transition side.
+pub const HISTORY_VERSION: u32 = 15;
 
 #[derive(Debug, Error)]
 pub enum EditError {
@@ -1016,6 +1017,7 @@ fn adjacent_transitions(segs: &[Segment], si: usize, c: &Clip) -> Vec<AdjacentTr
             asset,
             src_in,
             src_out,
+            ..
         } = &t.b
         && *asset == c.asset
         && *src_out == c.asset_in
@@ -1033,6 +1035,7 @@ fn adjacent_transitions(segs: &[Segment], si: usize, c: &Clip) -> Vec<AdjacentTr
             asset,
             src_in,
             src_out,
+            ..
         } = &t.a
         && *asset == c.asset
         && *src_in == c.asset_out
@@ -1046,6 +1049,63 @@ fn adjacent_transitions(segs: &[Segment], si: usize, c: &Clip) -> Vec<AdjacentTr
         });
     }
     out
+}
+
+/// Keep the transition sides around `c` carrying its effect list: a transition
+/// renders its neighbours' material, effects included, and owns the copy like
+/// it owns the trimmed span. Only a side that still lines up with the clip is
+/// touched.
+fn sync_effect_sides(project: &Project, track: usize, si: usize, c: &Clip, ops: &mut Vec<EditOp>) {
+    let Some(tr) = project.timeline.track(track) else {
+        return;
+    };
+    // The transition after this clip uses its tail as `a`.
+    if let Some(Segment::Transition(t)) = tr.segments.get(si + 1)
+        && let TransitionSource::Clip {
+            asset,
+            src_in,
+            effects,
+            ..
+        } = &t.a
+        && *asset == c.asset
+        && *src_in == c.asset_out
+        && *effects != c.effects
+    {
+        let mut after = t.clone();
+        if let TransitionSource::Clip { effects, .. } = &mut after.a {
+            *effects = c.effects.clone();
+        }
+        ops.push(EditOp::Replace {
+            track,
+            index: si + 1,
+            before: Segment::Transition(t.clone()),
+            after: Segment::Transition(after),
+        });
+    }
+    // The transition before this clip uses its head as `b`.
+    if si > 0
+        && let Some(Segment::Transition(t)) = tr.segments.get(si - 1)
+        && let TransitionSource::Clip {
+            asset,
+            src_out,
+            effects,
+            ..
+        } = &t.b
+        && *asset == c.asset
+        && *src_out == c.asset_in
+        && *effects != c.effects
+    {
+        let mut after = t.clone();
+        if let TransitionSource::Clip { effects, .. } = &mut after.b {
+            *effects = c.effects.clone();
+        }
+        ops.push(EditOp::Replace {
+            track,
+            index: si - 1,
+            before: Segment::Transition(t.clone()),
+            after: Segment::Transition(after),
+        });
+    }
 }
 
 pub fn set_speed_on(
@@ -1251,6 +1311,7 @@ pub fn add_transition(
                     asset: c.asset,
                     src_in: new_out,
                     src_out: c.asset_out,
+                    effects: c.effects.clone(),
                 };
                 ops.push(EditOp::Replace {
                     track,
@@ -1280,6 +1341,7 @@ pub fn add_transition(
                     asset: c.asset,
                     src_in: c.asset_in,
                     src_out: new_in,
+                    effects: c.effects.clone(),
                 };
                 ops.push(EditOp::Replace {
                     track,
@@ -1347,13 +1409,15 @@ pub fn add_effect_on(
     };
     let mut c = c.clone();
     c.effects.push(effect);
+    let mut ops = vec![EditOp::Replace {
+        track,
+        index: si,
+        before,
+        after: Segment::Clip(c.clone()),
+    }];
+    sync_effect_sides(project, track, si, &c, &mut ops);
     Ok(Batch {
-        ops: vec![EditOp::Replace {
-            track,
-            index: si,
-            before,
-            after: Segment::Clip(c),
-        }],
+        ops,
         desc: format!("effect on clip #{clip_id}"),
     })
 }
@@ -1388,13 +1452,15 @@ pub fn remove_effect_on(
     };
     let mut after = c.clone();
     let removed = after.effects.remove(at);
+    let mut ops = vec![EditOp::Replace {
+        track,
+        index: si,
+        before,
+        after: Segment::Clip(after.clone()),
+    }];
+    sync_effect_sides(project, track, si, &after, &mut ops);
     Ok(Batch {
-        ops: vec![EditOp::Replace {
-            track,
-            index: si,
-            before,
-            after: Segment::Clip(after),
-        }],
+        ops,
         desc: format!("drop {} from clip #{clip_id}", removed.kind()),
     })
 }
@@ -1418,13 +1484,15 @@ pub fn clear_effects_on(project: &Project, track: usize, clip_id: u32) -> Result
     let n = c.effects.len();
     let mut after = c.clone();
     after.effects.clear();
+    let mut ops = vec![EditOp::Replace {
+        track,
+        index: si,
+        before,
+        after: Segment::Clip(after.clone()),
+    }];
+    sync_effect_sides(project, track, si, &after, &mut ops);
     Ok(Batch {
-        ops: vec![EditOp::Replace {
-            track,
-            index: si,
-            before,
-            after: Segment::Clip(after),
-        }],
+        ops,
         desc: format!("clear {n} effect(s) from clip #{clip_id}"),
     })
 }
@@ -1520,6 +1588,7 @@ pub fn clamp_to_media(
                     asset,
                     src_in,
                     src_out,
+                    ..
                 } = side
                 else {
                     continue;
@@ -1855,11 +1924,13 @@ fn trim_blend_on(
                 asset: a_asset,
                 src_in: *a_in,
                 src_out: *a_in + source_span(&prev, dur),
+                effects: prev.effects.clone(),
             },
             TransitionSource::Clip {
                 asset: b_asset,
                 src_in: next_in,
                 src_out: next.asset_in,
+                effects: next.effects.clone(),
             },
             EditOp::Replace {
                 track: ti,
@@ -1880,11 +1951,13 @@ fn trim_blend_on(
                 asset: a_asset,
                 src_in: prev_out,
                 src_out: *a_out,
+                effects: prev.effects.clone(),
             },
             TransitionSource::Clip {
                 asset: b_asset,
                 src_in: *b_out - source_span(&next, dur),
                 src_out: *b_out,
+                effects: next.effects.clone(),
             },
             EditOp::Replace {
                 track: ti,
@@ -1988,6 +2061,7 @@ fn trim_beside_blend_on(
             asset,
             src_in,
             src_out,
+            effects,
         } = side
         else {
             return Ok(None);
@@ -1998,12 +2072,14 @@ fn trim_beside_blend_on(
                 asset: *asset,
                 src_in: after.asset_out,
                 src_out: after.asset_out + blend.dur * rate,
+                effects: effects.clone(),
             }
         } else {
             TransitionSource::Clip {
                 asset: *asset,
                 src_in: after.asset_in - blend.dur * rate,
                 src_out: after.asset_in,
+                effects: effects.clone(),
             }
         };
         if out {
@@ -2702,6 +2778,7 @@ fn delete_transition_on(
             asset,
             src_in,
             src_out,
+            ..
         } = &t.a
         && left.asset == *asset
         && left.asset_out == *src_in
@@ -2726,6 +2803,7 @@ fn delete_transition_on(
             asset,
             src_in,
             src_out,
+            ..
         } = &t.b
         && right.asset == *asset
         && right.asset_in == *src_out
@@ -4014,6 +4092,7 @@ fn move_blend_edge(
                 asset,
                 src_in,
                 src_out,
+                effects,
             },
             Some(rate),
         ) => TransitionSource::Clip {
@@ -4024,6 +4103,7 @@ fn move_blend_edge(
                 src_in
             },
             src_out: if left { src_out } else { src_in + dur * rate },
+            effects,
         },
         (side, _) => side,
     };
@@ -4033,12 +4113,14 @@ fn move_blend_edge(
                 asset,
                 src_in,
                 src_out,
+                effects,
             },
             Some(rate),
         ) => TransitionSource::Clip {
             asset,
             src_in: if left { src_out - dur * rate } else { src_in },
             src_out: if left { src_out } else { src_in + dur * rate },
+            effects,
         },
         (side, _) => side,
     };
@@ -4061,6 +4143,7 @@ fn ensure_blend_fits(project: &Project, blend: &Transition) -> Result<(), EditEr
             asset,
             src_in,
             src_out,
+            ..
         } = side
         else {
             continue;
@@ -4108,18 +4191,20 @@ fn shift_blend_side(tr: &Transition, a_side: bool, edge_source: Seconds) -> Tran
     let rate = |s: &TransitionSource| side_span(s).map(|span| span / tr.dur);
     let mut out = tr.clone();
     if a_side {
-        if let (TransitionSource::Clip { asset, .. }, Some(r)) = (&tr.a, rate(&tr.a)) {
+        if let (TransitionSource::Clip { asset, effects, .. }, Some(r)) = (&tr.a, rate(&tr.a)) {
             out.a = TransitionSource::Clip {
                 asset: *asset,
                 src_in: edge_source,
                 src_out: edge_source + tr.dur * r,
+                effects: effects.clone(),
             };
         }
-    } else if let (TransitionSource::Clip { asset, .. }, Some(r)) = (&tr.b, rate(&tr.b)) {
+    } else if let (TransitionSource::Clip { asset, effects, .. }, Some(r)) = (&tr.b, rate(&tr.b)) {
         out.b = TransitionSource::Clip {
             asset: *asset,
             src_in: edge_source - tr.dur * r,
             src_out: edge_source,
+            effects: effects.clone(),
         };
     }
     out
@@ -7275,6 +7360,7 @@ mod tests {
                 asset: 1,
                 src_in: Seconds::from_integer(0),
                 src_out: a_out,
+                effects: Vec::new(),
             },
             b: TransitionSource::Black,
         })
@@ -7390,6 +7476,7 @@ mod tests {
                         asset: a,
                         src_in: Seconds::from_integer(2),
                         src_out: Seconds::from_integer(3),
+                        effects: Vec::new(),
                     }
                 );
                 assert_eq!(
@@ -7398,6 +7485,7 @@ mod tests {
                         asset: a,
                         src_in: Seconds::from_integer(0),
                         src_out: Seconds::from_integer(1),
+                        effects: Vec::new(),
                     }
                 );
             }
@@ -7405,6 +7493,75 @@ mod tests {
         }
         // clip↔clip shortens the timeline by `d`.
         assert_eq!(p.timeline.end(), Seconds::from_integer(5));
+    }
+
+    // A transition renders its neighbours' material, so each side carries a
+    // copy of that neighbour's effects; effect edits keep the copies in sync,
+    // and undo restores both in one step.
+    #[test]
+    fn a_transition_side_follows_its_neighbours_effects() {
+        let eq = Effect::Eq {
+            brightness: 0.2,
+            contrast: 1.0,
+            saturation: 1.0,
+        };
+        let crop = Effect::Crop {
+            left: 10.0,
+            right: 10.0,
+            top: 0.0,
+            bottom: 0.0,
+        };
+        let mut p = clip_pair(); // C1 0..3, C2 3..6
+        for seg in &mut p.timeline.video_track_mut().unwrap().segments {
+            if let Segment::Clip(c) = seg {
+                c.effects = vec![eq.clone()];
+            }
+        }
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+
+        let sides = |p: &Project| match &p.timeline.video_track().unwrap().segments[1] {
+            Segment::Transition(t) => (t.a.clone(), t.b.clone()),
+            other => panic!("expected the blend, got {other:?}"),
+        };
+        let effects = |side: &TransitionSource| match side {
+            TransitionSource::Clip { effects, .. } => effects.clone(),
+            TransitionSource::Black => panic!("expected a clip side"),
+        };
+        let (a, b) = sides(&p);
+        assert_eq!(effects(&a), vec![eq.clone()], "a copies the preceding clip");
+        assert_eq!(effects(&b), vec![eq.clone()], "b copies the following clip");
+
+        // The following clip's head side follows an edit…
+        let batch = add_effect_on(&p, 0, 2, crop.clone()).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let (_, b) = sides(&p);
+        assert_eq!(effects(&b), vec![eq.clone(), crop.clone()]);
+
+        // …and a clear empties it.
+        let batch = clear_effects_on(&p, 0, 2).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let (_, b) = sides(&p);
+        assert!(effects(&b).is_empty(), "cleared with the clip");
+
+        // The preceding clip's tail side follows too, and undo removes the
+        // effect from the clip *and* the side in one step.
+        let batch = add_effect_on(&p, 0, 1, crop.clone()).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let (a, _) = sides(&p);
+        assert_eq!(effects(&a), vec![eq.clone(), crop]);
+
+        h.undo(&mut p).unwrap();
+        let (a, _) = sides(&p);
+        assert_eq!(effects(&a), vec![eq], "undo restored the side too");
     }
 
     #[test]

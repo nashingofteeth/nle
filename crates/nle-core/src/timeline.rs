@@ -99,8 +99,8 @@ impl Effect {
         }
     }
 
-    /// The ffmpeg filter fragment for this effect, applied to a source frame
-    /// of `frame` pixels (only `crop` needs it).
+    /// The ffmpeg filter fragment for this effect, applied to the frame as it
+    /// stands at this point in the chain (`crop` and `scale` need it).
     pub fn filter(&self, frame: (u32, u32)) -> String {
         match self {
             Effect::Crop {
@@ -112,9 +112,11 @@ impl Effect {
                 let (w, h, x, y) = crop_geometry(*left, *right, *top, *bottom, frame);
                 format!("crop={w}:{h}:{x}:{y}")
             }
-            // Percent of the input frame; the export's later normalize scale
-            // turns the result into the sequence size.
-            Effect::Scale { w, h } => format!("scale=iw*{}:ih*{}", w / 100.0, h / 100.0),
+            // Percent of the *current* frame, then padded/cropped back to it
+            // so the canvas size is unchanged: 50% is a half-size picture on
+            // black, 200% is a centre zoom. Without the pad/crop the export's
+            // normalize scale would immediately undo a uniform scale.
+            Effect::Scale { w, h } => scale_filter(*w, *h, frame),
             Effect::Eq {
                 brightness,
                 contrast,
@@ -123,6 +125,23 @@ impl Effect {
             // The path is quoted: `:`/`,` in it would otherwise split the
             // filtergraph, and a literal `'` is escaped the ffmpeg way.
             Effect::Lut { path } => format!("lut3d=file='{}'", path.replace('\'', r"'\''")),
+        }
+    }
+
+    /// The frame size after this effect: a crop changes it, a scale restores
+    /// its canvas (see [`scale_filter`]), and colour effects leave it alone.
+    pub fn frame_after(&self, frame: (u32, u32)) -> (u32, u32) {
+        match self {
+            Effect::Crop {
+                left,
+                right,
+                top,
+                bottom,
+            } => {
+                let (w, h, _, _) = crop_geometry(*left, *right, *top, *bottom, frame);
+                (w, h)
+            }
+            _ => frame,
         }
     }
 }
@@ -146,6 +165,30 @@ fn crop_geometry(
     let x = l.min(fw.saturating_sub(w));
     let y = t.min(fh.saturating_sub(h));
     (w, h, x, y)
+}
+
+/// Resize to `w`/`h` percent of the current frame, then pad (below 100%) or
+/// crop (above 100%) back to it, centred. Black padding matches the monitor's
+/// topmost-layer fall-through; a scaled clip on an upper export layer covers
+/// what is below it (the same trade-off as the monitor).
+fn scale_filter(w: f64, h: f64, (fw, fh): (u32, u32)) -> String {
+    let size =
+        |base: u32, pct: f64| ((base as f64 * pct / 100.0).round() as u32).clamp(2, u32::MAX / 4);
+    let (sw, sh) = (size(fw, w), size(fh, h));
+    if sw == fw && sh == fh {
+        return String::new(); // 100% is a no-op; the caller drops empty filters
+    }
+    // A canvas big enough for both the scaled picture and the frame: pad the
+    // smaller axis, then crop the larger back to the frame.
+    let (cw, ch) = (sw.max(fw), sh.max(fh));
+    let mut chain = format!("scale={sw}:{sh}");
+    if cw != sw || ch != sh {
+        chain += &format!(",pad={cw}:{ch}:{}:{}:black", (cw - sw) / 2, (ch - sh) / 2);
+    }
+    if cw != fw || ch != fh {
+        chain += &format!(",crop={fw}:{fh}:{}:{}", (cw - fw) / 2, (ch - fh) / 2);
+    }
+    chain
 }
 
 /// One piece of media on a track. Its timeline position is derived from
@@ -225,6 +268,11 @@ pub enum TransitionSource {
         src_in: Seconds,
         #[serde(with = "rational_ser")]
         src_out: Seconds,
+        /// The neighbour's effects, copied when the side was built and kept in
+        /// sync when the neighbour's list changes: the transition renders that
+        /// neighbour's material, effects included.
+        #[serde(default)]
+        effects: Vec<Effect>,
     },
     /// Generated black — toward a gap or the timeline edge.
     Black,
@@ -675,6 +723,7 @@ mod tests {
             asset: 1,
             src_in: Seconds::from_integer(in_),
             src_out: Seconds::from_integer(out),
+            effects: Vec::new(),
         };
         let mut t = Timeline::new();
 
