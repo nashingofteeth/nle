@@ -154,9 +154,11 @@ $N extend --seg 4 --edge in --to 2 --ripple
 $N effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
 #   each edge is a percentage toward the opposite side: 0 = the frame edge,
 #   100 = the other edge; the two sides of an axis must total under 100.
-#   The picture keeps its place; the cut strips are transparent, so the track
-#   below shows through (black when nothing is below).
-$N effect scale --clip 3 --w 50 --h 50 # percent of the source (100 = default)
+#   It insets the picture at that point (after any earlier scale) and leaves
+#   the cut strips transparent: the track below shows through, else black.
+$N effect scale --clip 3 --w 50 --h 50 # percent of the picture at this point
+#   100 = default. Scaling down pads transparently, so the track below shows
+#   through; scaling up is a centre zoom. Effects compose in the order added.
 $N effect eq --clip 3 --brightness -0.2 # contrast/saturation default to 1
 $N effect rm --clip 3                  # drop the last effect (--index N picks)
 $N effect clear --clip 3               # drop them all (one undo step)

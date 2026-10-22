@@ -29,8 +29,15 @@ Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
 - A composite span is widened to contain a transition whole and the slice
   keeps it whole — a partial crossfade isn't expressible in one `edl://`
   entry.
+- The hash includes `RENDER_VERSION` (`proxy.rs`): bump it when the *meaning*
+  of a segment's JSON changes (a filter rewrite), or stale renders are served.
 
 ## Filter-graph gotchas
+
+- `crop`/`scale` are masks: they keep the canvas and pad `black@0` on
+  `yuva420p`, so the export overlay (and the monitor's composite, gated by
+  `Effect::masks`) reveals the track below; the single-track export drops to
+  black. Opaque padding silently breaks "reveal below".
 
 - Export retimes with `setpts=(PTS-STARTPTS)/speed` + `atempo` (chained
   outside [0.5, 2]); the 1× graph stays byte-identical.

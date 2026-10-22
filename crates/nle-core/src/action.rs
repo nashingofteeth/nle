@@ -1555,7 +1555,7 @@ mod tests {
             }
         );
         assert_eq!(
-            effect.filter((0, 0)),
+            Effect::chain(std::slice::from_ref(&effect), (0, 0)),
             "eq=brightness=-0.2:contrast=1:saturation=1",
             "the neutral values reach the graph"
         );
@@ -1583,7 +1583,7 @@ mod tests {
             }
         );
         assert_eq!(
-            effect.filter((1920, 1080)),
+            Effect::chain(std::slice::from_ref(&effect), (1920, 1080)),
             "format=yuva420p,crop=960:540:480:270,\
              pad=1920:1080:480:270:color=black@0"
         );
@@ -1595,7 +1595,7 @@ mod tests {
         else {
             panic!("expected an effect")
         };
-        assert_eq!(effect.filter((1920, 1080)), "");
+        assert_eq!(Effect::chain(&[effect], (1920, 1080)), "");
 
         // Asymmetric insets: 10% of 1920 = 192; 25% of 1080 = 270.
         let Action::AddEffect { effect, .. } =
@@ -1604,14 +1604,14 @@ mod tests {
             panic!("expected an effect")
         };
         assert_eq!(
-            effect.filter((1920, 1080)),
+            Effect::chain(std::slice::from_ref(&effect), (1920, 1080)),
             "format=yuva420p,crop=1728:810:192:270,\
              pad=1920:1080:192:270:color=black@0"
         );
     }
 
-    // Scale is a percentage of the source frame; 100 (the default) is a
-    // no-op, and the export's normalize scale still follows.
+    // Scale is a percentage of the picture at that point; 100 (the default) is
+    // a no-op, and below 100 pads transparently so a lower track shows through.
     #[test]
     fn scale_is_percentages_with_a_100_default() {
         let Action::AddEffect { effect, .. } = parse("effect scale --clip 1", &defaults()).unwrap()
@@ -1620,7 +1620,7 @@ mod tests {
         };
         assert_eq!(effect, Effect::Scale { w: 100.0, h: 100.0 });
         assert_eq!(
-            effect.filter((1920, 1080)),
+            Effect::chain(&[effect], (1920, 1080)),
             "",
             "100% renders nothing (the caller drops empty filters)"
         );
@@ -1630,13 +1630,46 @@ mod tests {
         else {
             panic!("expected an effect")
         };
-        // 50%×200% of 1920×1080: a 960×2160 picture padded to 1920×2160 and
-        // cropped back to the centre 1080 rows.
+        // 50%×200% of 1920×1080: a 960×2160 picture clipped to the centre
+        // 1080 rows, then padded left/right to the canvas.
         assert_eq!(
-            effect.filter((1920, 1080)),
-            "scale=960:2160,pad=1920:2160:480:0:black,crop=1920:1080:0:540"
+            Effect::chain(std::slice::from_ref(&effect), (1920, 1080)),
+            "format=yuva420p,scale=960:2160,crop=960:1080:0:540,\
+             pad=1920:1080:480:0:color=black@0"
         );
         assert_eq!(effect.details(), "50% × 200%");
+
+        let Action::AddEffect { effect, .. } =
+            parse("effect scale --clip 1 --w 50 --h 50", &defaults()).unwrap()
+        else {
+            panic!("expected an effect")
+        };
+        assert_eq!(
+            Effect::chain(std::slice::from_ref(&effect), (1920, 1080)),
+            "format=yuva420p,scale=960:540,pad=1920:1080:480:270:color=black@0"
+        );
+    }
+
+    // Crop after scale insets the *scaled picture*, not the full canvas:
+    // "scale 50, crop 30% left" removes 30% of the small picture.
+    #[test]
+    fn crop_after_scale_resolves_against_the_scaled_picture() {
+        let effects = vec![
+            Effect::Scale { w: 50.0, h: 50.0 },
+            Effect::Crop {
+                left: 30.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+        ];
+        // 320×240 → a 160×120 picture at (80,60); 30% of 160 = 48 px.
+        assert_eq!(
+            Effect::chain(&effects, (320, 240)),
+            "format=yuva420p,scale=160:120,pad=320:240:80:60:color=black@0,\
+             format=yuva420p,crop=112:120:128:60,pad=320:240:128:60:color=black@0"
+        );
+        assert!(Effect::masks(&effects, (320, 240)));
     }
 
     #[test]

@@ -236,7 +236,28 @@ fn a_crop_masks_in_place_and_reveals_what_is_below() {
         "the kept half stays where it was",
     );
 
-    // The same crop on an overlay: the masked half shows the track below.
+    // A scale-down is transparent too: black on its own.
+    s.ok(&["effect", "clear", "--clip", "1"]);
+    s.ok(&["effect", "scale", "--clip", "1", "--w", "50", "--h", "50"]);
+    s.export("small.mp4");
+    s.assert_px_at(
+        "small.mp4",
+        0.5,
+        20,
+        120,
+        BLACK,
+        "a scale-down with nothing below is black",
+    );
+    s.assert_px_at(
+        "small.mp4",
+        0.5,
+        160,
+        120,
+        RED,
+        "the shrunk picture is centred",
+    );
+
+    // The same effects on an overlay: the masked area shows the track below.
     s.ok(&["effect", "clear", "--clip", "1"]);
     s.ok(&["track", "add", "video"]);
     s.ok(&[
@@ -266,6 +287,26 @@ fn a_crop_masks_in_place_and_reveals_what_is_below() {
         120,
         GREEN,
         "the overlay keeps its right half",
+    );
+
+    s.ok(&["effect", "clear", "--clip", "2"]);
+    s.ok(&["effect", "scale", "--clip", "2", "--w", "50", "--h", "50"]);
+    s.export("scaled.mp4");
+    s.assert_px_at(
+        "scaled.mp4",
+        0.5,
+        20,
+        120,
+        RED,
+        "the scale pad reveals the base",
+    );
+    s.assert_px_at(
+        "scaled.mp4",
+        0.5,
+        160,
+        120,
+        GREEN,
+        "the shrunk overlay is centred",
     );
 }
 

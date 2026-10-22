@@ -89,9 +89,8 @@ fn clip_effects(c: &Clip, asset: &Asset, fallback: (u32, u32)) -> Result<String,
 }
 
 /// The effect filters for a chain, joined and comma-terminated (empty when
-/// nothing renders). The frame is tracked through the chain so a resize is
-/// resolved against what the previous effect actually left, but every current
-/// effect keeps the canvas (crop masks in place, scale pads back).
+/// nothing renders). `Effect::chain` threads the picture box through the
+/// effects, so a crop resolves against a prior scale (and vice versa).
 fn effect_chain(
     effects: &[Effect],
     asset: &Asset,
@@ -100,28 +99,22 @@ fn effect_chain(
     if effects.is_empty() {
         return Ok(String::new());
     }
-    let needs_frame = effects
+    let needs_geometry = effects
         .iter()
         .any(|e| matches!(e, Effect::Crop { .. } | Effect::Scale { .. }));
-    let mut frame = if needs_frame {
+    let canvas = if needs_geometry {
         asset
             .video_size()
             .ok_or(CompileError::MissingGeometry(asset.id))?
     } else {
         fallback
     };
-    let mut parts: Vec<String> = Vec::new();
-    for e in effects {
-        let filter = e.filter(frame);
-        if !filter.is_empty() {
-            parts.push(filter);
-        }
-        frame = e.frame_after(frame);
+    let chain = Effect::chain(effects, canvas);
+    if chain.is_empty() {
+        Ok(chain)
+    } else {
+        Ok(format!("{chain},"))
     }
-    if parts.is_empty() {
-        return Ok(String::new());
-    }
-    Ok(format!("{},", parts.join(",")))
 }
 
 /// The video retime stage. At 1× this is exactly the old
@@ -1109,12 +1102,15 @@ mod tests {
         }
         let g = compile_export(&p).unwrap().graph;
         // Effects chain after the retime, before the normalize scale. The
-        // crop keeps the canvas, so the 50%/100% scale acts on the full frame.
+        // crop masks the outer quarter; the 50%/100% scale then acts on that
+        // box (the 960×540 picture), not on the transparent canvas.
         assert!(
             g.contains(
                 "format=yuva420p,crop=960:540:480:270,\
                  pad=1920:1080:480:270:color=black@0,\
-                 scale=960:1080,pad=1920:1080:480:0:black,scale=1920:1080"
+                 format=yuva420p,crop=960:540:480:270,\
+                 scale=480:540,pad=1920:1080:720:270:color=black@0,\
+                 scale=1920:1080"
             ),
             "{g}"
         );

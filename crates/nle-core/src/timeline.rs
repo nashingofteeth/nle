@@ -54,7 +54,9 @@ pub enum Effect {
         top: f64,
         bottom: f64,
     },
-    /// `scale`, as percentages of the source frame (100 = unchanged).
+    /// `scale`, as percentages of the picture at this point in the chain
+    /// (100 = unchanged). Below 100% it shrinks about its centre and pads
+    /// transparently, so a lower track shows through; above 100% is a zoom.
     Scale { w: f64, h: f64 },
     /// `eq=brightness=…:contrast=…:saturation=…`.
     Eq {
@@ -101,9 +103,39 @@ impl Effect {
         }
     }
 
-    /// The ffmpeg filter fragment for this effect, applied to the frame as it
-    /// stands at this point in the chain (`crop` and `scale` need it).
-    pub fn filter(&self, frame: (u32, u32)) -> String {
+    /// The ffmpeg filters for a whole chain, comma-joined (empty when nothing
+    /// renders). The picture box is threaded through: `scale` resizes the
+    /// current box about its centre, `crop` insets the box's edges, and colour
+    /// effects leave it alone. Anything outside the box is transparent, so a
+    /// lower track shows through (black when none does — the classic
+    /// single-track graph drops alpha at the end).
+    pub fn chain(effects: &[Effect], canvas: (u32, u32)) -> String {
+        let mut content = Content::full(canvas);
+        let mut parts: Vec<String> = Vec::new();
+        for effect in effects {
+            let (filter, next) = effect.apply(canvas, content);
+            if !filter.is_empty() {
+                parts.push(filter);
+            }
+            content = next;
+        }
+        parts.join(",")
+    }
+
+    /// Does the chain leave any transparent canvas? The monitor composites the
+    /// layer below when it does; the export's overlay handles it directly.
+    pub fn masks(effects: &[Effect], canvas: (u32, u32)) -> bool {
+        let mut content = Content::full(canvas);
+        for effect in effects {
+            content = effect.apply(canvas, content).1;
+        }
+        !content.is_full(canvas)
+    }
+
+    /// One effect: its filter and the picture box it leaves behind. Computing
+    /// both together keeps the emitted geometry and the tracked box from
+    /// drifting apart.
+    fn apply(&self, canvas: (u32, u32), content: Content) -> (String, Content) {
         match self {
             Effect::Crop {
                 left,
@@ -111,87 +143,132 @@ impl Effect {
                 top,
                 bottom,
             } => {
-                let (w, h, x, y) = crop_geometry(*left, *right, *top, *bottom, frame);
-                let (fw, fh) = frame;
-                if (w, h, x, y) == (fw, fh, 0, 0) {
-                    return String::new(); // no inset: nothing to mask
+                let next = crop_content(*left, *right, *top, *bottom, content);
+                if next == content {
+                    return (String::new(), content); // no inset: nothing to mask
                 }
-                // Keep the picture at its original place and size; the cut
-                // strips are transparent. A later `overlay` (multi-track
-                // export, or the monitor composite) reveals what is below,
-                // while the classic single-track graph drops alpha to black.
-                format!(
-                    "format=yuva420p,crop={w}:{h}:{x}:{y},\
-                     pad={fw}:{fh}:{x}:{y}:color=black@0"
+                let (fw, fh) = canvas;
+                let (x, y) = (next.x, next.y);
+                (
+                    format!(
+                        "format=yuva420p,crop={}:{}:{x}:{y},\
+                         pad={fw}:{fh}:{x}:{y}:color=black@0",
+                        next.w, next.h,
+                    ),
+                    next,
                 )
             }
-            // Percent of the *current* frame, then padded/cropped back to it
-            // so the canvas size is unchanged: 50% is a half-size picture on
-            // black, 200% is a centre zoom. Without the pad/crop the export's
-            // normalize scale would immediately undo a uniform scale.
-            Effect::Scale { w, h } => scale_filter(*w, *h, frame),
+            Effect::Scale { w, h } => scale_content(*w, *h, canvas, content),
             Effect::Eq {
                 brightness,
                 contrast,
                 saturation,
-            } => format!("eq=brightness={brightness}:contrast={contrast}:saturation={saturation}"),
+            } => (
+                format!("eq=brightness={brightness}:contrast={contrast}:saturation={saturation}"),
+                content,
+            ),
             // The path is quoted: `:`/`,` in it would otherwise split the
             // filtergraph, and a literal `'` is escaped the ffmpeg way.
-            Effect::Lut { path } => format!("lut3d=file='{}'", path.replace('\'', r"'\''")),
+            Effect::Lut { path } => (
+                format!("lut3d=file='{}'", path.replace('\'', r"'\''")),
+                content,
+            ),
+        }
+    }
+}
+
+/// The visible picture inside the effect canvas, in canvas pixels. `x`/`y`
+/// are non-negative and the box is clipped to the canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Content {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
+impl Content {
+    fn full((w, h): (u32, u32)) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            w: i64::from(w),
+            h: i64::from(h),
         }
     }
 
-    /// The frame size after this effect. Every current effect keeps its
-    /// canvas — a crop masks in place, a scale pads/crops back to the frame —
-    /// so the tracker stays for the next effect that really does resize.
-    pub fn frame_after(&self, frame: (u32, u32)) -> (u32, u32) {
-        frame
+    fn is_full(&self, canvas: (u32, u32)) -> bool {
+        *self == Self::full(canvas)
     }
 }
 
-/// Resolve percentage edge insets against the source frame: each edge moves
-/// that percent of the frame dimension toward its opposite edge (0 = the
-/// frame edge, 100 = the opposite edge). The box is clamped to the frame so a
-/// hand-edited project can't crop past it.
-fn crop_geometry(
-    left: f64,
-    right: f64,
-    top: f64,
-    bottom: f64,
-    (fw, fh): (u32, u32),
-) -> (u32, u32, u32, u32) {
-    let inset = |size: u32, pct: f64| ((size as f64 * pct / 100.0).round() as u32).min(size);
-    let (l, r) = (inset(fw, left), inset(fw, right));
-    let (t, b) = (inset(fh, top), inset(fh, bottom));
-    let w = fw.saturating_sub(l.saturating_add(r)).max(2).min(fw.max(2));
-    let h = fh.saturating_sub(t.saturating_add(b)).max(2).min(fh.max(2));
-    let x = l.min(fw.saturating_sub(w));
-    let y = t.min(fh.saturating_sub(h));
-    (w, h, x, y)
+/// Inset `content` by percentages of its *own* width/height: each edge moves
+/// that percent of the box toward its opposite edge. Clamped so a hand-edited
+/// project can't crop past the picture.
+fn crop_content(left: f64, right: f64, top: f64, bottom: f64, content: Content) -> Content {
+    let inset =
+        |size: i64, pct: f64| ((size as f64 * pct / 100.0).round() as i64).clamp(0, size.max(0));
+    let (l, r) = (inset(content.w, left), inset(content.w, right));
+    let (t, b) = (inset(content.h, top), inset(content.h, bottom));
+    let w = (content.w - l - r).clamp(2, content.w.max(2));
+    let h = (content.h - t - b).clamp(2, content.h.max(2));
+    Content {
+        x: content.x + l.min((content.w - w).max(0)),
+        y: content.y + t.min((content.h - h).max(0)),
+        w,
+        h,
+    }
 }
 
-/// Resize to `w`/`h` percent of the current frame, then pad (below 100%) or
-/// crop (above 100%) back to it, centred. The pad is opaque black: `scale` is
-/// a picture-in-picture, not a mask — `crop` is the effect that lets the layer
-/// below show through.
-fn scale_filter(w: f64, h: f64, (fw, fh): (u32, u32)) -> String {
-    let size =
-        |base: u32, pct: f64| ((base as f64 * pct / 100.0).round() as u32).clamp(2, u32::MAX / 4);
-    let (sw, sh) = (size(fw, w), size(fh, h));
-    if sw == fw && sh == fh {
-        return String::new(); // 100% is a no-op; the caller drops empty filters
+/// Resize the current box to `w`/`h` percent of itself, about its centre. The
+/// scaled picture is clipped to the canvas and padded transparently around it,
+/// so a lower track shows through; above 100% it is a centre zoom.
+fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> (String, Content) {
+    let (fw, fh) = (i64::from(canvas.0), i64::from(canvas.1));
+    let size = |base: i64, pct: f64| {
+        ((base as f64 * pct / 100.0).round() as i64).clamp(2, i64::from(u32::MAX / 4))
+    };
+    let (sw, sh) = (size(content.w, wpct), size(content.h, hpct));
+    // Keep the box's centre (doubled, so an odd size stays integral).
+    let sx = (2 * content.x + content.w - sw) / 2;
+    let sy = (2 * content.y + content.h - sh) / 2;
+    // Clip the scaled picture to the canvas.
+    let ix = sx.max(0);
+    let iy = sy.max(0);
+    let w = ((sx + sw).min(fw) - ix).clamp(2, fw);
+    let h = ((sy + sh).min(fh) - iy).clamp(2, fh);
+    let next = Content {
+        x: ix.min(fw - w),
+        y: iy.min(fh - h),
+        w,
+        h,
+    };
+    // 100% (or a rounding no-op) renders nothing.
+    if sw == content.w && sh == content.h && next == content {
+        return (String::new(), content);
     }
-    // A canvas big enough for both the scaled picture and the frame: pad the
-    // smaller axis, then crop the larger back to the frame.
-    let (cw, ch) = (sw.max(fw), sh.max(fh));
-    let mut chain = format!("scale={sw}:{sh}");
-    if cw != sw || ch != sh {
-        chain += &format!(",pad={cw}:{ch}:{}:{}:black", (cw - sw) / 2, (ch - sh) / 2);
+    let mut chain = String::from("format=yuva420p");
+    if !content.is_full(canvas) {
+        chain += &format!(
+            ",crop={}:{}:{}:{}",
+            content.w, content.h, content.x, content.y
+        );
     }
-    if cw != fw || ch != fh {
-        chain += &format!(",crop={fw}:{fh}:{}:{}", (cw - fw) / 2, (ch - fh) / 2);
+    chain += &format!(",scale={sw}:{sh}");
+    // The scaled picture can stick out of the canvas: crop the overflow.
+    if next.x != sx || next.y != sy || next.w != sw || next.h != sh {
+        chain += &format!(
+            ",crop={}:{}:{}:{}",
+            next.w,
+            next.h,
+            next.x - sx,
+            next.y - sy
+        );
     }
-    chain
+    if !next.is_full(canvas) {
+        chain += &format!(",pad={fw}:{fh}:{}:{}:color=black@0", next.x, next.y);
+    }
+    (chain, next)
 }
 
 /// One piece of media on a track. Its timeline position is derived from
@@ -789,18 +866,22 @@ mod tests {
     #[test]
     fn a_lut_path_with_filter_metacharacters_is_quoted() {
         assert_eq!(
-            Effect::Lut {
-                path: "/luts/a,b:c.cube".into()
-            }
-            .filter((0, 0)),
+            Effect::chain(
+                &[Effect::Lut {
+                    path: "/luts/a,b:c.cube".into()
+                }],
+                (0, 0)
+            ),
             "lut3d=file='/luts/a,b:c.cube'",
             "a comma or colon must not split the graph"
         );
         assert_eq!(
-            Effect::Lut {
-                path: "/luts/it's.cube".into()
-            }
-            .filter((0, 0)),
+            Effect::chain(
+                &[Effect::Lut {
+                    path: "/luts/it's.cube".into()
+                }],
+                (0, 0)
+            ),
             r"lut3d=file='/luts/it'\''s.cube'",
             "a quote is escaped the ffmpeg way"
         );

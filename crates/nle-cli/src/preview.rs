@@ -14,7 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nle_core::timeline::{Effect, Segment as TimelineSegment, Track};
+use nle_core::timeline::{Effect, Segment as TimelineSegment, Track, TransitionSource};
 use nle_core::{Project, Seconds, format_seconds};
 use thiserror::Error;
 
@@ -198,10 +198,12 @@ fn composite_windows(project: &Project) -> Result<Vec<Window<'_>>, PreviewError>
             a,
             picked.as_ref().map(|(vi, ..)| *vi),
         );
-        // A cropped layer is transparent at its edges, so a lower picture must
-        // show through: that is only expressible as the export's overlay.
+        // A cropped or scaled-down layer is transparent at its edges, so a
+        // lower picture must show through: only the export's overlay can do it.
         let masked = match &picked {
-            Some((vi, seg, _)) => masks_edges(seg) && lower_track_has_video(&video, *vi, a),
+            Some((vi, seg, _)) => {
+                masks_edges(project, seg) && lower_track_has_video(&video, *vi, a)
+            }
             None => false,
         };
         let kind = match picked {
@@ -250,21 +252,25 @@ fn other_track_has_audio(
         || audio.iter().any(|t| audible_at(t))
 }
 
-/// Does this segment paint only an inner box? A non-zero crop inset makes the
-/// edges transparent, so lower layers belong in the composite.
-fn masks_edges(seg: &TimelineSegment) -> bool {
-    let TimelineSegment::Clip(c) = seg else {
-        return false;
-    };
-    c.effects.iter().any(|e| match e {
-        Effect::Crop {
-            left,
-            right,
-            top,
-            bottom,
-        } => *left > 0.0 || *right > 0.0 || *top > 0.0 || *bottom > 0.0,
-        _ => false,
-    })
+/// Does this segment leave transparent canvas (a crop, or a scale-down)? The
+/// monitor then needs the layers below composited, not the clip's own proxy.
+fn masks_edges(project: &Project, seg: &TimelineSegment) -> bool {
+    match seg {
+        TimelineSegment::Clip(c) => project
+            .asset(c.asset)
+            .and_then(|a| a.video_size())
+            .is_some_and(|size| Effect::masks(&c.effects, size)),
+        // A transition side can carry its neighbour's effects; the blend is
+        // rendered material, so ask the same question of both sides.
+        TimelineSegment::Transition(t) => [&t.a, &t.b].into_iter().any(|side| match side {
+            TransitionSource::Clip { asset, effects, .. } => project
+                .asset(*asset)
+                .and_then(|a| a.video_size())
+                .is_some_and(|size| Effect::masks(effects, size)),
+            TransitionSource::Black => false,
+        }),
+        TimelineSegment::Gap(_) => false,
+    }
 }
 
 /// Is any track *below* `picked` showing picture at `at`? `video` is in
@@ -976,7 +982,11 @@ mod tests {
         // An effect clip…
         let mut p = composite_project();
         if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
-            c.effects = vec![Effect::Scale { w: 2.0, h: 2.0 }];
+            c.effects = vec![Effect::Eq {
+                brightness: 0.1,
+                contrast: 1.0,
+                saturation: 1.0,
+            }];
         }
         let windows = composite_windows(&p).unwrap();
         match &windows[1] {
@@ -1002,10 +1012,50 @@ mod tests {
         }
     }
 
-    // A crop is transparent at its edges: with picture below, the monitor needs
-    // the export's overlay (a rendered composite), not the clip's own proxy.
+    // A crop or a scale-down is transparent at its edges: with picture below,
+    // the monitor needs the export's overlay (a rendered composite), not the
+    // clip's own proxy.
     #[test]
-    fn a_cropped_layer_over_picture_is_a_composite() {
+    fn a_masked_layer_over_picture_is_a_composite() {
+        for effect in [
+            Effect::Crop {
+                left: 10.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            Effect::Scale { w: 50.0, h: 50.0 },
+        ] {
+            let mut p = composite_project();
+            if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
+                c.effects = vec![effect];
+            }
+            let mixed: Vec<bool> = composite_windows(&p)
+                .unwrap()
+                .iter()
+                .map(|w| matches!(w.kind, WindowKind::Mix))
+                .collect();
+            assert_eq!(
+                mixed,
+                vec![false, true, false],
+                "the masked high clip must reveal the low clip"
+            );
+        }
+
+        // A zoom (above 100%) still covers the canvas: no composite.
+        let mut p = composite_project();
+        if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
+            c.effects = vec![Effect::Scale { w: 200.0, h: 200.0 }];
+        }
+        let mixed: Vec<bool> = composite_windows(&p)
+            .unwrap()
+            .iter()
+            .map(|w| matches!(w.kind, WindowKind::Mix))
+            .collect();
+        assert_eq!(mixed, vec![false, false, false]);
+
+        // With nothing below (the low track is a gap), the clip's own proxy
+        // already shows black margins — no composite render is needed.
         let mut p = composite_project();
         if let TimelineSegment::Clip(c) = &mut p.timeline.tracks[1].segments[1] {
             c.effects = vec![Effect::Crop {
@@ -1015,19 +1065,6 @@ mod tests {
                 bottom: 0.0,
             }];
         }
-        let mixed: Vec<bool> = composite_windows(&p)
-            .unwrap()
-            .iter()
-            .map(|w| matches!(w.kind, WindowKind::Mix))
-            .collect();
-        assert_eq!(
-            mixed,
-            vec![false, true, false],
-            "the cropped high clip must reveal the low clip"
-        );
-
-        // With nothing below (the low track is a gap), the clip's own proxy
-        // already shows black margins — no composite render is needed.
         p.timeline.tracks[0].segments = vec![TimelineSegment::Gap(TimelineGap {
             duration: Seconds::from_integer(4),
         })];

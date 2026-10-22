@@ -4734,7 +4734,10 @@ fn form_hint(kind: &str) -> &'static str {
             "edge inset % (0 = frame edge, 100 = opposite edge); \
              the cut area shows below, else black"
         }
-        "scale" => "percent of the source; 100 keeps the size (unequal axes change the aspect)",
+        "scale" => {
+            "percent of the picture at this point; 100 keeps the size \
+             (below 100 reveals the track below)"
+        }
         "eq" => "neutral values: brightness 0 · contrast 1 · saturation 1",
         "lut" => "path to a .cube 3D LUT file",
         _ => "",

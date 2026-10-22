@@ -117,10 +117,12 @@ $N --project showcase.json transition --at 2 --frames 30 >/dev/null
 $N --project showcase.json effect crop --clip 1 --left 40 >/dev/null
 $N --project showcase.json effect eq --clip 3 --saturation 0 >/dev/null
 $N --project showcase.json speed 3 2 >/dev/null
-# An upper track with a half-size (black-padded) picture, and an audio bed.
+# An upper track: scale it down (the transparent pad reveals the sea), then
+# crop the scaled picture itself. Plus an audio bed.
 $N --project showcase.json track add video >/dev/null
 $N --project showcase.json add sun.mp4 --track 2 --at 2.1 --in 0 --out 0.8 >/dev/null
 $N --project showcase.json effect scale --clip 5 --w 50 --h 50 >/dev/null
+$N --project showcase.json effect crop --clip 5 --left 30 >/dev/null
 $N --project showcase.json track add audio >/dev/null
 $N --project showcase.json add sea.mp4 --track 3 --in 0 --out 2 >/dev/null
 $N --project showcase.json show
@@ -159,6 +161,11 @@ warm() { # the sun is much redder than blue
   r=$(chan "$1" 0); b=$(chan "$1" 4)
   [ "$r" -ge 180 ] && [ $((r - b)) -ge 60 ]
 }
+cool() { # the sea is blue/teal: blue clearly above red
+  local r b
+  r=$(chan "$1" 0); b=$(chan "$1" 4)
+  [ "$b" -ge 40 ] && [ $((b - r)) -ge 20 ]
+}
 
 crop_edge=$(px 0.5 showcase.mp4 2 180)
 crop_kept=$(px 0.5 showcase.mp4 300 180)
@@ -169,11 +176,12 @@ else
   echo "  ✗ crop wrong (masked ${crop_edge}, kept ${crop_kept}, source ${crop_raw})"; exit 1
 fi
 mid=$(px 2.5 showcase.mp4 318 178)
+cut=$(px 2.5 showcase.mp4 200 180)
 corner=$(px 2.5 showcase.mp4 2 2)
-if warm "$mid" && dark "$corner"; then
-  echo "  ✓ half-size overlay: picture ${mid}, black pad ${corner}"
+if warm "$mid" && cool "$cut" && cool "$corner"; then
+  echo "  ✓ overlay scale 50 + crop 30: sun ${mid}; cut strip ${cut} and pad ${corner} show the sea"
 else
-  echo "  ✗ overlay/scale wrong (centre ${mid}, corner ${corner})"; exit 1
+  echo "  ✗ overlay/scale/crop wrong (centre ${mid}, cut ${cut}, corner ${corner})"; exit 1
 fi
 grey_px=$(px 3.2 showcase.mp4 318 178)
 if greyish "$grey_px"; then
