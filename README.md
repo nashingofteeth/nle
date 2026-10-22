@@ -65,8 +65,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              crop/scale/eq/lut/offset; a kind already on the clip opens for
 #              editing instead of stacking (one effect per kind) · the form's
 #              fields: a letter jumps to its field, tab/↑↓ move, enter applies
-#              and closes, ctrl-u clears, esc cancels; in scale, `a` locks the
-#              width/height ratio · u undo · q/esc close; `*`
+#              and closes, ctrl-u clears, esc cancels; in scale, tab to the
+#              "aspect lock" row (or press `a`) and space toggles it · u undo ·
+#              q/esc close; `*`
 #              marks a clip with effects in the row and `nle show` lists them
 #              in order ·
 #              X cross-dissolve at the boundary (count = frames); `xx` also

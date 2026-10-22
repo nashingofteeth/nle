@@ -337,6 +337,8 @@ pub enum FieldKind {
     Float,
     /// A file path (any printable character).
     Path,
+    /// An on/off option: space (or its jump key) toggles it.
+    Toggle,
 }
 
 /// Which two-key sequence is waiting for its second keystroke (`gg`, `dd`, `yy`).
@@ -2157,6 +2159,9 @@ fn form_for(kind: &'static str) -> FxForm {
         "scale" => vec![
             field("width %", Some("100"), FieldKind::Float, Some('w')),
             field("height %", Some("100"), FieldKind::Float, Some('h')),
+            // A real field so tab/arrows reach it; `a` jumps here and space
+            // toggles it.
+            field("aspect lock", None, FieldKind::Toggle, Some('a')),
         ],
         "offset" => vec![
             field("x %", Some("0"), FieldKind::Float, Some('x')),
@@ -2274,6 +2279,7 @@ fn field_accepts(kind: FieldKind, c: char) -> bool {
     match kind {
         FieldKind::Float => c.is_ascii_digit() || c == '.' || c == '-',
         FieldKind::Path => !c.is_control(),
+        FieldKind::Toggle => false,
     }
 }
 
@@ -2304,13 +2310,24 @@ fn fx_focus(app: &mut App, index: usize) {
     }
 }
 
+/// Flip the scale form's aspect lock (its toggle field is focused).
+fn fx_toggle_lock(app: &mut App) {
+    let Some(st) = fx_state_mut(app) else { return };
+    if let Some(form) = st.form.as_mut() {
+        form.lock = !form.lock;
+    }
+}
+
 /// With the scale form's lock on, mirror the field being typed into the other
 /// axis using the ratio captured when the form opened.
 fn fx_sync_aspect(app: &mut App, edited: usize) {
     let Some(st) = fx_state_mut(app) else { return };
     let Some(form) = st.form.as_mut() else { return };
-    if !form.lock || form.kind != "scale" || form.fields.len() != 2 || form.aspect <= 0.0 {
+    if !form.lock || form.kind != "scale" || form.fields.len() < 2 || form.aspect <= 0.0 {
         return;
+    }
+    if edited >= 2 {
+        return; // the lock toggle itself
     }
     let Some(value) = form
         .fields
@@ -2463,18 +2480,27 @@ fn fx_form_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             fx_edit_field(app, String::clear);
         }
-        // `a` toggles the scale form's aspect lock; it is not a field mnemonic.
-        KeyCode::Char(c) if form.kind == "scale" && c.eq_ignore_ascii_case(&'a') => {
-            let Some(st) = fx_state_mut(app) else { return };
-            if let Some(form) = st.form.as_mut() {
-                form.lock = !form.lock;
-            }
+        // Space flips the focused toggle (the scale form's lock).
+        KeyCode::Char(' ')
+            if form
+                .fields
+                .get(form.focus)
+                .is_some_and(|f| f.kind == FieldKind::Toggle) =>
+        {
+            fx_toggle_lock(app);
         }
         KeyCode::Char(c) => {
             let focused = form.fields.get(form.focus);
+            // A focused toggle has no text: its own jump key flips it.
+            if focused.is_some_and(|f| f.kind == FieldKind::Toggle)
+                && focused.is_some_and(|f| f.key == Some(c.to_ascii_lowercase()))
+            {
+                fx_toggle_lock(app);
+                return;
+            }
             // In a numeric form the field labels double as jump keys. A path
             // field must receive every letter as text, so it is exempt.
-            if focused.is_some_and(|f| f.kind == FieldKind::Float)
+            if focused.is_some_and(|f| f.kind != FieldKind::Path)
                 && let Some(i) = form
                     .fields
                     .iter()
@@ -4239,7 +4265,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         if let Some(form) = fx_state(app).and_then(|st| st.form.as_ref()) {
             return vec![
                 form_hint(form.kind),
-                "letters jump · tab/↑↓ field · enter applies · ctrl-u clears · esc cancels",
+                "letters jump · tab/↑↓ field · space toggles lock · enter applies · ctrl-u clears · esc cancels",
             ];
         }
         return vec![
@@ -4956,7 +4982,13 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
         .enumerate()
         .map(|(i, field)| {
             let value = &field.value;
-            let shown = if i == form.focus {
+            let shown = if field.kind == FieldKind::Toggle {
+                if form.lock {
+                    "x".to_string()
+                } else {
+                    " ".to_string()
+                }
+            } else if i == form.focus {
                 format!("{value}▏")
             } else if value.is_empty() {
                 "…".to_string()
@@ -4985,7 +5017,7 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
                 spans.push(Span::styled(field.label.to_string(), label_style));
             }
             let label_len = field.label.chars().count();
-            spans.push(Span::raw(" ".repeat(11usize.saturating_sub(label_len))));
+            spans.push(Span::raw(" ".repeat(12usize.saturating_sub(label_len))));
             spans.push(Span::styled(format!("[{shown}]"), style));
             if let Some(previous) = &field.previous {
                 spans.push(Span::styled(
@@ -4996,26 +5028,10 @@ fn render_fx_form(f: &mut Frame, area: Rect, form: &FxForm) {
             Line::from(spans)
         })
         .collect();
-    if form.kind == "scale" {
-        let mark = if form.lock { "x" } else { " " };
-        let style = if form.lock {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<11}", "lock w/h"),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(format!("[{mark}]"), style),
-            Span::styled("  a toggles", Style::default().fg(Color::DarkGray)),
-        ]));
-    }
     lines.push(Line::from(""));
     lines.push(Line::from(form_hint(form.kind)).style(Style::default().fg(Color::DarkGray)));
     lines.push(
-        Line::from("letters jump · tab/↑↓ field · enter applies · ctrl-u clears · esc cancels")
+        Line::from("letters jump · tab/↑↓ field · space toggles lock · enter applies · ctrl-u clears · esc cancels")
             .style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
@@ -9030,17 +9046,20 @@ mod tests {
     fn scale_form_lock_keeps_the_aspect() {
         let fake = FakeMpv::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         let mut app = App::new(asset_project(), temp_project_path("fx-lock"));
         app.loaded = true;
         app.playhead = 1.0;
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('s'));
-        handle_key(&mut app, &fake, key('a'));
+        handle_key(&mut app, &fake, key('a')); // jump to the toggle
+        handle_key(&mut app, &fake, space);
+        handle_key(&mut app, &fake, key('w')); // back to width
         for c in "50".chars() {
             handle_key(&mut app, &fake, key(c));
         }
         let form = fx_state(&app).unwrap().form.as_ref().unwrap();
-        assert!(form.lock, "a turned the lock on");
+        assert!(form.lock, "space turned the lock on");
         assert_eq!(form.fields[1].value, "50", "height mirrors width");
         handle_key(&mut app, &fake, enter);
         assert_eq!(
@@ -9049,11 +9068,33 @@ mod tests {
         );
     }
 
+    // Tab reaches the lock row like any other field.
+    #[test]
+    fn the_scale_lock_is_in_the_tab_order() {
+        let fake = FakeMpv::new();
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+        let mut app = App::new(asset_project(), temp_project_path("fx-lock-tab"));
+        app.loaded = true;
+        app.playhead = 1.0;
+        handle_key(&mut app, &fake, key('x'));
+        handle_key(&mut app, &fake, key('s'));
+        let focus = |app: &App| fx_state(app).unwrap().form.as_ref().unwrap().focus;
+        assert_eq!(focus(&app), 0);
+        handle_key(&mut app, &fake, tab);
+        assert_eq!(focus(&app), 1);
+        handle_key(&mut app, &fake, tab);
+        assert_eq!(focus(&app), 2, "tab reaches the lock");
+        handle_key(&mut app, &fake, space);
+        assert!(fx_state(&app).unwrap().form.as_ref().unwrap().lock);
+    }
+
     // Editing a 2:1 scale with the lock keeps that ratio, not 1:1.
     #[test]
     fn scale_edit_lock_uses_the_applied_ratio() {
         let fake = FakeMpv::new();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
         let mut app = App::new(asset_project(), temp_project_path("fx-lock-edit"));
         app.loaded = true;
         app.playhead = 1.0;
@@ -9061,6 +9102,8 @@ mod tests {
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, enter); // edit the scale
         handle_key(&mut app, &fake, key('a'));
+        handle_key(&mut app, &fake, space);
+        handle_key(&mut app, &fake, key('w'));
         for c in "40".chars() {
             handle_key(&mut app, &fake, key(c));
         }
@@ -9386,8 +9429,11 @@ mod tests {
                 assert!(text.contains("was "), "{kind}: no previous value\n{text}");
             }
             if kind == "scale" {
-                assert!(text.contains("lock w/h"), "{kind}: no lock row\n{text}");
-                assert!(text.contains("a toggles"), "{kind}: no lock hint\n{text}");
+                assert!(text.contains("aspect lock"), "{kind}: no lock row\n{text}");
+                assert!(
+                    text.contains("space toggles"),
+                    "{kind}: no lock hint\n{text}"
+                );
             }
         }
     }
