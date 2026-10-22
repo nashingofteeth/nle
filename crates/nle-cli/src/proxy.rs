@@ -27,7 +27,7 @@ use thiserror::Error;
 /// Bump when the *meaning* of a segment changes — a filter rewrite, a new
 /// normalize — not only its JSON fields. The hash moves, old renders are
 /// abandoned, and a stale proxy can't be served by the new compiler.
-const RENDER_VERSION: u64 = 2;
+const RENDER_VERSION: u64 = 3;
 
 #[derive(Debug, Error)]
 pub enum ProxyError {
