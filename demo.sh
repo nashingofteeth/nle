@@ -185,6 +185,17 @@ if warm "$mid" && cool "$cut" && cool "$corner" && cool "$bottom"; then
 else
   echo "  ✗ overlay/scale/crop/offset wrong (centre ${mid}, cut ${cut}, corner ${corner}, bottom ${bottom})"; exit 1
 fi
+
+# Offset 100% of the canvas is fully off screen, not a sliver at the edge.
+$N --project showcase.json effect offset --clip 5 --x 100 --y 0 >/dev/null
+$N --project showcase.json export -o showcase-off.mp4 >/dev/null
+off=$(px 2.5 showcase-off.mp4 318 178)
+if cool "$off"; then
+  echo "  ✓ offset 100% is off screen (sea ${off})"
+else
+  echo "  ✗ offset 100% still shows the overlay (${off})"; exit 1
+fi
+$N --project showcase.json effect offset --clip 5 --x 0 --y -20 >/dev/null
 grey_px=$(px 3.2 showcase.mp4 318 178)
 if greyish "$grey_px"; then
   echo "  ✓ eq saturation 0 is grey (${grey_px})"

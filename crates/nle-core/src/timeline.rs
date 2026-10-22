@@ -149,6 +149,9 @@ impl Effect {
                 top,
                 bottom,
             } => {
+                if content.is_empty() {
+                    return (String::new(), content); // already invisible
+                }
                 let next = crop_content(*left, *right, *top, *bottom, content);
                 if next == content {
                     return (String::new(), content); // no inset: nothing to mask
@@ -164,7 +167,13 @@ impl Effect {
                     next,
                 )
             }
-            Effect::Scale { w, h } => scale_content(*w, *h, canvas, content),
+            Effect::Scale { w, h } => {
+                if content.is_empty() {
+                    (String::new(), content) // already invisible
+                } else {
+                    scale_content(*w, *h, canvas, content)
+                }
+            }
             Effect::Offset { x, y } => offset_content(*x, *y, canvas, content),
             Effect::Eq {
                 brightness,
@@ -204,15 +213,39 @@ impl Content {
         }
     }
 
+    /// No picture left on the canvas: the frame is fully transparent.
+    fn empty() -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
     fn is_full(&self, canvas: (u32, u32)) -> bool {
         *self == Self::full(canvas)
     }
+}
+
+/// A frame that is entirely transparent black. Used when a geometry effect
+/// leaves nothing on the canvas (e.g. offset 100%). Zeroing RGB as well as
+/// alpha matters: the single-track export drops alpha to black.
+fn transparent_filter() -> String {
+    "format=yuva420p,colorchannelmixer=rr=0:gg=0:bb=0:aa=0".to_string()
 }
 
 /// Inset `content` by percentages of its *own* width/height: each edge moves
 /// that percent of the box toward its opposite edge. Clamped so a hand-edited
 /// project can't crop past the picture.
 fn crop_content(left: f64, right: f64, top: f64, bottom: f64, content: Content) -> Content {
+    if content.is_empty() {
+        return content;
+    }
     let inset =
         |size: i64, pct: f64| ((size as f64 * pct / 100.0).round() as i64).clamp(0, size.max(0));
     let (l, r) = (inset(content.w, left), inset(content.w, right));
@@ -231,6 +264,9 @@ fn crop_content(left: f64, right: f64, top: f64, bottom: f64, content: Content) 
 /// scaled picture is clipped to the canvas and padded transparently around it,
 /// so a lower track shows through; above 100% it is a centre zoom.
 fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> (String, Content) {
+    if content.is_empty() {
+        return (String::new(), content);
+    }
     let (fw, fh) = (i64::from(canvas.0), i64::from(canvas.1));
     let size = |base: i64, pct: f64| {
         ((base as f64 * pct / 100.0).round() as i64).clamp(2, i64::from(u32::MAX / 4))
@@ -242,8 +278,11 @@ fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> 
     // Clip the scaled picture to the canvas.
     let ix = sx.max(0);
     let iy = sy.max(0);
-    let w = ((sx + sw).min(fw) - ix).clamp(2, fw);
-    let h = ((sy + sh).min(fh) - iy).clamp(2, fh);
+    let w = (sx + sw).min(fw) - ix;
+    let h = (sy + sh).min(fh) - iy;
+    if w < 2 || h < 2 {
+        return (transparent_filter(), Content::empty());
+    }
     let next = Content {
         x: ix.min(fw - w),
         y: iy.min(fh - h),
@@ -279,28 +318,36 @@ fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> 
 }
 
 /// Move the current box by `x`/`y` percent of the canvas, clipping it at the
-/// canvas edge. The vacated area is transparent. At least two pixels of the
-/// picture stay on canvas: a 1 px (or empty) frame can't be cropped on
-/// yuv420p, and a fully off-canvas picture has nothing left to show.
+/// canvas edge. The vacated area is transparent; at ±100% the picture is
+/// entirely off canvas, so the frame becomes transparent black.
 fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) -> (String, Content) {
+    if content.is_empty() {
+        return (String::new(), content);
+    }
     let (fw, fh) = (i64::from(canvas.0), i64::from(canvas.1));
     let dx = (fw as f64 * xpct / 100.0).round() as i64;
     let dy = (fh as f64 * ypct / 100.0).round() as i64;
     if dx == 0 && dy == 0 {
         return (String::new(), content);
     }
-    let nx = (content.x + dx).clamp(2 - content.w, fw - 2);
-    let ny = (content.y + dy).clamp(2 - content.h, fh - 2);
+    let nx = content.x + dx;
+    let ny = content.y + dy;
+    // The part of the moved picture still on the canvas.
+    let ix = nx.max(0);
+    let iy = ny.max(0);
+    let vw = (nx + content.w).min(fw) - ix;
+    let vh = (ny + content.h).min(fh) - iy;
+    if vw < 2 || vh < 2 {
+        // Fully (or within a pixel) off canvas: a transparent layer. At
+        // ±100% of the canvas the picture is entirely outside.
+        return (transparent_filter(), Content::empty());
+    }
     // Source offset inside the picture and destination on the canvas.
-    let sx = (-nx).max(0);
-    let sy = (-ny).max(0);
-    let px = nx.max(0);
-    let py = ny.max(0);
-    let vw = (content.w - sx).min(fw - px);
-    let vh = (content.h - sy).min(fh - py);
+    let sx = ix - nx;
+    let sy = iy - ny;
     let next = Content {
-        x: px,
-        y: py,
+        x: ix,
+        y: iy,
         w: vw,
         h: vh,
     };
@@ -314,7 +361,7 @@ fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) ->
     if vw != content.w || vh != content.h {
         chain += &format!(",crop={vw}:{vh}:{sx}:{sy}");
     }
-    chain += &format!(",pad={fw}:{fh}:{px}:{py}:color=black@0");
+    chain += &format!(",pad={fw}:{fh}:{}:{}:color=black@0", next.x, next.y);
     (chain, next)
 }
 

@@ -328,6 +328,29 @@ fn a_crop_masks_in_place_and_reveals_what_is_below() {
         GREEN,
         "the moved overlay is still visible",
     );
+
+    // ±100% of the canvas is fully off screen: the base shows everywhere.
+    for x in ["100", "-100"] {
+        s.ok(&["effect", "offset", "--clip", "2", "--x", x]);
+        let out = format!("off{}.mp4", x.replace('-', "l"));
+        s.export(&out);
+        s.assert_px_at(
+            &out,
+            0.5,
+            20,
+            120,
+            RED,
+            &format!("offset {x}% leaves the base at the left"),
+        );
+        s.assert_px_at(
+            &out,
+            0.5,
+            300,
+            120,
+            RED,
+            &format!("offset {x}% leaves the base at the right"),
+        );
+    }
 }
 
 #[test]

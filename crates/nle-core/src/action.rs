@@ -1715,6 +1715,27 @@ mod tests {
         );
         assert!(Effect::masks(&[effect], (640, 360)));
 
+        // ±100% of the canvas is fully off screen: a transparent layer, not
+        // a 2 px sliver at the edge.
+        let off = "format=yuva420p,colorchannelmixer=rr=0:gg=0:bb=0:aa=0";
+        for x in [100.0, -100.0] {
+            let shifted = Effect::Offset { x, y: 0.0 };
+            assert_eq!(
+                Effect::chain(std::slice::from_ref(&shifted), (640, 360)),
+                off,
+                "offset x={x}%"
+            );
+            assert!(Effect::masks(&[shifted], (640, 360)));
+        }
+        for y in [100.0, -100.0] {
+            let shifted = Effect::Offset { x: 0.0, y };
+            assert_eq!(
+                Effect::chain(std::slice::from_ref(&shifted), (640, 360)),
+                off,
+                "offset y={y}%"
+            );
+        }
+
         // 0/0 is a no-op.
         assert_eq!(
             Effect::chain(&[Effect::Offset { x: 0.0, y: 0.0 }], (640, 360)),
