@@ -1034,7 +1034,7 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] \
      crop --left P --right P --top P --bottom P (%: 0 = edge, 100 = opposite) | \
      scale --w P --h P (%: 100 = unchanged) | \
-     offset --x P --y P (% of the canvas; negative = left/up) | \
+     offset --x P --y P (% of the way to the edge; ±100 = off-screen) | \
      eq [--brightness --contrast --saturation] | lut --path P | \
      rm [--index N] | clear (one per kind: adding a kind again replaces it)";
 
@@ -1740,6 +1740,45 @@ mod tests {
         assert_eq!(
             Effect::chain(&[Effect::Offset { x: 0.0, y: 0.0 }], (640, 360)),
             ""
+        );
+    }
+
+    // On a picture that scale/crop already moved right, 80% is 80% of the
+    // remaining distance to the edge, so part of it is still visible.
+    #[test]
+    fn offset_counts_the_distance_to_the_edge() {
+        let effects = vec![
+            Effect::Scale { w: 50.0, h: 50.0 },
+            Effect::Crop {
+                left: 30.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            Effect::Offset { x: 80.0, y: 0.0 },
+        ];
+        // The 160×120 scale is cropped to 112×120 at (128,60); 80% of the
+        // 192 px to the right edge is 154 px, leaving a 38 px strip.
+        let chain = Effect::chain(&effects, (320, 240));
+        assert!(
+            chain.ends_with("crop=38:120:0:0,pad=320:240:282:60:color=black@0"),
+            "{chain}"
+        );
+
+        // 100% covers the whole distance: fully off-screen.
+        let off = vec![
+            Effect::Scale { w: 50.0, h: 50.0 },
+            Effect::Crop {
+                left: 30.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            Effect::Offset { x: 100.0, y: 0.0 },
+        ];
+        assert!(
+            Effect::chain(&off, (320, 240)).ends_with("colorchannelmixer=rr=0:gg=0:bb=0:aa=0"),
+            "{chain}"
         );
     }
 

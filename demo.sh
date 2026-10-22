@@ -195,6 +195,17 @@ if cool "$off"; then
 else
   echo "  ✗ offset 100% still shows the overlay (${off})"; exit 1
 fi
+
+# 80% is 80% of the way to the edge: a strip stays visible.
+$N --project showcase.json effect offset --clip 5 --x 80 --y -20 >/dev/null
+$N --project showcase.json export -o showcase-edge.mp4 >/dev/null
+edge=$(px 2.5 showcase-edge.mp4 630 120)
+amid=$(px 2.5 showcase-edge.mp4 318 178)
+if warm "$edge" && cool "$amid"; then
+  echo "  ✓ offset 80% leaves the sun at the edge (${edge}) and the sea in the middle (${amid})"
+else
+  echo "  ✗ offset 80% wrong (edge ${edge}, middle ${amid})"; exit 1
+fi
 $N --project showcase.json effect offset --clip 5 --x 0 --y -20 >/dev/null
 grey_px=$(px 3.2 showcase.mp4 318 178)
 if greyish "$grey_px"; then

@@ -167,9 +167,10 @@ $N effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
 $N effect scale --clip 3 --w 50 --h 50 # percent of the picture at this point
 #   100 = default. Scaling down pads transparently, so the track below shows
 #   through; scaling up is a centre zoom. Effects compose in the order added.
-$N effect offset --clip 3 --x 10 --y -5 # percent of the canvas (0 = no move)
-#   Negative moves left/up; the picture is clipped at the canvas edge, and
-#   ±100% moves it fully off-screen (transparent — the track below shows).
+$N effect offset --clip 3 --x 10 --y -5 # percent of the way to the edge
+#   0 = no move; 100 moves it fully off-screen (transparent — the track
+#   below shows), 80 leaves the rest of the picture on screen. Negative
+#   moves left/up.
 $N effect eq --clip 3 --brightness -0.2 # contrast/saturation default to 1
 $N effect rm --clip 3                  # drop the last effect (--index N picks)
 $N effect clear --clip 3               # drop them all (one undo step)

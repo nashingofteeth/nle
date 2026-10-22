@@ -310,10 +310,10 @@ enum Cmd {
         /// crop: inset from the bottom edge (percent)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         bottom: Option<f64>,
-        /// offset: horizontal shift (percent of the canvas; negative = left)
+        /// offset: horizontal shift (percent of the distance to the edge)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         x: Option<f64>,
-        /// offset: vertical shift (percent of the canvas; negative = up)
+        /// offset: vertical shift (percent of the distance to the edge)
         #[arg(long, value_name = "P", allow_negative_numbers = true)]
         y: Option<f64>,
         /// eq brightness (0 is neutral)

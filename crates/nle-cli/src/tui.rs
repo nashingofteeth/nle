@@ -4994,7 +4994,10 @@ fn form_hint(kind: &str) -> &'static str {
             "percent of the picture at this point; 100 keeps the size \
              (below 100 reveals the track below)"
         }
-        "offset" => "percent of the canvas; 0 keeps the position (negative moves left/up)",
+        "offset" => {
+            "percent of the distance to the edge; 0 keeps the position, \
+             ±100 is fully off-screen"
+        }
         "eq" => "neutral values: brightness 0 · contrast 1 · saturation 1",
         "lut" => "path to a .cube 3D LUT file",
         _ => "",

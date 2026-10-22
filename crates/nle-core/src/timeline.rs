@@ -58,9 +58,10 @@ pub enum Effect {
     /// (100 = unchanged). Below 100% it shrinks about its centre and pads
     /// transparently, so a lower track shows through; above 100% is a zoom.
     Scale { w: f64, h: f64 },
-    /// `offset`, as percentages of the canvas: `x` moves right (negative
-    /// left), `y` moves down (negative up). The picture is clipped to the
-    /// canvas and the vacated area is transparent, so a lower track shows.
+    /// `offset`, as percentages of the distance from the picture's current
+    /// position to the edge: `x` moves right (negative left), `y` moves down
+    /// (negative up). 0 is no move and ±100 puts it fully off-screen; the
+    /// vacated area is transparent, so a lower track shows through.
     Offset { x: f64, y: f64 },
     /// `eq=brightness=…:contrast=…:saturation=…`.
     Eq {
@@ -317,16 +318,26 @@ fn scale_content(wpct: f64, hpct: f64, canvas: (u32, u32), content: Content) -> 
     (chain, next)
 }
 
-/// Move the current box by `x`/`y` percent of the canvas, clipping it at the
-/// canvas edge. The vacated area is transparent; at ±100% the picture is
-/// entirely off canvas, so the frame becomes transparent black.
+/// Move the current box toward an edge by `x`/`y` percent of the distance to
+/// it. 0 is no move, ±100 puts the picture fully off-canvas (a transparent
+/// frame); intermediate values leave the rest of the picture on screen.
 fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) -> (String, Content) {
     if content.is_empty() {
         return (String::new(), content);
     }
     let (fw, fh) = (i64::from(canvas.0), i64::from(canvas.1));
-    let dx = (fw as f64 * xpct / 100.0).round() as i64;
-    let dy = (fh as f64 * ypct / 100.0).round() as i64;
+    // Right/up use the room to that edge; left/down use the room to the
+    // other one, so ±100 always reaches the edge from where the picture is.
+    let dx = if xpct >= 0.0 {
+        ((fw - content.x) as f64 * xpct / 100.0).round() as i64
+    } else {
+        -(((content.x + content.w) as f64) * -xpct / 100.0).round() as i64
+    };
+    let dy = if ypct >= 0.0 {
+        ((fh - content.y) as f64 * ypct / 100.0).round() as i64
+    } else {
+        -(((content.y + content.h) as f64) * -ypct / 100.0).round() as i64
+    };
     if dx == 0 && dy == 0 {
         return (String::new(), content);
     }
