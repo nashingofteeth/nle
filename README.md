@@ -59,8 +59,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              :track add video|audio · :track mute [N] · :track rm N ·
 #              navigation, edits, and the monitor all follow the active
 #              track (the timeline draws one row per track)
-#   fx:        x effects panel for the clip under the playhead — j/k or 1-9
-#              select (the row number) · enter edit the selected effect (a
+#   fx:        x effects panel for the clip under the playhead — j/k select ·
+#              1-9 edit that row directly · enter edit the selected effect (a
 #              blank field keeps the applied value, shown as "was N") · d drop ·
 #              D clear · c/s/e/l/o add
 #              crop/scale/eq/lut/offset; a kind already on the clip opens for
