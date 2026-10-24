@@ -4309,9 +4309,15 @@ fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 fn render(f: &mut Frame, app: &App) {
     // Size the timeline to show every track, then give what's left to the
     // info panel and the bottom panels. The bottom panels are dropped before
-    // the timeline is allowed to hide a track.
-    let (timeline_h, keys, msg_h) =
-        panel_heights(app.project.timeline.tracks.len(), f.area().height);
+    // the timeline is allowed to hide a track. While the pool previews a raw
+    // asset the panel shows that asset's one-clip strip instead, so one row +
+    // marker is enough and the freed rows go to the pool list below.
+    let track_count = if is_pool(app) {
+        1
+    } else {
+        app.project.timeline.tracks.len()
+    };
+    let (timeline_h, keys, msg_h) = panel_heights(track_count, f.area().height);
     // The add form carries its own key hints and needs the rows for its
     // fields; drop the bottom cheat-sheet while it is open.
     let keys = if is_fx(app) && fx_state(app).is_some_and(|st| st.form.is_some()) {
@@ -4757,6 +4763,12 @@ fn pool_set_track(app: &mut App, idx: usize) {
 }
 
 fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
+    // While the pool previews a raw file the monitor is off the project, so
+    // the timeline row is temporarily the selected asset's own strip.
+    if let Mode::Pool(st) = &app.mode {
+        render_pool_strip(f, area, app, st);
+        return;
+    }
     let block = Block::bordered().title(" timeline ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -4833,6 +4845,79 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         height: 1,
     };
     draw_marker_row(f, bar, app, total, in_extend);
+}
+
+/// The pool previews a raw file, so the monitor is not on the project
+/// timeline. Replace the timeline row with the selected asset's own strip (a
+/// single clip `0..duration`) and put the marker at the preview clock.
+/// `panel_heights` already sized this panel to one track + marker.
+fn render_pool_strip(f: &mut Frame, area: Rect, app: &App, st: &PoolState) {
+    let Some(asset) = app.project.media.get(st.sel) else {
+        f.render_widget(Block::bordered().title(" preview "), area);
+        return;
+    };
+    let block = Block::bordered().title(format!(" preview — {} ", asset_line(asset)));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 6 || inner.height < 2 {
+        return;
+    }
+    let Some(dur) = asset.duration() else {
+        // No known duration means no scale to draw against: name only.
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                asset_line(asset),
+                Style::default().fg(Color::DarkGray),
+            ))),
+            inner,
+        );
+        return;
+    };
+    let total = secs(&dur).max(0.001);
+    // Reuse the project row renderer so the name truncates and the edges
+    // quantize through the same `marker_col` as the playhead marker.
+    let track = Track {
+        kind: TrackKind::Video,
+        muted: false,
+        segments: vec![TimelineSegment::Clip(Clip::new(
+            0,
+            asset.id,
+            Seconds::from_integer(0),
+            dur,
+        ))],
+    };
+    let row = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+    draw_track_row(f, row, app, &track, total, false);
+    let marker = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: 1,
+    };
+    draw_pool_marker_row(f, marker, total, st.pos, app.eof);
+}
+
+/// A bare marker row for the pool strip: red `▏`, `▕` at the file's end.
+fn draw_pool_marker_row(f: &mut Frame, bar: Rect, total: f64, pos: f64, eof: bool) {
+    if bar.width == 0 {
+        return;
+    }
+    let ph = marker_col(pos, total, bar.width) as usize;
+    let mut line = Line::default();
+    if ph > 0 {
+        line.push_span(Span::raw(" ".repeat(ph)));
+    }
+    let ch = if eof { '▕' } else { '▏' };
+    line.push_span(Span::styled(
+        ch.to_string(),
+        Style::default().fg(Color::Red),
+    ));
+    f.render_widget(Paragraph::new(line), bar);
 }
 
 /// Which tracks to show: all of them when they fit, else a window of
@@ -6128,6 +6213,46 @@ mod tests {
         assert!(
             !text.contains("a2.mp4"),
             "list scrolled, early rows gone:\n{text}"
+        );
+    }
+
+    // While the pool previews an asset, the timeline panel shows that asset's
+    // own strip and marker (the preview clock), not the project's clips.
+    #[test]
+    fn pool_strip_replaces_the_timeline_with_the_selected_asset() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut p = asset_project();
+        let probe = p.asset(1).unwrap().probe.clone(); // 10 s, 30 fps
+        p.add_asset("/media/pooled.mp4".into(), probe);
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        open_pool_mode(&mut app, 1); // index 1, id 2 (not the first asset)
+        set_pool_pos(&mut app, 5.0); // halfway through the 10 s asset
+        let Mode::Pool(st) = &app.mode else {
+            panic!("pool mode");
+        };
+        let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        term.draw(|f| render_pool_strip(f, f.area(), &app, st))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = (0..6u16)
+            .map(|y| (0..40u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("pooled.mp4"),
+            "strip names the selected asset:\n{text}"
+        );
+        assert!(
+            !text.contains("red.mp4"),
+            "the project's clips are temporarily gone:\n{text}"
+        );
+        // Inner width 38 (40 − borders); 5/10 of it → column 1 + 19, row 2.
+        let want = 1 + marker_col(5.0, 10.0, 38) as usize;
+        assert_eq!(
+            buf[(want as u16, 2u16)].symbol(),
+            "▏",
+            "marker follows the preview clock:\n{text}"
         );
     }
 
