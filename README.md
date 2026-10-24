@@ -1,7 +1,8 @@
 # nle
 
 Terminal-native video editor: TUI dashboard + mpv monitor window, vim keys,
-FFmpeg underneath. Built for this machine only.
+FFmpeg underneath. High performance with low system requirements — the Rust
+process stays light while ffmpeg/mpv do the heavy lifting.
 
 ## Status
 

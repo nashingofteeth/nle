@@ -104,8 +104,8 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 
 ## Model invariants
 
-- **Compatibility: none, by design.** Private, single machine, single user,
-  not distributed. `nle.json`, `nle.history.json`, and cached artifacts may
+- **Compatibility: none, by design.** Private, single user, not distributed.
+  `nle.json`, `nle.history.json`, and cached artifacts may
   change shape any time; old files are **rejected with a clear error** (never
   silently misread) and the fix is "rebuild it" (`./demo.sh`). Bump the format
   version; don't write migration code. The project file is plain JSON with

@@ -14,11 +14,11 @@ and transition retiming (`--frames/--dur/--percent`, the `x`/`X` frames form,
 ## Vision
 
 A terminal-native video editor: **TUI dashboard + mpv monitor window, vim
-keybinds, FFmpeg underneath.** A general-purpose NLE, built solo, for
-**this machine only** (MacBook Pro 16,1 — i9-9980HK 8C/16T, Intel UHD 630
-+ AMD RX 5500M, 32 GB RAM, NVMe, CachyOS), tuned for hardware
-utilization. Rust, learned along the way with JS/PHP→Rust explainers per
-milestone.
+keybinds, FFmpeg underneath.** A general-purpose NLE built to be **high
+performance with low system requirements**: the Rust process stays small and
+responsive (8 GB RAM and 8 threads are plenty) while decode/encode is
+delegated to ffmpeg/mpv, using hardware paths when available. Rust, learned
+along the way with JS/PHP→Rust explainers per milestone.
 
 **Rejected alternatives:** ffplay as monitor (no IPC), linking libav
 (spawn the binary instead), building on MLT, async/tokio (threads
