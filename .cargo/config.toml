@@ -2,5 +2,11 @@
 # This is a rustc flag (-C target-cpu=native), not a Cargo profile flag —
 # config.toml is where those live.
 # Local-only app, so targeting one CPU is pure free performance.
+#
+# Link with lld through clang: much faster than bfd on every rebuild.
+# Swap `lld` for `mold` if it is installed.
 [build]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"

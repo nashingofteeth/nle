@@ -26,8 +26,10 @@ tempfile = "3"
 # graph on every edit. "thin" LTO + parallel codegen keeps rebuilds ~3x faster.
 # No `strip`: the installed binary keeps its symbol table so RUST_BACKTRACE=1
 # crash backtraces still name functions (debug info is off by default here).
+# The everyday build: no LTO. The hot work is in ffmpeg/mpv subprocesses, so
+# cross-crate inlining buys almost nothing but costs ~2-3x on every rebuild.
 [profile.release]
-lto = "thin"
+lto = false
 codegen-units = 16
 
 # Opt-in max-optimization build when you actually want one:

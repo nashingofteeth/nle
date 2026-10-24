@@ -34,8 +34,9 @@ transitive tree for most needs).
   `mod`s, commands, and TUI-only helpers).
 - `Cargo.lock` is committed. After a dependency change run `cargo update`
   deliberately, then `cargo audit` (RustSec) before committing.
-- Release profile is deliberately light (`lto = "thin"`, `codegen-units = 16`);
-  the hot work is in ffmpeg/mpv subprocesses. `release-lto` is opt-in.
+- Release profile is deliberately light (`lto = false`, `codegen-units = 16`);
+  the hot work is in ffmpeg/mpv subprocesses. `release-lto` is opt-in, and
+  links use `lld` (see `.cargo/config.toml`) for fast rebuilds.
 - ffmpeg/ffprobe/mpv are the real attack surface: no shell, `--` before
   positional paths, isolated mpv config and IPC socket.
 
