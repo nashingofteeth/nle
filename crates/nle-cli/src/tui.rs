@@ -1309,12 +1309,17 @@ fn leave_pool_command(app: &mut App, _player: &dyn Mpv) {
 }
 
 fn close_pool(app: &mut App, _player: &dyn Mpv) {
-    let resume = pool_resume(app);
+    close_pool_at(app, pool_resume(app));
+}
+
+/// Close the pool and put the playhead at `at`: the pre-pool position on a
+/// manual close, or the frame an insert landed on.
+fn close_pool_at(app: &mut App, at: f64) {
     if let Some(sel) = pool_sel(app) {
         app.last_pool_sel = sel; // capture on exit so reopening returns here
     }
     app.mode = Mode::Normal;
-    app.playhead = resume;
+    app.playhead = at.clamp(0.0, app.last_frame());
     // The monitor was on the pooled asset; rebuild the timeline EDL (from the
     // cache unless something changed) and reload when it is ready.
     start_preview(app);
@@ -1436,7 +1441,7 @@ fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
         speed: Seconds::from_integer(1),
         effects: Vec::new(),
     });
-    run_action(
+    let inserted = run_action(
         app,
         player,
         &Action::Paste {
@@ -1446,6 +1451,12 @@ fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
             segment: Some(snapshot),
         },
     );
+    if inserted {
+        // Inserting is the pool's job: leave it so the monitor returns to the
+        // timeline, keeping the frame the insert landed on.
+        let landed = app.playhead;
+        close_pool_at(app, landed);
+    }
 }
 
 /// Remove the selected asset from the pool, undoably (the guard refuses if
@@ -7759,6 +7770,34 @@ mod tests {
             frame_to_secs(app.project.fps.as_ref(), outcome.playhead),
             0.0
         );
+    }
+
+    // Inserting from the pool leaves it: the monitor goes back to the timeline
+    // instead of staying on the raw asset.
+    #[test]
+    fn pool_insert_exits_pool_mode() {
+        let mut app = App::new(asset_project(), temp_project_path("pool-insert-exit"));
+        app.playhead = 0.0;
+        open_pool_mode(&mut app, 0);
+        let fake = FakeMpv::new();
+        let end_before = app.project.timeline.end();
+
+        insert_from_pool(&mut app, &fake);
+
+        assert!(!is_pool(&app), "inserting returns to the timeline");
+        assert!(app.project.timeline.end() > end_before, "the clip landed");
+        assert_eq!(app.message, "timeline");
+    }
+
+    // An explicit landing position wins over the pool's remembered resume.
+    #[test]
+    fn close_pool_at_keeps_the_landing_position() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 5.0;
+        open_pool_mode(&mut app, 0);
+        close_pool_at(&mut app, 5.0);
+        assert!(!is_pool(&app));
+        assert!((app.playhead - 5.0).abs() < 1e-9);
     }
 
     // Clip-edge dividers on the track row land on the same columns as the

@@ -113,8 +113,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   misc:      m media pool — takes over the info pane: asset list
 #              (j/k, { }) + probe metadata; the monitor previews the file
 #              (space play, h/l ±1s, f/F frame, gg/0 start, G/$ end);
-#              enter inserts it, i imports a file, d removes, u undoes ·
-#              R reload project · : cmd (:help lists them) · :q quit · q quit
+#              enter inserts and returns to the timeline · i imports ·
+#              d removes · u undoes · R reload · : cmd (:help) · :q · q
 # Tip: everything is undoable; the project file is written after every edit.
 # The bottom "keys" panel always shows the current mode's cheat-sheet and the
 # latest notice.
