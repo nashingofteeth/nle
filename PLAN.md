@@ -5,6 +5,12 @@ import, clip speed, edit-detect, CLI/TUI action parity, and M5 (transitions,
 effects, proxy cache). **M6 next.** This file is the design/roadmap; the
 README is the user-facing how-to. Keep it in sync as milestones land.
 
+**Post-M5 additions:** transparent crop/scale masking and the offset effect
+(lower tracks show through), one effect per kind with in-place editing, a
+scale aspect lock, percent speed input (the model keeps the rational rate),
+and transition retiming (`--frames/--dur/--percent`, the `x`/`X` frames form,
+`r` for a rate); LUTs are CLI-only in the effects panel for now.
+
 ## Vision
 
 A terminal-native video editor: **TUI dashboard + mpv monitor window, vim

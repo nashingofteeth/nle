@@ -859,7 +859,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         // so the next save can't clobber it. Modes hold indices into the
         // current state, so the reload waits for Normal.
         if watch_foreign(&mut app) {
-            match reload_project(&mut app, &player) {
+            match reload_project(&mut app, &player, true) {
                 Ok(()) => app.set_message("adopted changes from the shell"),
                 Err(e) => app.set_message(&format!("reload failed: {e}")),
             }
@@ -867,7 +867,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
 
         if app.reload_requested {
             app.reload_requested = false;
-            match reload_project(&mut app, &player) {
+            match reload_project(&mut app, &player, false) {
                 Ok(()) => app.set_message("timeline reloaded"),
                 Err(e) => app.set_message(&format!("reload failed: {e}")),
             }
@@ -989,9 +989,10 @@ fn watch_foreign(app: &mut App) -> bool {
 }
 
 /// Reload the project (and its undo history) from disk and rebuild the
-/// preview at the current playhead. Lets you edit `nle.json` in another
-/// window (e.g. vim) and watch it here.
-fn reload_project(app: &mut App, _player: &dyn Mpv) -> anyhow::Result<()> {
+/// preview. A **user** reload (`R`) keeps the live playhead; adopting a
+/// foreign write (`nle seek`, an edit in another window) also adopts that
+/// file's playhead.
+fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
     app.project = project;
     app.active_track = app
@@ -1000,8 +1001,14 @@ fn reload_project(app: &mut App, _player: &dyn Mpv) -> anyhow::Result<()> {
     app.history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
     // The register is shared too: a shell may have yanked since we read it.
     app.register = load_register(&app.path);
-    // Adopt the file's playhead: a shell may have moved it (`nle seek`).
-    app.playhead = secs(&app.project.playhead);
+    if adopt_playhead {
+        // A shell may have moved it (`nle seek`); adopt that cursor.
+        app.playhead = secs(&app.project.playhead);
+    } else {
+        // A manual reload keeps the cursor; just clamp it into the new
+        // timeline if an edit shortened it.
+        app.playhead = app.playhead.clamp(0.0, app.last_frame().max(0.0));
+    }
     // Everything on disk is ours again.
     app.note_seen();
     app.reload_pending = false;
@@ -1867,7 +1874,7 @@ fn poll_job(app: &mut App, player: &dyn Mpv) {
     match res {
         Ok(Ok(msg)) => {
             app.job = None;
-            if reload && let Err(e) = reload_project(app, player) {
+            if reload && let Err(e) = reload_project(app, player, true) {
                 app.set_message(&format!("reload failed: {e}"));
             }
             app.set_message(&msg);
@@ -2254,8 +2261,7 @@ fn close_fx(app: &mut App) {
 
 /// The "add" form for an effect kind. Every input starts blank; the neutral
 /// value is shown as "was N" beside it and is used if the field is left blank.
-/// Each numeric field's first letter is its jump key; the path field takes
-/// every letter as text.
+/// Each numeric field's first letter is its jump key.
 fn form_for(kind: &'static str) -> FxForm {
     let field = |label, previous: Option<&str>, kind, key: Option<char>| FxField {
         label,
@@ -2287,7 +2293,6 @@ fn form_for(kind: &'static str) -> FxForm {
             field("contrast", Some("1"), FieldKind::Float, Some('c')),
             field("saturation", Some("1"), FieldKind::Float, Some('s')),
         ],
-        "lut" => vec![field("path", None, FieldKind::Path, None)],
         _ => Vec::new(),
     };
     FxForm {
@@ -2387,6 +2392,10 @@ fn edit_effect_at(app: &mut App, clip: u32, index: usize) {
         app.set_message("no effect to edit");
         return;
     };
+    if matches!(effect, Effect::Lut { .. }) {
+        app.set_message("LUT effects are CLI-only for now — use :effect lut");
+        return;
+    }
     let kind = effect.kind();
     let mut form = form_for_effect(&effect, index);
     if kind == "scale" {
@@ -2567,16 +2576,6 @@ fn form_effect(form: &FxForm) -> Result<Effect, String> {
             saturation: opt_float(2, "saturation")?,
             ..Default::default()
         },
-        "lut" => {
-            let path = value(0);
-            if path.is_empty() {
-                return Err("lut needs a path".to_string());
-            }
-            EffectArgs {
-                path: Some(path.to_string()),
-                ..Default::default()
-            }
-        }
         other => return Err(format!("unknown effect {other:?}")),
     };
     effect_from_args(form.kind, args).map_err(|e| e.to_string())
@@ -2737,7 +2736,6 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('c') => open_effect_form(app, "crop"),
         KeyCode::Char('s') => open_effect_form(app, "scale"),
         KeyCode::Char('e') => open_effect_form(app, "eq"),
-        KeyCode::Char('l') => open_effect_form(app, "lut"),
         KeyCode::Char('o') => open_effect_form(app, "offset"),
         // `xx`: the first `x` opened the panel; the second applies the
         // transition and exits the panel (a failure keeps it open to retry).
@@ -3027,11 +3025,12 @@ fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => do_redo(app, player),
         // ---- navigation/transport (unchanged) ----
         KeyCode::Char('G') | KeyCode::Char('$') => app.seek_to(player, app.total()),
-        KeyCode::Char('r') => app.reload_requested = true,
+        KeyCode::Char('R') => app.reload_requested = true,
         KeyCode::Char('q') => app.quit = true,
-        // `R` opens the speed prompt for the clip under the playhead; the
-        // command line is pre-filled so it reads as `:speed `.
-        KeyCode::Char('R') => {
+        // `r` opens the speed prompt for the clip under the playhead; the
+        // command line is pre-filled so it reads as `:speed ` (or the
+        // transition rate form when the playhead is inside a blend).
+        KeyCode::Char('r') => {
             app.mode = Mode::Command(if transition_target(app).is_some() {
                 "transition --percent ".to_string()
             } else {
@@ -3562,7 +3561,7 @@ fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
         Ok(false) => {
             // A shell wrote the project first: adopt theirs rather than
             // clobber it, and say so — this edit was not saved.
-            if let Err(e) = reload_project(app, player) {
+            if let Err(e) = reload_project(app, player, true) {
                 app.set_message(&format!("reload failed: {e}"));
                 return;
             }
@@ -4437,16 +4436,16 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         return vec![
             "effects — rows apply in order at export; the monitor re-renders",
             "j/k select · 1-9 edit · d drop · D clear all · u undo · Ctrl-r redo",
-            "c/s/e/l/o add/edit crop/scale/eq/lut/offset · x transition · q close",
+            "c/s/e/o add/edit crop/scale/eq/offset · x transition · q close",
         ];
     }
     vec![
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
         "motion     j/k cuts · w/b clips · n/N gaps · < > (, .) clip start/end",
         "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
-        "           R speed · X transition · e/E extend · [ ] side · m pool",
-        "extend     e/E enter · [ ] side · m pool · u undo · r reload · : cmd · q quit",
-        "effects    x panel · c/s/e/l add · d/D drop/clear (in the panel)",
+        "           r speed · X transition · e/E extend · [ ] side · m pool",
+        "extend     e/E enter · [ ] side · m pool · u undo · Esc cancel · : cmd · q quit",
+        "effects    x panel · c/s/e/o add · d/D drop/clear (in the panel)",
         "tracks     t/T cycle · <N>t jump to N · :track add video|audio",
     ]
 }
@@ -5093,7 +5092,7 @@ fn render_fx(f: &mut Frame, area: Rect, app: &App) {
     }
     if clip.effects.is_empty() {
         f.render_widget(
-            Paragraph::new("(no effects)   c crop · s scale · e eq · l lut · o offset")
+            Paragraph::new("(no effects)   c crop · s scale · e eq · o offset")
                 .style(Style::default().fg(Color::DarkGray)),
             inner,
         );
@@ -5140,7 +5139,6 @@ fn form_hint(kind: &str) -> &'static str {
              ±100 is fully off-screen"
         }
         "eq" => "neutral values: brightness 0 · contrast 1 · saturation 1",
-        "lut" => "path to a .cube 3D LUT file",
         _ => "",
     }
 }
@@ -6297,10 +6295,51 @@ mod tests {
 
         assert!(app.external_change());
         assert!(watch_foreign(&mut app), "Normal mode adopts it right away");
-        reload_project(&mut app, &FakeMpv::new()).unwrap();
+        reload_project(&mut app, &FakeMpv::new(), true).unwrap();
         assert_eq!(app.playhead, 3.0, "the shell's cursor");
         assert_eq!(app.register, Some(reg), "and its yank");
         assert!(!app.external_change(), "the watch re-baselines");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    // `R` is a manual reload: it must keep the live cursor, while a foreign
+    // write still adopts the shell's saved playhead.
+    #[test]
+    fn a_user_reload_keeps_the_live_playhead() {
+        let path = temp_project_path("reload-keep");
+        watchable_project().save(&path).unwrap();
+        let mut app = App::new(watchable_project(), path.clone());
+        app.playhead = 2.0;
+
+        reload_project(&mut app, &FakeMpv::new(), false).unwrap();
+        assert_eq!(app.playhead, 2.0, "the manual reload stays put");
+
+        // A shell moved the stored playhead; adopting it (foreign reload)
+        // still follows the file.
+        let mut p = Project::load(&path).unwrap();
+        p.set_playhead(1.0);
+        p.save(&path).unwrap();
+        reload_project(&mut app, &FakeMpv::new(), true).unwrap();
+        assert_eq!(app.playhead, 1.0, "a foreign reload adopts the cursor");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
+        let _ = std::fs::remove_file(nle_core::register_path(&path));
+    }
+
+    // A manual reload clamps the live cursor into a shorter timeline.
+    #[test]
+    fn a_user_reload_clamps_a_stale_playhead() {
+        let path = temp_project_path("reload-clamp");
+        watchable_project().save(&path).unwrap();
+        let mut app = App::new(watchable_project(), path.clone());
+        app.playhead = 100.0; // past the 7 s fixture
+        reload_project(&mut app, &FakeMpv::new(), false).unwrap();
+        assert!(app.playhead <= app.last_frame());
+        assert!(app.playhead >= 0.0);
+
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(nle_core::History::sidecar_path(&path));
         let _ = std::fs::remove_file(nle_core::register_path(&path));
@@ -8568,7 +8607,19 @@ mod tests {
     fn speed_key_opens_the_rate_prompt() {
         let mut app = App::new(asset_project(), temp_project_path("speed-key"));
         let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('r'));
+        assert!(matches!(app.mode, Mode::Command(ref s) if s == "speed "));
+    }
+
+    // The pair was flipped: `r` speeds, `R` reloads.
+    #[test]
+    fn reload_is_uppercase_r() {
+        let mut app = App::new(asset_project(), temp_project_path("reload-key"));
+        let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('R'));
+        assert!(app.reload_requested, "R asks the loop for a reload");
+        assert!(matches!(app.mode, Mode::Normal), "{:?}", app.mode);
+        handle_key(&mut app, &fake, key('r'));
         assert!(matches!(app.mode, Mode::Command(ref s) if s == "speed "));
     }
 
@@ -8578,7 +8629,7 @@ mod tests {
         app.loaded = true;
         app.playhead = 0.5; // inside clip #1 [0..3)
         let fake = FakeMpv::new();
-        handle_key(&mut app, &fake, key('R')); // -> :speed
+        handle_key(&mut app, &fake, key('r')); // -> :speed
         for c in "50".chars() {
             handle_key(&mut app, &fake, key(c));
         }
@@ -9512,22 +9563,37 @@ mod tests {
         assert!(matches!(app.mode, Mode::Normal));
     }
 
-    // A path field must receive every letter as text (no mnemonic hijack).
+    // LUTs are CLI-only for now: `l` adds nothing and a listed LUT can't be
+    // opened in the panel's form (removal still works).
     #[test]
-    fn a_lut_path_still_takes_letters() {
+    fn lut_is_cli_only_in_the_panel_for_now() {
         let fake = FakeMpv::new();
         let mut app = App::new(asset_project(), temp_project_path("fx-lut"));
         app.loaded = true;
         app.playhead = 1.0;
+        set_effects(
+            &mut app,
+            1,
+            vec![Effect::Lut {
+                path: "/luts/a.cube".into(),
+            }],
+        );
         handle_key(&mut app, &fake, key('x'));
         handle_key(&mut app, &fake, key('l'));
-        for c in "a/b.cube".chars() {
-            handle_key(&mut app, &fake, key(c));
-        }
-        assert_eq!(
-            fx_state(&app).unwrap().form.as_ref().unwrap().fields[0].value,
-            "a/b.cube"
+        assert!(
+            fx_state(&app).unwrap().form.is_none(),
+            "l no longer opens a LUT form"
         );
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(
+            fx_state(&app).unwrap().form.is_none(),
+            "Enter leaves the LUT row alone"
+        );
+        assert!(app.message.contains("CLI-only"), "{}", app.message);
     }
 
     // The edit form shows the applied value beside the blank input.
@@ -9723,16 +9789,13 @@ mod tests {
             ("scale", "100 keeps the size"),
             ("offset", "0 keeps the position"),
             ("eq", "contrast 1"),
-            ("lut", ".cube"),
         ] {
             let text = render(kind);
             assert!(text.contains(hint), "{kind}: {hint:?}\n{text}");
             // Every input starts blank; numeric forms show their neutral value
             // beside it, even when adding (not only when editing).
             assert!(text.contains("[▏]"), "{kind}: the input is blank\n{text}");
-            if kind != "lut" {
-                assert!(text.contains("was "), "{kind}: no previous value\n{text}");
-            }
+            assert!(text.contains("was "), "{kind}: no previous value\n{text}");
             if kind == "scale" {
                 assert!(text.contains("aspect lock"), "{kind}: no lock row\n{text}");
                 assert!(text.contains("[x]"), "{kind}: starts unlocked\n{text}");
@@ -9965,7 +10028,7 @@ mod tests {
         let fake = FakeMpv::new();
         handle_key(&mut app, &fake, key('X'));
 
-        handle_key(&mut app, &fake, key('R'));
+        handle_key(&mut app, &fake, key('r'));
         assert!(
             matches!(app.mode, Mode::Command(ref s) if s == "transition --percent "),
             "{:?}",

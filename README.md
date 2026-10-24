@@ -62,8 +62,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   fx:        x effects panel for the clip under the playhead — j/k select ·
 #              1-9 edit that row directly · enter edit the selected effect (a
 #              blank field keeps the applied value, shown as "was N") · d drop ·
-#              D clear · c/s/e/l/o add
-#              crop/scale/eq/lut/offset; a kind already on the clip opens for
+#              D clear · c/s/e/o add
+#              crop/scale/eq/offset (LUTs are `:effect lut` only for now); a
+#              kind already on the clip opens for
 #              editing instead of stacking (one effect per kind) · the form's
 #              fields: a letter jumps to its field, tab/↑↓ move, enter applies
 #              and closes, ctrl-u clears, esc cancels; in scale, tab to the
@@ -75,7 +76,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              X cross-dissolve at the boundary (count = frames); `xx` also
 #              works — the first x opens the panel, the second applies it and
 #              closes · on an existing transition, x or X opens its length
-#              form (frames; a count pre-fills it) and R opens
+#              form (frames; a count pre-fills it) and r opens
 #              `:transition --percent` — 50 = twice as long, 200 = half ·
 #              :transition [dissolve|fade] [--dur T|--frames N|--percent P] ·
 #              on an existing blend --frames/--dur/--percent retime it ·
@@ -91,7 +92,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              action has both spellings:
 #              :trim-in|out [--ripple] · :split · :gap [--frames N|--dur T] ·
 #              :delete|--yank [--at T|--clip N|--seg N] · :paste [--ripple] ·
-#              :extend --edge in|out --to T [--ripple] · :speed PERCENT (or R; 100 = normal) ·
+#              :extend --edge in|out --to T [--ripple] · :speed PERCENT (or r; 100 = normal) ·
 #              :transition · :effect [rm|clear] · :undo · :redo · :purge · :track … ·
 #              :media ls|rm · :cache prune [--days N] [--dry-run] · :import ·
 #              :add · :show · :seek T · :export -o FILE · :detect FILE ·
@@ -113,7 +114,7 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              (j/k, { }) + probe metadata; the monitor previews the file
 #              (space play, h/l ±1s, f/F frame, gg/0 start, G/$ end);
 #              enter inserts it, i imports a file, d removes, u undoes ·
-#              r reload project · : cmd (:help lists them) · :q quit · q quit
+#              R reload project · : cmd (:help lists them) · :q quit · q quit
 # Tip: everything is undoable; the project file is written after every edit.
 # The bottom "keys" panel always shows the current mode's cheat-sheet and the
 # latest notice.

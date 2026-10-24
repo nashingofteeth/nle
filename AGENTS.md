@@ -132,13 +132,17 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   speed. Cross the boundary only via `source_span` (edits) or `Clip::source_at`
   / `timeline_offset_of` (everything else) — the playhead anchor once missed
   the factor. A speed change always ripples, and the monitor proxies any
-  non-1× clip because an EDL entry can't retime.
+  non-1× clip because an EDL entry can't retime. The CLI/TUI take a
+  **percentage** (100 = normal); convert at that boundary only — the model and
+  `nle show` keep the rate (`@2×`).
 - **Transitions.** A blend is part of both neighbours, so trimming inside it
   moves its edges and trimming a neighbour's visible span moves its near edge
   (grow for `i`/`o`, ripple for `I`/`O`) — never a gap. A blend is opaque,
   video-only, and its sides stay contiguous at the neighbour's rate. Extend
-  hops over it and a fade's black side can't be trimmed through. Full model
-  and pitfalls: `docs/pitfalls/transitions.md`.
+  hops over it and a fade's black side can't be trimmed through. A **retime**
+  (`transition --frames/--dur/--percent`, the `x`/`X` frames form) scales each
+  side's span, never its rate; clip↔clip changes the timeline by `-delta`, a
+  black side leaves it. Full model and pitfalls: `docs/pitfalls/transitions.md`.
 - **A trim at an edge deletes the segment that edge would consume**
   (`trim_consume_target_on`): `i`/`I` the one **ending** at the playhead,
   `o`/`O` the one **starting** there — at a shared cut those are the two
@@ -213,6 +217,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - **The timeline panel sizes to show every track** (`panel_heights`): one row
   per track + marker row + borders; keys/message drop first on a short
   terminal. Keep hint lines ≲76 columns.
+- **The effects panel adds crop/scale/eq/offset only.** LUT is CLI-only for
+  now: `l` does nothing, and Enter on a LUT row refuses with a `:effect lut`
+  hint (the row still shows; `d`/`D` still remove it).
 
 ## Playhead
 
