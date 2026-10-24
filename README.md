@@ -22,6 +22,9 @@ current status: `PLAN.md`.
 
 ## Usage
 
+Build needs Rust (edition 2024) plus `clang` and `lld`: the release profile
+links with lld (see `.cargo/config.toml`).
+
 ```sh
 cargo build --release
 N=./target/release/nle        # or just `nle` if cargo-installed
