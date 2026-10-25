@@ -4320,10 +4320,10 @@ fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 fn render(f: &mut Frame, app: &App) {
     // Size the timeline to show every track, then give what's left to the
     // info panel and the bottom panels. The bottom panels are dropped before
-    // the timeline is allowed to hide a track. While the pool previews a raw
-    // asset the panel shows that asset's one-clip strip instead, so one row +
-    // marker is enough and the freed rows go to the pool list below.
-    let track_count = if is_pool(app) {
+    // the timeline is allowed to hide a track. While the pool preview is
+    // *playing* the panel shows that asset's one-clip strip instead, so one
+    // row + marker is enough and the freed rows go to the pool list below.
+    let track_count = if pool_strip_active(app) {
         1
     } else {
         app.project.timeline.tracks.len()
@@ -4774,9 +4774,12 @@ fn pool_set_track(app: &mut App, idx: usize) {
 }
 
 fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
-    // While the pool previews a raw file the monitor is off the project, so
-    // the timeline row is temporarily the selected asset's own strip.
-    if let Mode::Pool(st) = &app.mode {
+    // While the pool preview is playing the monitor is off the project, so
+    // the timeline row temporarily becomes the selected asset's own strip.
+    // Paused, fall through to the project: the insert point stays visible.
+    if pool_strip_active(app)
+        && let Mode::Pool(st) = &app.mode
+    {
         render_pool_strip(f, area, app, st);
         return;
     }
@@ -4856,6 +4859,13 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
         height: 1,
     };
     draw_marker_row(f, bar, app, total, in_extend);
+}
+
+/// True while the timeline panel should show the pooled asset instead of the
+/// project: the pool is open **and** its preview is playing. Paused, the
+/// project is back so the insert point (and the `enter` target) is visible.
+fn pool_strip_active(app: &App) -> bool {
+    is_pool(app) && !app.paused
 }
 
 /// The pool previews a raw file, so the monitor is not on the project
@@ -6230,7 +6240,7 @@ mod tests {
     // While the pool previews an asset, the timeline panel shows that asset's
     // own strip and marker (the preview clock), not the project's clips.
     #[test]
-    fn pool_strip_replaces_the_timeline_with_the_selected_asset() {
+    fn pool_strip_replaces_the_timeline_only_while_playing() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut p = asset_project();
@@ -6239,31 +6249,47 @@ mod tests {
         let mut app = App::new(p, PathBuf::from("t.json"));
         open_pool_mode(&mut app, 1); // index 1, id 2 (not the first asset)
         set_pool_pos(&mut app, 5.0); // halfway through the 10 s asset
-        let Mode::Pool(st) = &app.mode else {
-            panic!("pool mode");
+
+        let draw = |app: &App| {
+            let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
+            term.draw(|f| render_timeline(f, f.area(), app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            let text = (0..6u16)
+                .map(|y| (0..40u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n");
+            (text, buf)
         };
-        let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
-        term.draw(|f| render_pool_strip(f, f.area(), &app, st))
-            .unwrap();
-        let buf = term.backend().buffer().clone();
-        let text: String = (0..6u16)
-            .map(|y| (0..40u16).map(|x| buf[(x, y)].symbol()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
+
+        // Paused: the project timeline, so the insert point stays visible.
+        app.paused = true;
+        let (paused, _) = draw(&app);
         assert!(
-            text.contains("pooled.mp4"),
-            "strip names the selected asset:\n{text}"
+            paused.contains("red.mp4"),
+            "paused shows the project:\n{paused}"
         );
         assert!(
-            !text.contains("red.mp4"),
-            "the project's clips are temporarily gone:\n{text}"
+            !paused.contains("pooled.mp4"),
+            "paused hides the strip:\n{paused}"
+        );
+
+        // Playing: the pooled asset replaces it, marker on the preview clock.
+        app.paused = false;
+        let (playing, buf) = draw(&app);
+        assert!(
+            playing.contains("pooled.mp4"),
+            "playing shows the asset:\n{playing}"
+        );
+        assert!(
+            !playing.contains("red.mp4"),
+            "the project is replaced:\n{playing}"
         );
         // Inner width 38 (40 − borders); 5/10 of it → column 1 + 19, row 2.
         let want = 1 + marker_col(5.0, 10.0, 38) as usize;
         assert_eq!(
             buf[(want as u16, 2u16)].symbol(),
             "▏",
-            "marker follows the preview clock:\n{text}"
+            "marker follows the preview clock:\n{playing}"
         );
     }
 
