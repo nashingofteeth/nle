@@ -463,6 +463,11 @@ pub struct App {
     /// timeline back on the monitor, or the monitor keeps playing the pooled
     /// file while the UI shows the timeline.
     command_from_pool: bool,
+    /// The monitor currently holds the pool's raw file (set by
+    /// `load_pool_preview`, cleared when the timeline EDL is loaded). While an
+    /// async EDL reload is in flight the mode is already Normal, so this keeps
+    /// `sync` from mapping the pooled clock onto the timeline playhead.
+    pool_on_monitor: bool,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -518,6 +523,7 @@ impl App {
             quit: false,
             message: String::new(),
             command_from_pool: false,
+            pool_on_monitor: false,
             paused: true,
             loaded: false,
             dead: false,
@@ -606,7 +612,10 @@ impl App {
                 // The monitor is a raw pooled file: position is asset
                 // seconds, no EDL translation.
                 set_pool_pos(self, t);
-            } else {
+            } else if !self.pool_on_monitor {
+                // `pool_on_monitor` covers the hand-off window: mode is
+                // already Normal, but the asynchronous EDL reload has not
+                // landed yet and mpv is still reporting the pooled file.
                 let t = match &self.mode {
                     Mode::Extend(st) => t + st.preview_off,
                     _ => t,
@@ -793,13 +802,14 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     let mut out = format!("project: {}\n", path.display());
     out.push_str(&crate::show_report(&app.project));
     out.push_str(&format!(
-        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {}\nmessage: {:?}\n",
+        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {}\nmessage: {:?}\n",
         app.mode,
         track_label(&app.project, app.active()),
         app.playhead,
         frame_of(app.project.fps.as_ref(), app.playhead),
         app.paused,
         app.eof,
+        app.pool_on_monitor,
         app.message,
     ));
     out.push_str(&format!("=== grid {w}x{h} ===\n"));
@@ -1280,6 +1290,7 @@ fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
         return;
     };
     set_pool_pos(app, 0.0);
+    app.pool_on_monitor = true;
     player.load(&path.display().to_string(), Some(0.0));
 }
 
@@ -1958,7 +1969,12 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
                     }
                 } else if !pool {
                     match result {
-                        Ok(url) => player.load(&url, Some(app.playhead)),
+                        Ok(url) => {
+                            // The timeline is on the monitor again, so its
+                            // clock may drive the playhead once more.
+                            app.pool_on_monitor = false;
+                            player.load(&url, Some(app.playhead));
+                        }
                         Err(e) => preview_failed(app, &e.to_string()),
                     }
                 }
@@ -3736,6 +3752,9 @@ fn apply_extend_plan(app: &mut App, player: &dyn Mpv, plan: ExtendPlan, ripple: 
         }
     };
     player.load(&url, Some((app.playhead - origin).max(0.0)));
+    // The material preview is not the pooled file; its clock maps back
+    // through `preview_off` (see `sync`).
+    app.pool_on_monitor = false;
     let flag = if ripple { " · RIPPLE" } else { "" };
     app.set_message(&format!(
         "extend {}{flag} — navigate, e to commit",
@@ -4031,7 +4050,10 @@ fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
 /// `pos`.
 fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
     match preview::build_composite_edl(&app.project) {
-        Ok(edl) => player.load(&edl, Some(pos.max(0.0))),
+        Ok(edl) => {
+            app.pool_on_monitor = false;
+            player.load(&edl, Some(pos.max(0.0)));
+        }
         Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
     }
     app.playhead = pos;
@@ -7824,6 +7846,41 @@ mod tests {
         close_pool_at(&mut app, 5.0);
         assert!(!is_pool(&app));
         assert!((app.playhead - 5.0).abs() < 1e-9);
+    }
+
+    // Leaving the pool is asynchronous: the mode flips to Normal immediately,
+    // but mpv is still reporting the pooled file until the EDL reload lands.
+    // That clock must not move the timeline playhead.
+    #[test]
+    fn sync_ignores_the_pooled_clock_after_leaving_the_pool() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        open_pool_mode(&mut app, 0);
+        load_pool_preview(&mut app, &FakeMpv::new());
+        assert!(app.pool_on_monitor);
+
+        close_pool_at(&mut app, 6.0);
+        assert!(!is_pool(&app));
+        assert!(
+            app.pool_on_monitor,
+            "still on the raw file until the EDL loads"
+        );
+
+        let raw = PlaybackState {
+            time_pos: Some(2.5),
+            paused: false,
+            file_loaded: true,
+            ..Default::default()
+        };
+        app.sync(&raw);
+        assert_eq!(
+            app.playhead, 6.0,
+            "the pooled clock must not move the playhead"
+        );
+
+        // Once the timeline EDL is on the monitor, its clock drives again.
+        app.pool_on_monitor = false;
+        app.sync(&raw);
+        assert!((app.playhead - 2.5).abs() < 1e-9);
     }
 
     // Clip-edge dividers on the track row land on the same columns as the
