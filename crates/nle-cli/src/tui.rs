@@ -631,6 +631,19 @@ impl App {
                 };
             }
         }
+        // Entering pool EOF is the hand-back to the timeline (the strip is a
+        // playback view). The pooled file stops on its last frame, one notch
+        // short of the next timeline frame, so step the playhead forward once
+        // and keep the remembered resume in step so closing does not undo it.
+        if is_pool(self)
+            && st.eof
+            && !self.eof
+            && let Some(fps) = self.project.fps.as_ref()
+        {
+            let next = (self.playhead + 1.0 / secs(fps)).min(self.last_frame());
+            self.playhead = next;
+            set_pool_resume(self, next);
+        }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
         self.dead = st.dead;
@@ -1070,6 +1083,12 @@ fn pool_resume(app: &App) -> f64 {
     }
 }
 
+fn set_pool_resume(app: &mut App, at: f64) {
+    if let Mode::Pool(p) = &mut app.mode {
+        p.resume = at;
+    }
+}
+
 fn is_fx(app: &App) -> bool {
     matches!(app.mode, Mode::Fx(_))
 }
@@ -1291,6 +1310,7 @@ fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
     };
     set_pool_pos(app, 0.0);
     app.pool_on_monitor = true;
+    app.eof = false; // a freshly loaded file is not at EOF
     player.load(&path.display().to_string(), Some(0.0));
 }
 
@@ -7881,6 +7901,31 @@ mod tests {
         app.pool_on_monitor = false;
         app.sync(&raw);
         assert!((app.playhead - 2.5).abs() < 1e-9);
+    }
+
+    // The pool strip is a playback view: at EOF it hands back to the timeline
+    // one notch short of the next frame. Step once (and only once).
+    #[test]
+    fn pool_eof_steps_the_timeline_playhead_forward_one_frame() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json")); // 30 fps
+        open_pool_mode(&mut app, 0);
+        app.playhead = 3.0 - 1.0 / 30.0; // one frame before the cut at 3.0
+        let at = app.playhead;
+        set_pool_resume(&mut app, at);
+        let eof = PlaybackState {
+            paused: true,
+            file_loaded: true,
+            eof: true,
+            ..Default::default()
+        };
+
+        app.sync(&eof);
+        assert!((app.playhead - 3.0).abs() < 1e-9, "{}", app.playhead);
+        assert!((pool_resume(&app) - 3.0).abs() < 1e-9);
+
+        // A second EOF tick is not a new hand-back.
+        app.sync(&eof);
+        assert!((app.playhead - 3.0).abs() < 1e-9, "{}", app.playhead);
     }
 
     // Clip-edge dividers on the track row land on the same columns as the
