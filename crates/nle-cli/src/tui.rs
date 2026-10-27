@@ -1177,6 +1177,13 @@ fn fx_clip(app: &App) -> Option<&Clip> {
 }
 
 pub fn handle_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
+    // Ctrl-C quits even in raw mode (no SIGINT is generated). One guard for
+    // every mode: the panels that grew later (command, pool, transition, fx)
+    // each missed their own copy and the key went dead there.
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.quit = true;
+        return;
+    }
     if matches!(app.mode, Mode::Command(_)) {
         let buf = match std::mem::replace(&mut app.mode, Mode::Normal) {
             Mode::Command(buf) => buf,
@@ -2887,12 +2894,6 @@ fn fx_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     let code = key.code;
 
-    // Ctrl-C quits even in raw mode (no SIGINT is generated).
-    if code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.quit = true;
-        return;
-    }
-
     // Vim counts: digits build a multiplier; bare `0` jumps to the start.
     if let KeyCode::Char(c @ '0'..='9') = code {
         if c == '0' && app.count.is_none() {
@@ -4338,11 +4339,6 @@ fn extend_inert(app: &mut App) {
 
 fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     let code = key.code;
-
-    if code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        app.quit = true;
-        return;
-    }
 
     // Counts still build for nav keys; bare `0` seeks (clamped below).
     if let KeyCode::Char(c @ '0'..='9') = code {
@@ -6460,6 +6456,81 @@ mod tests {
         // if this changes, the ceiling above must follow.
         let (_, keys_h, _) = panel_heights(3, 24);
         assert_eq!(keys_h, 8, "six inner rows for the hint sheet");
+    }
+
+    // Ctrl-C quits from whichever panel owns the keys — raw mode means no
+    // SIGINT, and the panels added after normal mode each dropped the guard.
+    #[test]
+    fn ctrl_c_quits_from_every_panel() {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let modes: Vec<(&str, App)> = vec![
+            ("normal", App::new(asset_project(), PathBuf::from("t.json"))),
+            ("command", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Command("import ".into());
+                a
+            }),
+            ("extend", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Extend(ExtendState {
+                    track: 0,
+                    armed: Armed::Clip { id: 1, head: false },
+                    edge_pos: 3.0,
+                    ripple: false,
+                    lo: 0.0,
+                    hi: Some(9.0),
+                    mat: None,
+                    preview_off: -1.0,
+                });
+                a
+            }),
+            ("pool", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                open_pool_mode(&mut a, 0);
+                a
+            }),
+            ("transition", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Transition(TransitionForm {
+                    id: 1,
+                    start: 2.0,
+                    kind: TransitionKind::Dissolve,
+                    frames: String::new(),
+                    current: 30,
+                });
+                a
+            }),
+            ("fx list", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Fx(FxState {
+                    clip: 1,
+                    sel: 0,
+                    form: None,
+                });
+                a
+            }),
+            ("fx form", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                let effect = Effect::Crop {
+                    left: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                };
+                a.mode = Mode::Fx(FxState {
+                    clip: 1,
+                    sel: 0,
+                    form: Some(form_for_effect(&effect, 0)),
+                });
+                a
+            }),
+        ];
+        for (name, mut app) in modes {
+            let fake = FakeMpv::new();
+            handle_key(&mut app, &fake, ctrl_c);
+            assert!(app.quit, "[{name}] ctrl-c must quit");
+        }
     }
 
     // While the pool is open the timeline panel is the asset's own strip and
