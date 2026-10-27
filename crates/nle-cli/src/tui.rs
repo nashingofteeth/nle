@@ -725,6 +725,14 @@ impl App {
             let target = t.clamp(0.0, self.last_frame());
             // Model position is authoritative when paused: set it now.
             self.playhead = target;
+            // A seek during a monitor hand-off is the *new* landing: mpv
+            // applies it to the file being loaded, so its first report is
+            // this position and the wait ends there. Leaving the old landing
+            // would have `sync` wait for a position the user already left —
+            // and snap the playhead back to it if a report happened to pass.
+            if self.pool_on_monitor && !is_pool(self) {
+                self.pool_handoff = Some(target);
+            }
             // Nudge a few ms INTO the target instant: EDL segment
             // boundaries sit a hair after the cut (source frame rounding),
             // so an exact seek would display the PREVIOUS segment's last
@@ -9711,6 +9719,23 @@ mod tests {
         assert!(fake.calls().is_empty(), "the material preview stays");
         assert!(app.preview.is_none(), "the build is not queued to restart");
         assert!(!app.preview_dirty);
+    }
+
+    // Seeking while the monitor is still showing the pooled file / material
+    // preview (mode Normal, EDL not landed) moves the landing: mpv applies
+    // the seek to the file being loaded, and the wait must end at the
+    // position the user chose, not the one they left.
+    #[test]
+    fn a_seek_during_a_handoff_moves_the_landing() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.loaded = true; // a file is on the monitor (the pooled one)
+        app.pool_on_monitor = true;
+        app.pool_handoff = Some(1.0);
+        app.seek_to(&fake, 2.5);
+        assert_eq!(app.pool_handoff, Some(2.5));
+        assert_eq!(app.playhead, 2.5);
+        assert!(app.pool_on_monitor, "still waiting for the EDL to land");
     }
 
     // A failed rebuild during a monitor hand-off must give the hand-off up:

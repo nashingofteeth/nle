@@ -86,6 +86,36 @@ fn delete_keeps_the_length_the_tail_is_black() {
     s.assert_dur("b.mp4", 6.0, "length preserved");
 }
 
+// Clip ids and segment indices are different spaces: the overlay clip is
+// id 4 on track 2 *index 0*, deep in the ids but first in its track. Acting
+// by `--clip` must find it by id — reading the number as a track, or as a
+// 0-/1-based segment index on the base track, hits something else (or
+// nothing) and leaves the wrong picture.
+#[test]
+fn clip_addresses_are_ids_not_indices() {
+    let s = Sandbox::new();
+    s.base(); // red 0–2 (id 1), green 2–4 (id 2), blue 4–6 (id 3)
+    s.ok(&["track", "add", "video"]);
+    s.ok(&["add", "blue.mp4", "--track", "2", "--in", "0", "--out", "2"]); // id 4, track 2 index 0
+    s.ok(&["delete", "--clip", "4"]);
+    s.export("b.mp4");
+    s.assert_px("b.mp4", 0.5, RED, "the overlay blue is gone");
+    s.assert_dur("b.mp4", 6.0, "the base track is untouched");
+
+    // The same rule for effects: id 4 edits the overlay, not base index 4.
+    s.base();
+    s.ok(&["track", "add", "video"]);
+    s.ok(&["add", "blue.mp4", "--track", "2", "--in", "0", "--out", "2"]);
+    s.ok(&["effect", "eq", "--clip", "4", "--saturation", "0"]);
+    s.export("g.mp4");
+    let grey = s.px("g.mp4", 0.5);
+    assert!(
+        grey[0].abs_diff(grey[2]) < 8 && grey[1].abs_diff(grey[2]) < 8,
+        "the overlay is desaturated, not the base: {grey:?}"
+    );
+    s.assert_px("g.mp4", 3.0, GREEN, "the base green is untouched");
+}
+
 #[test]
 fn paste_over_vs_ripple() {
     let s = Sandbox::new();
@@ -638,6 +668,27 @@ fn transitions() {
     s.ok(&["transition", "fade", "--at", "2", "--dur", "0.5"]);
     s.export("t.mp4");
     s.assert_dur("t.mp4", 5.5, "--dur and the fade kind agree");
+}
+
+#[test]
+fn a_fade_at_a_clip_gap_seam_exports_through_black() {
+    let s = Sandbox::new();
+    s.base();
+    // red 0–2, gap 2–3, green 3–5, blue 5–7: the blend's b side is black.
+    s.ok(&["gap", "--at", "2", "--frames", "30"]);
+    s.ok(&["transition", "fade", "--at", "2", "--frames", "15"]);
+    s.export("t.mp4");
+    // A black side has no material to give back, so the length holds.
+    s.assert_dur("t.mp4", 7.0, "a black-side fade leaves the length");
+    s.assert_px("t.mp4", 1.0, RED, "red before the fade");
+    s.assert_px_ne("t.mp4", 1.9, RED, "the tail fades toward the black gap");
+    s.assert_px("t.mp4", 2.5, BLACK, "the gap is still black");
+    s.assert_px("t.mp4", 4.0, GREEN, "green follows");
+    // Removing it gives red's tail back without touching the gap.
+    s.ok(&["delete", "--at", "1.5"]);
+    s.export("t2.mp4");
+    s.assert_dur("t2.mp4", 7.0, "still 7 s");
+    s.assert_px("t2.mp4", 1.9, RED, "red's whole tail is back");
 }
 
 #[test]
