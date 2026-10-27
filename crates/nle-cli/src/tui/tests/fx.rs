@@ -1,3 +1,4 @@
+use super::super::panels::fx::render_fx;
 use super::super::*;
 use super::*;
 

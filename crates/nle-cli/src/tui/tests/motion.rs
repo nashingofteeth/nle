@@ -1,5 +1,12 @@
+use super::super::motion::{
+    cut_points, fmt_timecode, marker_col, next_clip_start, next_cut, next_gap_start, on_boundary,
+    prev_clip_start, prev_cut, prev_gap_start, snap_to_cut, truncate_label,
+};
+use super::super::panels::timeline::render_timeline;
 use super::super::*;
 use super::*;
+use ratatui::layout::Rect;
+use ratatui::widgets::Block;
 
 // Clip-edge dividers on the track row land on the same columns as the
 // cut positions the marker row/playhead use (one quantizer).

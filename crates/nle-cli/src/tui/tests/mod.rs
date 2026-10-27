@@ -3,6 +3,7 @@
 //! Fixtures live here; each child file reaches them and the module under
 //! test through `use super::*` (and `super::super` for private helpers).
 
+use super::panels::status::render_status;
 use super::*;
 use nle_core::media::{RawFormat, RawProbe, RawStream};
 use nle_core::timeline::{Gap as TimelineGap, Timeline, Track, TrackKind};

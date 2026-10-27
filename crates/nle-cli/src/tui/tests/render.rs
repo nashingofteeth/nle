@@ -1,5 +1,12 @@
+use super::super::motion::marker_col;
+use super::super::panels::fx::render_transition_form;
+use super::super::panels::pool::{asset_metadata, render_pool};
+use super::super::panels::timeline::{render_timeline, track_parts, track_window};
+use super::super::panels::{hints_for, panel_heights, render};
 use super::super::*;
 use super::*;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 // A blend's boundary is a bare colour change (no bar), while a hard
 // boundary keeps the left-aligned `▏` that lines up with the marker — a
