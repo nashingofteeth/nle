@@ -631,19 +631,6 @@ impl App {
                 };
             }
         }
-        // Entering pool EOF is the hand-back to the timeline (the strip is a
-        // playback view). The pooled file stops on its last frame, one notch
-        // short of the next timeline frame, so step the playhead forward once
-        // and keep the remembered resume in step so closing does not undo it.
-        if is_pool(self)
-            && st.eof
-            && !self.eof
-            && let Some(fps) = self.project.fps.as_ref()
-        {
-            let next = (self.playhead + 1.0 / secs(fps)).min(self.last_frame());
-            self.playhead = next;
-            set_pool_resume(self, next);
-        }
         self.paused = st.paused;
         self.loaded = st.file_loaded;
         self.dead = st.dead;
@@ -1080,12 +1067,6 @@ fn pool_resume(app: &App) -> f64 {
     match &app.mode {
         Mode::Pool(p) => p.resume,
         _ => 0.0,
-    }
-}
-
-fn set_pool_resume(app: &mut App, at: f64) {
-    if let Mode::Pool(p) = &mut app.mode {
-        p.resume = at;
     }
 }
 
@@ -7799,7 +7780,7 @@ mod tests {
         app.mode = Mode::Pool(PoolState {
             sel,
             pos: 0.0,
-            resume: 0.0,
+            resume: app.playhead,
         });
     }
 
@@ -7903,15 +7884,15 @@ mod tests {
         assert!((app.playhead - 2.5).abs() < 1e-9);
     }
 
-    // The pool strip is a playback view: at EOF it hands back to the timeline
-    // one notch short of the next frame. Step once (and only once).
+    // A pool playthrough must not move the timeline cursor: the pool has its
+    // own clock, and EOF only ends the preview. The pre-pool playhead (and the
+    // pool's remembered resume) stay put.
     #[test]
-    fn pool_eof_steps_the_timeline_playhead_forward_one_frame() {
+    fn pool_eof_keeps_the_timeline_playhead() {
         let mut app = App::new(asset_project(), PathBuf::from("t.json")); // 30 fps
-        open_pool_mode(&mut app, 0);
-        app.playhead = 3.0 - 1.0 / 30.0; // one frame before the cut at 3.0
-        let at = app.playhead;
-        set_pool_resume(&mut app, at);
+        app.playhead = 1.5;
+        open_pool_mode(&mut app, 0); // resume = the pre-pool position
+        let before = app.playhead;
         let eof = PlaybackState {
             paused: true,
             file_loaded: true,
@@ -7920,12 +7901,13 @@ mod tests {
         };
 
         app.sync(&eof);
-        assert!((app.playhead - 3.0).abs() < 1e-9, "{}", app.playhead);
-        assert!((pool_resume(&app) - 3.0).abs() < 1e-9);
+        assert_eq!(app.playhead, before, "the timeline cursor stays put");
+        assert_eq!(pool_resume(&app), before, "and so does its resume");
 
-        // A second EOF tick is not a new hand-back.
+        // A second EOF tick is still a no-op.
         app.sync(&eof);
-        assert!((app.playhead - 3.0).abs() < 1e-9, "{}", app.playhead);
+        assert_eq!(app.playhead, before);
+        assert_eq!(pool_resume(&app), before);
     }
 
     // Clip-edge dividers on the track row land on the same columns as the
