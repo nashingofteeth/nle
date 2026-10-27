@@ -3,6 +3,7 @@
 //! Fixtures live here; each child file reaches them and the module under
 //! test through `use super::*` (and `super::super` for private helpers).
 
+use super::keys::command::run_command;
 use super::panels::status::render_status;
 use super::*;
 use nle_core::edit;
