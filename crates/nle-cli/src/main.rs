@@ -260,7 +260,7 @@ enum Cmd {
         #[arg(long)]
         ripple: bool,
     },
-    /// Add a crossfade at a boundary (TUI `x`; the default kind is a dissolve)
+    /// Add a crossfade at a boundary (TUI `X`; the default kind is a dissolve)
     Transition {
         /// Which shape: dissolve (default) or fade (through black)
         #[arg(value_name = "KIND")]
@@ -281,7 +281,7 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         track: usize,
     },
-    /// Add, remove, or clear a visual effect on a clip (TUI `X`)
+    /// Add, remove, or clear a visual effect on a clip (TUI `x`)
     Effect {
         /// Which effect: crop | scale | eq | lut | rm | clear
         #[arg(value_name = "KIND")]
