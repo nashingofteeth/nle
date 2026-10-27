@@ -533,8 +533,15 @@ fn land_on_blend(project: &Project, track: usize, blend_id: u32, out: &mut Outco
             .iter()
             .position(|s| matches!(s, Segment::Transition(t) if t.id == blend_id))
     {
-        let mid = secs_f64(&tr.start_of(i)) + secs_f64(&tr.segments[i].duration()) / 2.0;
-        out.playhead = Some(frame_of(project.fps.as_ref(), mid));
+        // The midpoint snaps to a frame; on a one-frame blend that lands a
+        // frame *past* it (start + half a frame rounds up). Stay within the
+        // blend: its last frame is the latest spot that still shows it.
+        let fps = project.fps.as_ref();
+        let start = secs_f64(&tr.start_of(i));
+        let dur = secs_f64(&tr.segments[i].duration());
+        let one_frame = fps.map_or(1.0, |f| 1.0 / secs_f64(f));
+        let mid = (start + dur / 2.0).min(start + dur - one_frame);
+        out.playhead = Some(frame_of(fps, mid));
     }
 }
 
@@ -2174,6 +2181,8 @@ mod tests {
     // not on either edge.
     #[test]
     fn a_transition_lands_on_its_midpoint() {
+        // (at a seam the blend sits on the *preceding* frames: the clip
+        // gives up material backward, so the blend here owns [t−dur, t).)
         let mut p = fixture(); // [Gap][Clip #1 1..4][Gap][Clip #2 6..8]
         let mut reg = None;
         let out = run(
@@ -2189,7 +2198,6 @@ mod tests {
         .unwrap();
         // The clip gives up 1 s, so the blend owns [3, 4): midpoint 3.5.
         assert_eq!(out.playhead, Some(105), "the middle of the blend");
-
         // Deleting at the blend's first frame still removes the blend and
         // hands the trimmed frames back.
         let out = run(
@@ -2223,6 +2231,29 @@ mod tests {
             }
             other => panic!("expected the clip restored, got {other:?}"),
         }
+    }
+    // The frame-grid degenerate case: a ONE-frame blend's midpoint
+    // (start + half a frame) rounds up out of it — the blend owns a single
+    // frame, and the playhead must stay on it, not hop past it.
+    #[test]
+    fn a_one_frame_blend_lands_on_its_own_frame() {
+        let mut p = fixture(); // [Gap][Clip #1 1..4][Gap][Clip #2 6..8]
+        let mut reg = None;
+        // The blend at a seam sits on the preceding frames (the clip gives
+        // up material backward), so a one-frame blend at 4.0 owns [4−1f, 4):
+        // frame 119, not 120.
+        let out = run(
+            &mut p,
+            &mut reg,
+            &Action::Transition {
+                track: 0,
+                at: 4.0,
+                kind: TransitionKind::Dissolve,
+                len: TransitionLen::Frames(1),
+            },
+        )
+        .unwrap();
+        assert_eq!(out.playhead, Some(119), "the blend's own frame");
     }
 
     #[test]
