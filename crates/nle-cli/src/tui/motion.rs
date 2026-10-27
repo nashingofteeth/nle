@@ -4,7 +4,7 @@
 //! Nothing here touches `App` or mpv — these are the functions the dump and
 //! the render tests exercise without a terminal.
 
-use super::{clip_under, grid_time};
+use super::actions::{clip_under, grid_time};
 use nle_core::project::Project;
 use nle_core::time::Seconds;
 use nle_core::timeline::Segment as TimelineSegment;

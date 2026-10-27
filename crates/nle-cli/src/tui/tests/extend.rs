@@ -2,6 +2,7 @@ use super::super::motion::{on_boundary, secs};
 use super::super::panels::timeline::render_timeline;
 use super::super::*;
 use super::*;
+use nle_core::time::frame_to_secs;
 use ratatui::layout::Rect;
 
 #[test]

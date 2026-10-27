@@ -2,6 +2,7 @@ use super::super::jobs::PreviewMsg;
 use super::super::motion::secs;
 use super::super::*;
 use super::*;
+use nle_core::time::frame_to_secs;
 
 // Media pool: an asset used by a clip can't be removed; an unused one
 // goes. Insert-from-pool is the shared ripple path (tested in core).

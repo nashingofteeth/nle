@@ -10,7 +10,8 @@ use super::super::motion::fmt_timecode;
 use nle_core::timeline::Segment as TimelineSegment;
 use nle_core::{Armed, track_label};
 
-use super::super::{App, ExtendState, Mode, clip_under, gap_under, grid_time, secs};
+use super::super::actions::{clip_under, grid_time};
+use super::super::{App, ExtendState, Mode, gap_under, secs};
 pub(crate) fn render_info(f: &mut Frame, area: Rect, app: &App) {
     let t = app.playhead;
 
