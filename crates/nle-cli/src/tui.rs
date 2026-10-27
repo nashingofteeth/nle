@@ -715,6 +715,7 @@ impl App {
             // Model-authoritative while paused: h/l moves the playhead by
             // the same arithmetic the display uses.
             self.playhead = (self.playhead + delta).clamp(0.0, self.last_frame());
+            self.note_handoff_seek(self.playhead);
         }
     }
 
@@ -725,14 +726,7 @@ impl App {
             let target = t.clamp(0.0, self.last_frame());
             // Model position is authoritative when paused: set it now.
             self.playhead = target;
-            // A seek during a monitor hand-off is the *new* landing: mpv
-            // applies it to the file being loaded, so its first report is
-            // this position and the wait ends there. Leaving the old landing
-            // would have `sync` wait for a position the user already left —
-            // and snap the playhead back to it if a report happened to pass.
-            if self.pool_on_monitor && !is_pool(self) {
-                self.pool_handoff = Some(target);
-            }
+            self.note_handoff_seek(target);
             // Nudge a few ms INTO the target instant: EDL segment
             // boundaries sit a hair after the cut (source frame rounding),
             // so an exact seek would display the PREVIOUS segment's last
@@ -740,6 +734,17 @@ impl App {
             // manual frame-step. 4ms clears the drift seen on this
             // machine's timelines.
             player.seek_absolute(target + 0.004);
+        }
+    }
+
+    /// A seek during a monitor hand-off is the *new* landing: mpv applies it
+    /// to the file being loaded, so its first report is this position and the
+    /// wait ends there. Leaving the old landing would make `sync` wait for a
+    /// position the user already left — and snap the playhead back to it if a
+    /// report happened to pass. Both absolute and relative seeks call this.
+    fn note_handoff_seek(&mut self, target: f64) {
+        if self.pool_on_monitor && !is_pool(self) {
+            self.pool_handoff = Some(target);
         }
     }
 
@@ -9736,6 +9741,16 @@ mod tests {
         assert_eq!(app.pool_handoff, Some(2.5));
         assert_eq!(app.playhead, 2.5);
         assert!(app.pool_on_monitor, "still waiting for the EDL to land");
+
+        // Relative seeks are seeks too: the first post-seek report is the
+        // moved position, so the wait must end there (otherwise a small nudge
+        // snaps back within tolerance, a large one never lands at all).
+        app.pool_handoff = Some(2.5);
+        app.seek_rel(&fake, 1.0);
+        assert_eq!(app.playhead, 3.5);
+        assert_eq!(app.pool_handoff, Some(3.5));
+        app.seek_rel(&fake, -0.5);
+        assert_eq!(app.pool_handoff, Some(3.0));
     }
 
     // A failed rebuild during a monitor hand-off must give the hand-off up:
