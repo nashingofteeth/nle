@@ -277,6 +277,10 @@ pub struct PoolState {
     pub sel: usize,
     pub pos: f64,
     pub resume: f64,
+    /// The timeline's pause state when the pool opened; restored when the
+    /// timeline EDL comes back so a pool playthrough can't auto-play the
+    /// project (and let mpv's clock snap the landing onto a cut).
+    pub paused: bool,
 }
 
 /// A one-field transition length form, opened by `x`/`X` when the playhead
@@ -471,6 +475,8 @@ pub struct App {
     /// After closing the pool, the timeline EDL is loaded at this position.
     /// Keep ignoring mpv's old pooled clock until the new file reports it.
     pool_handoff: Option<f64>,
+    /// Pause state to apply once the post-pool timeline EDL is loaded.
+    pending_pause: Option<bool>,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -528,6 +534,7 @@ impl App {
             command_from_pool: false,
             pool_on_monitor: false,
             pool_handoff: None,
+            pending_pause: None,
             paused: true,
             loaded: false,
             dead: false,
@@ -1316,6 +1323,7 @@ fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
     set_pool_pos(app, 0.0);
     app.pool_on_monitor = true;
     app.pool_handoff = None;
+    app.pending_pause = None;
     app.eof = false; // a freshly loaded file is not at EOF
     player.load(&path.display().to_string(), Some(0.0));
 }
@@ -1329,6 +1337,7 @@ fn open_pool(app: &mut App, player: &dyn Mpv) {
         sel,
         pos: 0.0,
         resume: app.playhead,
+        paused: app.paused,
     });
     load_pool_preview(app, player);
     app.set_message("media");
@@ -1345,18 +1354,24 @@ fn leave_pool_command(app: &mut App, _player: &dyn Mpv) {
     app.reload_requested = true;
 }
 
-fn close_pool(app: &mut App, _player: &dyn Mpv) {
-    close_pool_at(app, pool_resume(app));
+fn close_pool(app: &mut App, player: &dyn Mpv) {
+    close_pool_at(app, player, pool_resume(app));
 }
 
 /// Close the pool and put the playhead at `at`: the pre-pool position on a
-/// manual close, or the frame an insert landed on.
-fn close_pool_at(app: &mut App, at: f64) {
+/// manual close, or the frame an insert landed on. The timeline's pre-pool
+/// pause state is restored when the EDL loads.
+fn close_pool_at(app: &mut App, _player: &dyn Mpv, at: f64) {
     if let Some(sel) = pool_sel(app) {
         app.last_pool_sel = sel; // capture on exit so reopening returns here
     }
+    let paused = match &app.mode {
+        Mode::Pool(p) => p.paused,
+        _ => app.paused,
+    };
     app.mode = Mode::Normal;
     app.playhead = at.clamp(0.0, app.last_frame());
+    app.pending_pause = Some(paused);
     // The monitor was on the pooled asset; rebuild the timeline EDL (from the
     // cache unless something changed) and reload when it is ready.
     start_preview(app);
@@ -1492,7 +1507,7 @@ fn insert_from_pool(app: &mut App, player: &dyn Mpv) {
         // Inserting is the pool's job: leave it so the monitor returns to the
         // timeline, keeping the frame the insert landed on.
         let landed = app.playhead;
-        close_pool_at(app, landed);
+        close_pool_at(app, player, landed);
     }
 }
 
@@ -2002,6 +2017,9 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
                                 app.pool_handoff = Some(app.playhead);
                             }
                             player.load(&url, Some(app.playhead));
+                            if let Some(paused) = app.pending_pause.take() {
+                                player.set_pause(paused);
+                            }
                         }
                         Err(e) => preview_failed(app, &e.to_string()),
                     }
@@ -7810,6 +7828,7 @@ mod tests {
             sel,
             pos: 0.0,
             resume: app.playhead,
+            paused: app.paused,
         });
     }
 
@@ -7873,7 +7892,7 @@ mod tests {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 5.0;
         open_pool_mode(&mut app, 0);
-        close_pool_at(&mut app, 5.0);
+        close_pool_at(&mut app, &FakeMpv::new(), 5.0);
         assert!(!is_pool(&app));
         assert!((app.playhead - 5.0).abs() < 1e-9);
     }
@@ -7888,7 +7907,7 @@ mod tests {
         load_pool_preview(&mut app, &FakeMpv::new());
         assert!(app.pool_on_monitor);
 
-        close_pool_at(&mut app, 6.0);
+        close_pool_at(&mut app, &FakeMpv::new(), 6.0);
         assert!(!is_pool(&app));
         assert!(
             app.pool_on_monitor,
@@ -9283,6 +9302,41 @@ mod tests {
             vec![Call::Load("edl://built".into(), Some(1.5))]
         );
         assert!(app.preview.is_none() && app.preview_progress.is_none());
+    }
+
+    // The pool remembers the timeline's pause state: a full playthrough
+    // (pool ends playing) must not auto-play the project on hand-back.
+    #[test]
+    fn a_pool_close_restores_the_timeline_pause_state() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.paused = true;
+        open_pool_mode(&mut app, 0);
+        close_pool_at(&mut app, &fake, 1.0);
+        assert_eq!(app.pending_pause, Some(true), "the timeline was paused");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
+        tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
+            .unwrap();
+        poll_preview(&mut app, &fake);
+        assert!(
+            fake.calls()
+                .iter()
+                .any(|c| matches!(c, Call::SetPause(true))),
+            "the EDL loads paused: {:?}",
+            fake.calls()
+        );
+        assert_eq!(app.pending_pause, None);
+
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.paused = false;
+        open_pool_mode(&mut app, 0);
+        close_pool_at(&mut app, &fake, 1.0);
+        assert_eq!(app.pending_pause, Some(false), "a playing timeline resumes");
     }
 
     // Leaving the pool records the landing; the old pooled clock stays
