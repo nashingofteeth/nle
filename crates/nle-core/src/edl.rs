@@ -94,7 +94,12 @@ pub fn parse(input: &str) -> Result<EdlDoc, EdlError> {
         // A zero-length event contributes nothing — a marker line, or the
         // outgoing half of a dissolve some writers emit. Drop it rather than
         // sinking the import; a *negative* span is still an error (`build`).
-        if ev.src_out == ev.src_in || ev.rec_out == ev.rec_in {
+        // A black event is the exception for its source side: there is
+        // nothing to read, so its source span is legitimately zero, and the
+        // record span is the black's length (`build` makes a gap of it).
+        // Dropping zero-source black loses head/tail black and shifts every
+        // later event off record time.
+        if ev.rec_out == ev.rec_in || (ev.src_out == ev.src_in && !is_black_reel(&ev.reel)) {
             warnings.push(format!("event {}: zero-length event skipped", ev.num));
             continue;
         }
@@ -267,18 +272,22 @@ pub fn build(
                 }
                 let src_in = frames_of(ev.src_in, doc, fps) - src_offset_frames;
                 let src_out = frames_of(ev.src_out, doc, fps) - src_offset_frames;
-                if src_out <= src_in {
-                    return Err(BuildError::BadSpan { event: ev.num });
-                }
                 // nle's timeline span for a clip is source / speed, and the
                 // record span is the timeline span the original edit used —
                 // so their ratio IS the speed. Equal spans reduce to 1.
+                // (A black event's record span is the gap's length; parse
+                // already dropped a zero-length one.)
                 if rec_out <= rec_in {
                     return Err(BuildError::RecSpan { event: ev.num });
                 }
-                let speed = Seconds::new(src_out - src_in, rec_out - rec_in);
                 match resolve(ev) {
                     Some(asset) => {
+                        // A clip must have material; black legitimately has
+                        // none (its source span is zero).
+                        if src_out <= src_in {
+                            return Err(BuildError::BadSpan { event: ev.num });
+                        }
+                        let speed = Seconds::new(src_out - src_in, rec_out - rec_in);
                         segs.push(Segment::Clip(Clip {
                             id: next_id,
                             asset,
@@ -470,6 +479,31 @@ FCM: NON-DROP FRAME
                 assert_eq!(g.duration, Seconds::from_integer(1), "the black span");
             }
             other => panic!("expected clip, gap, clip, got {other:?}"),
+        }
+    }
+
+    // A zero-source black is kept: its source is legitimately empty, its
+    // record span is the black's length. Dropping it used to erase head/tail
+    // black and shift every later event off record time (the timeline
+    // started at the first *kept* event).
+    #[test]
+    fn black_with_a_zero_source_is_kept_as_a_gap() {
+        let edl = "\
+001 BL V C 00:00:00:00 00:00:00:00 01:00:00:00 01:00:02:00
+002 AX V C 00:00:00:00 00:00:02:00 01:00:02:00 01:00:04:00
+";
+        let doc = parse(edl);
+        assert!(doc.is_ok(), "{:?}", doc.err());
+        let doc = doc.unwrap();
+        assert_eq!(doc.events.len(), 2, "no zero-length skip");
+        assert!(doc.warnings.is_empty(), "{:?}", doc.warnings);
+        let resolve = |ev: &EdlEvent| (ev.reel == "AX").then_some(1);
+        let tl = build(&doc, Seconds::from_integer(30), 0, &resolve).unwrap();
+        match &tl.tracks[0].segments[..] {
+            [Segment::Gap(g), Segment::Clip(_)] => {
+                assert_eq!(g.duration, Seconds::from_integer(2), "the head black");
+            }
+            other => panic!("expected gap, clip, got {other:?}"),
         }
     }
 
