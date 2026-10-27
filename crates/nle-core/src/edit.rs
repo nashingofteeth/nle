@@ -58,6 +58,8 @@ pub enum EditError {
     NoEffects(u32),
     #[error("clip #{0} has no effect #{1}")]
     EffectNotFound(u32, usize),
+    #[error("clip #{0} already has a {1} effect — edit that row instead")]
+    DuplicateEffect(u32, &'static str),
     #[error("transitions apply to video tracks — that track is audio")]
     TransitionsNeedVideo,
     #[error("playhead is not in a gap")]
@@ -1643,6 +1645,16 @@ pub fn replace_effect_on(
     };
     if index >= c.effects.len() {
         return Err(EditError::EffectNotFound(clip_id, index));
+    }
+    // One effect per kind (see `add_effect_on`): rewriting a row into a kind
+    // another row already holds would stack the kind and silently drop the
+    // row being replaced. The TUI's edit gesture always replaces a row with
+    // its own kind; only the CLI's/explicit `--index` can change kinds.
+    let kind = effect.kind();
+    if let Some(dup) = c.effects.iter().position(|e| e.kind() == kind)
+        && dup != index
+    {
+        return Err(EditError::DuplicateEffect(clip_id, kind));
     }
     let mut after = c.clone();
     after.effects[index] = effect;
@@ -8296,11 +8308,25 @@ mod tests {
         h.undo(&mut p).unwrap();
         assert_eq!(effects(&p), vec![crop.clone(), scale.clone()]);
 
-        // Replacing a row is one batch; undo restores the old effect.
-        let batch = replace_effect_on(&p, 0, 1, 0, scale.clone()).unwrap();
-        assert!(batch.desc.contains("edit"), "{}", batch.desc);
+        // Replacing a row is one batch; undo restores the old effect. A row
+        // may swap to a kind no other row holds, but a rewrite into a kind
+        // another row already holds is refused — one effect per kind runs
+        // in reverse too (`add_effect_on` replaces in place; stacking a
+        // second scale and silently orphaning the crop is the failure,
+        // and the CLI's `--index` is the only path that changes kinds).
+        assert!(matches!(
+            replace_effect_on(&p, 0, 1, 0, scale.clone()),
+            Err(EditError::DuplicateEffect(1, "scale"))
+        ));
+        let eq = Effect::Eq {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+        };
+        let batch = replace_effect_on(&p, 0, 1, 0, eq.clone()).unwrap();
+        assert!(batch.desc.contains("edit eq"), "{}", batch.desc);
         h.apply(&mut p, batch, 0).unwrap();
-        assert_eq!(effects(&p), vec![scale.clone(), scale.clone()]);
+        assert_eq!(effects(&p), vec![eq, scale.clone()]);
         h.undo(&mut p).unwrap();
         assert_eq!(effects(&p), vec![crop, scale]);
         assert!(matches!(
