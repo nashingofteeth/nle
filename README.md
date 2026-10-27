@@ -119,7 +119,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              (space play, h/l ±1s, f/F frame, gg/0 start, G/$ end);
 #              while it plays the timeline row shows the asset strip;
 #              paused or ended, the project returns at its insert cursor
-#              (the status shows the asset clock separately) ·
+#              (the status shows the asset clock separately) · at the end
+#              the monitor hands back to the timeline video too, paused at
+#              the insert cursor; space replays the asset from 0 ·
 #              enter inserts and returns to the timeline · i imports ·
 #              d removes · u undoes · R reload · : cmd (:help) · :q · q
 # Tip: everything is undoable; the project file is written after every edit.

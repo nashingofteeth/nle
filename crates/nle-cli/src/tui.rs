@@ -473,6 +473,9 @@ pub struct App {
     pool_handoff: Option<f64>,
     /// Pause state to apply once the post-pool timeline EDL is loaded.
     pending_pause: Option<bool>,
+    /// A pool EOF started a timeline EDL build to hand the monitor back
+    /// (while the pool panel stays open).
+    pool_handback: bool,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -531,6 +534,7 @@ impl App {
             pool_on_monitor: false,
             pool_handoff: None,
             pending_pause: None,
+            pool_handback: false,
             paused: true,
             loaded: false,
             dead: false,
@@ -636,8 +640,11 @@ impl App {
         {
             if is_pool(self) {
                 // The monitor is a raw pooled file: position is asset
-                // seconds, no EDL translation.
-                set_pool_pos(self, t);
+                // seconds, no EDL translation. After the EOF hand-back the
+                // mode is still Pool but the monitor is the timeline EDL.
+                if self.pool_on_monitor {
+                    set_pool_pos(self, t);
+                }
             } else if !self.pool_on_monitor {
                 // `pool_on_monitor` covers the hand-off window: mode is
                 // already Normal, but the asynchronous EDL reload has not
@@ -673,6 +680,13 @@ impl App {
             }
             let resume = pool_resume(self);
             self.playhead = resume.clamp(0.0, self.last_frame());
+            // Hand the monitor back to the timeline video while the pool
+            // panel stays open. Build off-thread; poll_preview loads it.
+            if self.pool_on_monitor && !self.pool_handback {
+                self.pool_handback = true;
+                self.pending_pause = Some(true);
+                start_preview(self);
+            }
         }
         if let Some(e) = &st.last_error {
             if self.mpv_error.as_deref() != Some(e.as_str()) {
@@ -832,7 +846,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     let mut out = format!("project: {}\n", path.display());
     out.push_str(&crate::show_report(&app.project));
     out.push_str(&format!(
-        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {} · pool-handoff: {:?}\nmessage: {:?}\n",
+        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {} · pool-handoff: {:?} · pool-handback: {}\nmessage: {:?}\n",
         app.mode,
         track_label(&app.project, app.active()),
         app.playhead,
@@ -841,6 +855,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
         app.eof,
         app.pool_on_monitor,
         app.pool_handoff,
+        app.pool_handback,
         app.message,
     ));
     out.push_str(&format!("=== grid {w}x{h} ===\n"));
@@ -1287,7 +1302,19 @@ fn pool_toggle_play(app: &mut App, player: &dyn Mpv) {
     if !app.loaded {
         return;
     }
+    if !app.pool_on_monitor {
+        // The EOF hand-back put the timeline EDL on the monitor; space
+        // restarts the pooled asset's preview.
+        app.pool_handback = false;
+        app.pending_pause = None;
+        load_pool_preview(app, player);
+        player.set_pause(false);
+        return;
+    }
     if app.eof {
+        // Cancel a pending EOF hand-back and replay the raw file.
+        app.pool_handback = false;
+        app.pending_pause = None;
         set_pool_pos(app, 0.0);
         player.seek_absolute(0.0);
         player.set_pause(false);
@@ -1324,6 +1351,7 @@ fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
     app.pool_on_monitor = true;
     app.pool_handoff = None;
     app.pending_pause = None;
+    app.pool_handback = false;
     app.eof = false; // a freshly loaded file is not at EOF
     player.load(&path.display().to_string(), Some(0.0));
 }
@@ -1369,6 +1397,7 @@ fn close_pool_at(app: &mut App, player: &dyn Mpv, at: f64) {
     }
     app.mode = Mode::Normal;
     app.playhead = at.clamp(0.0, app.last_frame());
+    app.pool_handback = false;
     app.pending_pause = Some(true);
     // Set it now so the subsequent async `loadfile` starts paused (mpv keeps
     // the pause property; the pending value re-applies it after the load).
@@ -2002,16 +2031,20 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
             Ok(PreviewMsg::Done(result)) => {
                 let stale = app.preview_dirty;
                 let pool = is_pool(app);
+                let handback = app.pool_handback;
                 app.preview = None;
                 app.preview_progress = None;
                 if stale {
                     app.preview_dirty = false;
-                    if !pool {
+                    if !pool || handback {
                         start_preview(app);
                     }
-                } else if !pool {
+                } else if !pool || handback {
                     match result {
                         Ok(url) => {
+                            if handback {
+                                app.pool_handback = false;
+                            }
                             // Keep ignoring the pooled clock until the EDL's
                             // own file reports the landing (see `sync`).
                             if app.pool_on_monitor {
@@ -2022,7 +2055,12 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
                                 player.set_pause(paused);
                             }
                         }
-                        Err(e) => preview_failed(app, &e.to_string()),
+                        Err(e) => {
+                            if handback {
+                                app.pool_handback = false;
+                            }
+                            preview_failed(app, &e.to_string());
+                        }
                     }
                 }
                 return;
@@ -4953,7 +4991,7 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
 /// EOF — mpv reports `pause: false` for a moment at the end), the project is
 /// back so the insert point (and the `enter` target) is visible.
 fn pool_strip_active(app: &App) -> bool {
-    is_pool(app) && !app.paused && !app.eof
+    is_pool(app) && app.pool_on_monitor && !app.paused && !app.eof
 }
 
 /// The pool previews a raw file, so the monitor is not on the project
@@ -7860,6 +7898,7 @@ mod tests {
             pos: 0.0,
             resume: app.playhead,
         });
+        app.pool_on_monitor = true;
     }
 
     // Inserting an asset from the pool is recorded in history and undoes.
@@ -8010,6 +8049,92 @@ mod tests {
         app.sync(&eof);
         assert_eq!(app.playhead, before);
         assert_eq!(pool_resume(&app), before);
+    }
+
+    // The EOF also hands the monitor back: a preview build starts while the
+    // pool panel stays open.
+    #[test]
+    fn pool_eof_starts_a_timeline_handback() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.5;
+        open_pool_mode(&mut app, 0);
+        app.paused = false;
+        app.eof = false;
+        let eof = PlaybackState {
+            paused: false,
+            file_loaded: true,
+            eof: true,
+            time_pos: Some(10.0),
+            ..Default::default()
+        };
+        app.sync(&eof);
+        assert!(app.pool_handback, "a timeline EDL build was requested");
+        assert_eq!(app.playhead, 1.5);
+        assert!(!pool_strip_active(&app), "the strip is done");
+    }
+
+    // The EOF build loads the timeline EDL paused at the insert cursor; the
+    // pool panel stays open and the landing is protected by the handoff.
+    #[test]
+    fn poll_preview_hands_back_the_timeline_at_pool_eof() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.5;
+        open_pool_mode(&mut app, 0);
+        app.pool_handback = true;
+        app.pending_pause = Some(true);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
+        tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
+            .unwrap();
+        poll_preview(&mut app, &fake);
+        assert_eq!(
+            fake.calls(),
+            vec![
+                Call::Load("edl://timeline".into(), Some(1.5)),
+                Call::SetPause(true)
+            ]
+        );
+        assert!(!app.pool_handback);
+        assert_eq!(app.pool_handoff, Some(1.5));
+        assert!(app.pool_on_monitor, "still the pooled clock until landing");
+
+        // The EDL reports the landing: now the timeline drives/owns it.
+        let landed = PlaybackState {
+            paused: true,
+            file_loaded: true,
+            time_pos: Some(1.5),
+            ..Default::default()
+        };
+        app.sync(&landed);
+        assert!(!app.pool_on_monitor);
+        assert_eq!(app.playhead, 1.5);
+        assert!(is_pool(&app), "the panel stays open");
+    }
+
+    // After the hand-back, space restarts the asset preview from 0.
+    #[test]
+    fn pool_space_replays_after_the_handback() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.loaded = true;
+        app.playhead = 1.5;
+        open_pool_mode(&mut app, 0);
+        app.pool_on_monitor = false; // the timeline EDL is on the monitor
+        handle_key(&mut app, &fake, key(' '));
+        let calls = fake.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, Call::Load(url, Some(0.0)) if url.contains("red.mp4"))),
+            "reloads the asset: {calls:?}"
+        );
+        assert!(calls.iter().any(|c| matches!(c, Call::SetPause(false))));
+        assert!(app.pool_on_monitor);
+        assert_eq!(pool_pos(&app), 0.0);
     }
 
     // At EOF the project timeline is back; restore the insert cursor then,
