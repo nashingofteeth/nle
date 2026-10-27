@@ -744,6 +744,30 @@ fn removing_a_transition_gives_the_frames_back() {
 }
 
 #[test]
+fn effect_index_replaces_or_refuses() {
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["effect", "eq", "--clip", "1", "--brightness", "0.1"]);
+    s.ok(&["effect", "crop", "--clip", "1", "--left", "10"]);
+    // [eq, crop]: row 0 becomes scale, in place.
+    s.ok(&[
+        "effect", "scale", "--clip", "1", "--index", "0", "--w", "50", "--h", "50",
+    ]);
+    let show = s.show();
+    assert!(show.contains("fx: scale, crop"), "{show}");
+
+    // A kind already held by another row is refused (one per kind).
+    let out = s.err(&[
+        "effect", "crop", "--clip", "1", "--index", "0", "--left", "10",
+    ]);
+    assert!(out.contains("already has a crop"), "{out}");
+
+    // An out-of-range replacement names the row.
+    let out = s.err(&["effect", "eq", "--clip", "1", "--index", "9"]);
+    assert!(out.contains("has no effect #9"), "{out}");
+}
+
+#[test]
 fn effects_eq_neutral_values() {
     let s = Sandbox::new();
     // No eq parameter given: contrast/saturation must stay neutral (this used

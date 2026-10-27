@@ -1099,12 +1099,13 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
 
 /// The `:effect` / `nle effect` usage string — one spelling for both
 /// front-ends.
-pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] \
+pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] [--index N] \
      crop --left P --right P --top P --bottom P (%: 0 = edge, 100 = opposite) | \
      scale --w P --h P (%: 100 = unchanged) | \
      offset --x P --y P (% of the way to the edge; ±100 = off-screen) | \
      eq [--brightness --contrast --saturation] | lut --path P | \
-     rm [--index N] | clear (one per kind: adding a kind again replaces it)";
+     rm [--index N] | clear (one per kind: adding a kind again replaces it; \
+     --index N replaces that row instead of appending)";
 
 /// The parameters of an effect call, before the kind picks which of them
 /// apply. Shared by the `:cmd` grammar and the CLI so a new kind can't drift
@@ -1359,6 +1360,7 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                     Ok(Action::ClearEffects { track, clip })
                 }
                 _ => {
+                    let index = opt_usize(&mut f, "index")?;
                     let args = EffectArgs {
                         w: opt_time(&mut f, "w")?,
                         h: opt_time(&mut f, "h")?,
@@ -1379,7 +1381,7 @@ pub fn parse(input: &str, d: &ParseDefaults) -> Result<Action, ParseError> {
                         track,
                         clip,
                         effect,
-                        index: None,
+                        index,
                     })
                 }
             }
@@ -1687,6 +1689,26 @@ mod tests {
             Effect::chain(std::slice::from_ref(&effect), (0, 0)),
             "eq=brightness=-0.2:contrast=1:saturation=1",
             "the neutral values reach the graph"
+        );
+    }
+
+    // `--index` on an add is a replace, not an append (the CLI and `:cmd`
+    // share this grammar).
+    #[test]
+    fn effect_index_replaces_a_row() {
+        let Action::AddEffect { effect, index, .. } =
+            parse("effect eq --clip 1 --index 0", &defaults()).unwrap()
+        else {
+            panic!("expected an effect")
+        };
+        assert_eq!(index, Some(0));
+        assert_eq!(
+            effect,
+            Effect::Eq {
+                brightness: 0.0,
+                contrast: 1.0,
+                saturation: 1.0
+            }
         );
     }
 

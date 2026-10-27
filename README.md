@@ -84,7 +84,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              `:transition --percent` — 50 = twice as long, 200 = half ·
 #              :transition [dissolve|fade] [--dur T|--frames N|--percent P] ·
 #              on an existing blend --frames/--dur/--percent retime it ·
-#              :effect [--clip N] crop|scale|offset|eq|lut … · :effect rm [--index N] ·
+#              :effect [--clip N] [--index N] crop|scale|offset|eq|lut … ·
+#              --index N replaces that effect row · :effect rm [--index N] ·
 #              :effect clear (one effect per kind: re-adding a kind replaces
 #              it in place) · rendered at export;
 #              the monitor plays a rendered proxy for effects/speed/transitions,
@@ -176,6 +177,7 @@ $N paste --at 5 --ripple               # from the register (TUI: p / P --ripple)
 $N extend --clip 3 --edge out --to 8   # move one edge (the extend-mode commit)
 $N extend --seg 4 --edge in --to 2 --ripple
 $N effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
+$N effect eq --clip 3 --index 0            # replace effect row 0 (0-based)
 #   each edge is a percentage toward the opposite side: 0 = the frame edge,
 #   100 = the other edge; the two sides of an axis must total under 100.
 #   It insets the picture at that point (after any earlier scale) and leaves

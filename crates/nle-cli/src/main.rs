@@ -292,7 +292,8 @@ enum Cmd {
         /// Track number (1-based; default 1)
         #[arg(long, default_value_t = 1)]
         track: usize,
-        /// `rm`: which effect to drop (0-based; default: the last one)
+        /// `rm`: which effect to drop; add: which row to replace (0-based;
+        /// default: rm's last row, add appends)
         #[arg(long, value_name = "N")]
         index: Option<usize>,
         /// scale: width as a percentage of the source (100 = unchanged)
@@ -865,7 +866,7 @@ fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
                     track,
                     clip: *clip,
                     effect,
-                    index: None,
+                    index: *index,
                 }),
             }
         })),
