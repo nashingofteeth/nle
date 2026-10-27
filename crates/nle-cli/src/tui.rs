@@ -473,9 +473,6 @@ pub struct App {
     pool_handoff: Option<f64>,
     /// Pause state to apply once the post-pool timeline EDL is loaded.
     pending_pause: Option<bool>,
-    /// A pool EOF started a timeline EDL build to hand the monitor back
-    /// (while the pool panel stays open).
-    pool_handback: bool,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -534,7 +531,6 @@ impl App {
             pool_on_monitor: false,
             pool_handoff: None,
             pending_pause: None,
-            pool_handback: false,
             paused: true,
             loaded: false,
             dead: false,
@@ -668,24 +664,15 @@ impl App {
         self.loaded = st.file_loaded;
         self.dead = st.dead;
         self.eof = st.eof;
-        // Pool at EOF: the playback is over, so the project timeline (not
-        // the strip) is on screen. Pin the asset clock to its last frame and
-        // restore the timeline cursor to the pre-pool position now — the
-        // insert point must not wait for Esc.
+        // Pool at EOF: pin the asset clock to its last frame so the strip
+        // marker and the status don't read a couple frames short of the
+        // probe duration. The timeline cursor is untouched (and restored on
+        // close).
         if is_pool(self) && st.eof {
             let sel = pool_sel(self).unwrap_or(0);
             if let Some(d) = self.project.media.get(sel).and_then(|a| a.duration()) {
                 let last = pool_last_frame(self, secs(&d));
                 set_pool_pos(self, last);
-            }
-            let resume = pool_resume(self);
-            self.playhead = resume.clamp(0.0, self.last_frame());
-            // Hand the monitor back to the timeline video while the pool
-            // panel stays open. Build off-thread; poll_preview loads it.
-            if self.pool_on_monitor && !self.pool_handback {
-                self.pool_handback = true;
-                self.pending_pause = Some(true);
-                start_preview(self);
             }
         }
         if let Some(e) = &st.last_error {
@@ -846,7 +833,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     let mut out = format!("project: {}\n", path.display());
     out.push_str(&crate::show_report(&app.project));
     out.push_str(&format!(
-        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {} · pool-handoff: {:?} · pool-handback: {}\nmessage: {:?}\n",
+        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {} · pool-handoff: {:?}\nmessage: {:?}\n",
         app.mode,
         track_label(&app.project, app.active()),
         app.playhead,
@@ -855,7 +842,6 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
         app.eof,
         app.pool_on_monitor,
         app.pool_handoff,
-        app.pool_handback,
         app.message,
     ));
     out.push_str(&format!("=== grid {w}x{h} ===\n"));
@@ -1302,19 +1288,7 @@ fn pool_toggle_play(app: &mut App, player: &dyn Mpv) {
     if !app.loaded {
         return;
     }
-    if !app.pool_on_monitor {
-        // The EOF hand-back put the timeline EDL on the monitor; space
-        // restarts the pooled asset's preview.
-        app.pool_handback = false;
-        app.pending_pause = None;
-        load_pool_preview(app, player);
-        player.set_pause(false);
-        return;
-    }
     if app.eof {
-        // Cancel a pending EOF hand-back and replay the raw file.
-        app.pool_handback = false;
-        app.pending_pause = None;
         set_pool_pos(app, 0.0);
         player.seek_absolute(0.0);
         player.set_pause(false);
@@ -1351,7 +1325,6 @@ fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
     app.pool_on_monitor = true;
     app.pool_handoff = None;
     app.pending_pause = None;
-    app.pool_handback = false;
     app.eof = false; // a freshly loaded file is not at EOF
     player.load(&path.display().to_string(), Some(0.0));
 }
@@ -1397,7 +1370,6 @@ fn close_pool_at(app: &mut App, player: &dyn Mpv, at: f64) {
     }
     app.mode = Mode::Normal;
     app.playhead = at.clamp(0.0, app.last_frame());
-    app.pool_handback = false;
     app.pending_pause = Some(true);
     // Set it now so the subsequent async `loadfile` starts paused (mpv keeps
     // the pause property; the pending value re-applies it after the load).
@@ -2031,20 +2003,16 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
             Ok(PreviewMsg::Done(result)) => {
                 let stale = app.preview_dirty;
                 let pool = is_pool(app);
-                let handback = app.pool_handback;
                 app.preview = None;
                 app.preview_progress = None;
                 if stale {
                     app.preview_dirty = false;
-                    if !pool || handback {
+                    if !pool {
                         start_preview(app);
                     }
-                } else if !pool || handback {
+                } else if !pool {
                     match result {
                         Ok(url) => {
-                            if handback {
-                                app.pool_handback = false;
-                            }
                             // Keep ignoring the pooled clock until the EDL's
                             // own file reports the landing (see `sync`).
                             if app.pool_on_monitor {
@@ -2055,12 +2023,7 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
                                 player.set_pause(paused);
                             }
                         }
-                        Err(e) => {
-                            if handback {
-                                app.pool_handback = false;
-                            }
-                            preview_failed(app, &e.to_string());
-                        }
+                        Err(e) => preview_failed(app, &e.to_string()),
                     }
                 }
                 return;
@@ -4766,10 +4729,9 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         style
     };
 
-    // In the pool the monitor shows a raw file, so the **asset** clock is
-    // shown after the mode tag with a `pool` label. The main clock stays the
-    // timeline cursor (the marker in the timeline): the two are different
-    // positions and must not look like one drifting playhead.
+    // In the pool the monitor and the timeline row are the selected asset,
+    // so the clock reads the asset position/duration and the mode tag says
+    // POOL. The project cursor is hidden until the pool closes.
     if is_pool(app) {
         let sel = pool_sel(app).unwrap_or(0);
         let (pos, dur) = match app.project.media.get(sel) {
@@ -4784,25 +4746,11 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(format!(" {name} · "), style),
             Span::styled(
-                fmt_timecode(app.playhead, app.project.fps.as_ref()),
+                fmt_timecode(pos, fs.as_ref()),
                 style.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                format!(
-                    " / {} · ",
-                    fmt_timecode(app.total(), app.project.fps.as_ref())
-                ),
-                style,
-            ),
+            Span::styled(format!(" / {} · ", fmt_timecode(dur, fs.as_ref())), style),
             Span::styled(format!("{icon} · POOL{count}"), style),
-            Span::styled(
-                format!(
-                    " · pool {} / {}",
-                    fmt_timecode(pos, fs.as_ref()),
-                    fmt_timecode(dur, fs.as_ref())
-                ),
-                style,
-            ),
         ]);
         f.render_widget(Paragraph::new(line), area);
         return;
@@ -4986,12 +4934,11 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
     draw_marker_row(f, bar, app, total, in_extend);
 }
 
-/// True while the timeline panel should show the pooled asset instead of the
-/// project: the pool is open **and** its preview is playing. Paused (or at
-/// EOF — mpv reports `pause: false` for a moment at the end), the project is
-/// back so the insert point (and the `enter` target) is visible.
+/// While the pool is open the timeline panel and the monitor both show the
+/// selected asset — playing, paused or ended. The project returns (at its
+/// insert cursor) only when the pool is closed.
 fn pool_strip_active(app: &App) -> bool {
-    is_pool(app) && app.pool_on_monitor && !app.paused && !app.eof
+    is_pool(app)
 }
 
 /// The pool previews a raw file, so the monitor is not on the project
@@ -6363,10 +6310,11 @@ mod tests {
         );
     }
 
-    // While the pool previews an asset, the timeline panel shows that asset's
-    // own strip and marker (the preview clock), not the project's clips.
+    // While the pool is open the timeline panel is the asset's own strip and
+    // marker (the preview clock) — playing, paused or ended. The project and
+    // its insert cursor return only on close.
     #[test]
-    fn pool_strip_replaces_the_timeline_only_while_playing() {
+    fn pool_strip_replaces_the_timeline_while_the_pool_is_open() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut p = asset_project();
@@ -6375,6 +6323,7 @@ mod tests {
         let mut app = App::new(p, PathBuf::from("t.json"));
         open_pool_mode(&mut app, 1); // index 1, id 2 (not the first asset)
         set_pool_pos(&mut app, 5.0); // halfway through the 10 s asset
+        app.paused = true;
 
         let draw = |app: &App| {
             let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
@@ -6387,48 +6336,41 @@ mod tests {
             (text, buf)
         };
 
-        // Paused: the project timeline, so the insert point stays visible.
-        app.paused = true;
-        let (paused, _) = draw(&app);
+        // Paused: the asset strip, so the pool preview and its clock are
+        // what the panel describes.
+        let (paused, buf) = draw(&app);
         assert!(
-            paused.contains("red.mp4"),
-            "paused shows the project:\n{paused}"
+            paused.contains("pooled.mp4"),
+            "paused shows the asset:\n{paused}"
         );
         assert!(
-            !paused.contains("pooled.mp4"),
-            "paused hides the strip:\n{paused}"
-        );
-
-        // Playing: the pooled asset replaces it, marker on the preview clock.
-        app.paused = false;
-        let (playing, buf) = draw(&app);
-        assert!(
-            playing.contains("pooled.mp4"),
-            "playing shows the asset:\n{playing}"
-        );
-        assert!(
-            !playing.contains("red.mp4"),
-            "the project is replaced:\n{playing}"
+            !paused.contains("red.mp4"),
+            "the project is replaced:\n{paused}"
         );
         // Inner width 38 (40 − borders); 5/10 of it → column 1 + 19, row 2.
         let want = 1 + marker_col(5.0, 10.0, 38) as usize;
         assert_eq!(
             buf[(want as u16, 2u16)].symbol(),
             "▏",
-            "marker follows the preview clock:\n{playing}"
+            "marker follows the preview clock:\n{paused}"
         );
 
-        // The instant the file ends, the project is back even though mpv may
-        // still report pause=false for a tick: the insert cursor is visible.
+        // Playing and at EOF it stays the asset strip.
+        app.paused = false;
+        let (playing, _) = draw(&app);
+        assert!(
+            playing.contains("pooled.mp4"),
+            "playing shows the asset:\n{playing}"
+        );
         app.eof = true;
         let (ended, _) = draw(&app);
         assert!(
-            ended.contains("red.mp4"),
-            "EOF returns to the project: {ended}"
+            ended.contains("pooled.mp4"),
+            "EOF keeps the asset:\n{ended}"
         );
         assert!(
-            !ended.contains("pooled.mp4"),
-            "the strip is playing-only: {ended}"
+            !ended.contains("red.mp4"),
+            "the project waits for close:\n{ended}"
         );
     }
 
@@ -8044,121 +7986,15 @@ mod tests {
         app.sync(&eof);
         assert_eq!(app.playhead, before, "the timeline cursor stays put");
         assert_eq!(pool_resume(&app), before, "and so does its resume");
+        assert!(
+            pool_strip_active(&app),
+            "the asset stays in the timeline panel at EOF"
+        );
 
         // A second EOF tick is still a no-op.
         app.sync(&eof);
         assert_eq!(app.playhead, before);
         assert_eq!(pool_resume(&app), before);
-    }
-
-    // The EOF also hands the monitor back: a preview build starts while the
-    // pool panel stays open.
-    #[test]
-    fn pool_eof_starts_a_timeline_handback() {
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        app.playhead = 1.5;
-        open_pool_mode(&mut app, 0);
-        app.paused = false;
-        app.eof = false;
-        let eof = PlaybackState {
-            paused: false,
-            file_loaded: true,
-            eof: true,
-            time_pos: Some(10.0),
-            ..Default::default()
-        };
-        app.sync(&eof);
-        assert!(app.pool_handback, "a timeline EDL build was requested");
-        assert_eq!(app.playhead, 1.5);
-        assert!(!pool_strip_active(&app), "the strip is done");
-    }
-
-    // The EOF build loads the timeline EDL paused at the insert cursor; the
-    // pool panel stays open and the landing is protected by the handoff.
-    #[test]
-    fn poll_preview_hands_back_the_timeline_at_pool_eof() {
-        let fake = FakeMpv::new();
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        app.playhead = 1.5;
-        open_pool_mode(&mut app, 0);
-        app.pool_handback = true;
-        app.pending_pause = Some(true);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.preview = Some(PreviewJob {
-            rx,
-            started: Instant::now(),
-        });
-        tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
-            .unwrap();
-        poll_preview(&mut app, &fake);
-        assert_eq!(
-            fake.calls(),
-            vec![
-                Call::Load("edl://timeline".into(), Some(1.5)),
-                Call::SetPause(true)
-            ]
-        );
-        assert!(!app.pool_handback);
-        assert_eq!(app.pool_handoff, Some(1.5));
-        assert!(app.pool_on_monitor, "still the pooled clock until landing");
-
-        // The EDL reports the landing: now the timeline drives/owns it.
-        let landed = PlaybackState {
-            paused: true,
-            file_loaded: true,
-            time_pos: Some(1.5),
-            ..Default::default()
-        };
-        app.sync(&landed);
-        assert!(!app.pool_on_monitor);
-        assert_eq!(app.playhead, 1.5);
-        assert!(is_pool(&app), "the panel stays open");
-    }
-
-    // After the hand-back, space restarts the asset preview from 0.
-    #[test]
-    fn pool_space_replays_after_the_handback() {
-        let fake = FakeMpv::new();
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        app.loaded = true;
-        app.playhead = 1.5;
-        open_pool_mode(&mut app, 0);
-        app.pool_on_monitor = false; // the timeline EDL is on the monitor
-        handle_key(&mut app, &fake, key(' '));
-        let calls = fake.calls();
-        assert!(
-            calls
-                .iter()
-                .any(|c| matches!(c, Call::Load(url, Some(0.0)) if url.contains("red.mp4"))),
-            "reloads the asset: {calls:?}"
-        );
-        assert!(calls.iter().any(|c| matches!(c, Call::SetPause(false))));
-        assert!(app.pool_on_monitor);
-        assert_eq!(pool_pos(&app), 0.0);
-    }
-
-    // At EOF the project timeline is back; restore the insert cursor then,
-    // not only when the pool closes (and hide the strip in the same tick,
-    // even before mpv flips pause).
-    #[test]
-    fn pool_eof_restores_the_insert_cursor() {
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        app.playhead = 1.5;
-        open_pool_mode(&mut app, 0);
-        // Simulate the cursor straying during preview; EOF must pull it back.
-        app.playhead = 4.0;
-        app.paused = false;
-        app.eof = false;
-        let eof = PlaybackState {
-            paused: false, // mpv reports pause=false at the EOF edge
-            file_loaded: true,
-            eof: true,
-            time_pos: Some(10.0),
-            ..Default::default()
-        };
-        app.sync(&eof);
-        assert_eq!(app.playhead, 1.5, "the insert cursor is restored at EOF");
-        assert!(!pool_strip_active(&app), "the strip hands back at EOF");
     }
 
     // Clip-edge dividers on the track row land on the same columns as the
@@ -9128,10 +8964,10 @@ mod tests {
         );
     }
 
-    // POOL shows the timeline cursor (what the marker shows) first, then the
-    // pooled asset's own clock — never one clock that looks like the playhead.
+    // POOL's main clock is the asset clock, matching the strip marker; the
+    // project cursor is restored when the pool closes.
     #[test]
-    fn the_pool_status_separates_timeline_and_asset_clocks() {
+    fn the_pool_status_shows_the_asset_clock() {
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
         app.playhead = 1.5;
         open_pool_mode(&mut app, 0);
@@ -9140,14 +8976,10 @@ mod tests {
         let fps = Seconds::new(30, 1);
         assert!(text.contains("POOL"), "{text}");
         assert!(
-            text.contains(&fmt_timecode(1.5, Some(&fps))),
-            "timeline cursor: {text}"
-        );
-        assert!(text.contains("pool "), "{text}");
-        assert!(
             text.contains(&fmt_timecode(4.0, Some(&fps))),
             "asset clock: {text}"
         );
+        assert!(!text.contains("pool "), "no split label: {text}");
     }
 
     #[test]

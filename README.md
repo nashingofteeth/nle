@@ -117,12 +117,11 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #   misc:      m media pool — takes over the info pane: asset list
 #              (j/k, { }) + probe metadata; the monitor previews the file
 #              (space play, h/l ±1s, f/F frame, gg/0 start, G/$ end);
-#              while it plays the timeline row shows the asset strip;
-#              paused or ended, the project returns at its insert cursor
-#              (the status shows the asset clock separately) · at the end
-#              the monitor hands back to the timeline video too, paused at
-#              the insert cursor; space replays the asset from 0 ·
-#              enter inserts and returns to the timeline · i imports ·
+#              while the pool is open the timeline row and the monitor show
+#              the selected asset (playing, paused or ended); closing
+#              restores the project at its insert cursor · space plays or
+#              restarts the asset · enter inserts and returns to the timeline ·
+#              i imports ·
 #              d removes · u undoes · R reload · : cmd (:help) · :q · q
 # Tip: everything is undoable; the project file is written after every edit.
 # The bottom "keys" panel always shows the current mode's cheat-sheet and the
