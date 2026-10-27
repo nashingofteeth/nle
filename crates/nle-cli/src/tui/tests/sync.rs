@@ -1,3 +1,4 @@
+use super::super::jobs::PreviewMsg;
 use super::super::motion::{fmt_timecode, secs};
 use super::super::*;
 use super::*;
