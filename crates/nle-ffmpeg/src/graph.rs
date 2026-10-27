@@ -82,8 +82,9 @@ enum Piece {
 
 /// The per-clip effect filters, joined for the chain — empty when there
 /// are none, otherwise `f1,f2,` (the trailing comma is the separator before
-/// the normalize `scale`). A percentage crop resolves against the asset's own
-/// frame (the chain runs before the normalize); other effects ignore it.
+/// the normalize `scale`). The chain runs before the normalize `scale`, so
+/// any effect that measures the frame — crop, scale, and the distance an
+/// offset moves — resolves against the asset's own frame, not the output.
 fn clip_effects(c: &Clip, asset: &Asset, fallback: (u32, u32)) -> Result<String, CompileError> {
     effect_chain(&c.effects, asset, fallback)
 }
@@ -99,9 +100,12 @@ fn effect_chain(
     if effects.is_empty() {
         return Ok(String::new());
     }
-    let needs_geometry = effects
-        .iter()
-        .any(|e| matches!(e, Effect::Crop { .. } | Effect::Scale { .. }));
+    let needs_geometry = effects.iter().any(|e| {
+        matches!(
+            e,
+            Effect::Crop { .. } | Effect::Scale { .. } | Effect::Offset { .. }
+        )
+    });
     let canvas = if needs_geometry {
         asset
             .video_size()
@@ -1114,6 +1118,29 @@ mod tests {
             ),
             "{g}"
         );
+    }
+
+    // An offset measures the distances to the edges of the frame the chain
+    // runs on — the asset's own picture, since effects go before the
+    // normalize. Resolving it against the output size instead produced a
+    // crop of the output's dimensions against a smaller stream (export
+    // refused at best, misframed at worst when the asset happens to be
+    // larger than the sequence).
+    #[test]
+    fn an_offset_resolves_against_the_assets_frame() {
+        let mut p = project_with_two_clips(); // output 1920×1080; clip 2 is 1280×720
+        if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[2] {
+            c.effects = vec![Effect::Offset { x: 50.0, y: 0.0 }];
+        }
+        let g = compile_export(&p).unwrap().graph;
+        // Half of the 1280-wide frame: the picture's on-canvas part moves
+        // right, leaving transparent canvas on the left.
+        assert!(
+            g.contains("crop=640:720:0:0,pad=1280:720:640:0:color=black@0"),
+            "{g}"
+        );
+        // The output's 960×1080 half-geometry must not leak into the chain.
+        assert!(!g.contains("crop=960:1080"), "{g}");
     }
 
     // A transition renders its neighbours' material, so their effects apply to
