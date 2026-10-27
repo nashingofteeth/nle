@@ -1,6 +1,6 @@
 use super::super::*;
 use super::*;
-use crate::timeline::{Gap, Segment};
+use crate::timeline::{Gap, MAX_TIMELINE_SECONDS, Segment};
 
 #[test]
 fn track_ops_target_the_chosen_track_only() {
