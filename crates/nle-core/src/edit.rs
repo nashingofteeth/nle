@@ -3075,12 +3075,20 @@ fn delete_transition_on(
         restored.push("right");
     }
 
-    ops.push(EditOp::Remove {
-        track: ti,
-        index: si,
-        segment: Segment::Transition(t),
-    });
-    let desc = if restored.is_empty() {
+    // One gap, never two: a gap neighbour that was NOT restored (the clip
+    // holding the handle was deleted) leaves the removed span as a second
+    // adjacent gap — the one shape track deletes never produce
+    // (`delete_under_on` fuses). The span must not vanish, which would yank
+    // the followers: it joins the neighbouring gap(s). Any restored side
+    // already covers the whole blend span (both sides overlay it, black
+    // included), so fusing only applies when *nothing* was restored — a
+    // restored handle beside a gap leaves that gap alone.
+    let dur = t.dur;
+    let blend = Segment::Transition(t);
+    let plain = restored.is_empty();
+    let left_gap = plain && si > 0 && matches!(segs[si - 1], Segment::Gap(_));
+    let right_gap = plain && si + 1 < segs.len() && matches!(segs[si + 1], Segment::Gap(_));
+    let mut desc = if restored.is_empty() {
         "delete transition".to_string()
     } else {
         format!(
@@ -3088,6 +3096,73 @@ fn delete_transition_on(
             restored.join(" and ")
         )
     };
+    match (left_gap, right_gap) {
+        (true, true) => {
+            let total = segs[si - 1].duration() + dur + segs[si + 1].duration();
+            desc += " (merged gaps)";
+            ops.extend([
+                EditOp::Replace {
+                    track: ti,
+                    index: si - 1,
+                    before: segs[si - 1].clone(),
+                    after: Segment::Gap(Gap { duration: total }),
+                },
+                EditOp::Remove {
+                    track: ti,
+                    index: si,
+                    segment: blend.clone(),
+                },
+                EditOp::Remove {
+                    track: ti,
+                    index: si,
+                    segment: segs[si + 1].clone(),
+                },
+            ]);
+        }
+        _ if left_gap => {
+            desc += " (the span joins the gap)";
+            ops.extend([
+                EditOp::Replace {
+                    track: ti,
+                    index: si - 1,
+                    before: segs[si - 1].clone(),
+                    after: Segment::Gap(Gap {
+                        duration: segs[si - 1].duration() + dur,
+                    }),
+                },
+                EditOp::Remove {
+                    track: ti,
+                    index: si,
+                    segment: blend.clone(),
+                },
+            ]);
+        }
+        _ if right_gap => {
+            desc += " (the span joins the gap)";
+            ops.extend([
+                EditOp::Replace {
+                    track: ti,
+                    index: si + 1,
+                    before: segs[si + 1].clone(),
+                    after: Segment::Gap(Gap {
+                        duration: segs[si + 1].duration() + dur,
+                    }),
+                },
+                EditOp::Remove {
+                    track: ti,
+                    index: si,
+                    segment: blend.clone(),
+                },
+            ]);
+        }
+        // Stale clip sides on both sides: the blend's span is really gone
+        // (see the stale-neighbour test), so plain deletion shortens.
+        _ => ops.push(EditOp::Remove {
+            track: ti,
+            index: si,
+            segment: blend,
+        }),
+    }
     Ok(Batch { ops, desc })
 }
 
@@ -8448,6 +8523,84 @@ mod tests {
             }
             other => panic!("expected the two clips, got {other:?}"),
         }
+    }
+
+    // With no handle left to restore, the removed blend's span joins the
+    // neighbouring gap(s): two adjacent gaps would be the one shape track
+    // deletes never produce, and the span can't just vanish (that ripples
+    // everything after it). Any restored handle covers the whole span (the
+    // sides overlay it), so these cases all have no restore left.
+    #[test]
+    fn deleting_a_transition_fuses_the_span_into_the_gaps() {
+        let mut p = clip_pair(); // [C1 0..3][C2 3..6]
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        // [C1' 0..2][T 2..3][C2' 3..5]: delete both handles
+        // -> [gap 0..2][T 2..3][gap 3..5]
+        let batch = delete_under(&p, 1.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let batch = delete_under(&p, 4.0).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let end = p.timeline.end(); // 5
+
+        let batch = delete_under(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("merged gaps"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        let segs = &p.timeline.video_track().unwrap().segments;
+        match &segs[..] {
+            [Segment::Gap(g)] => {
+                assert_eq!(g.duration, Seconds::from_integer(5), "one fused gap");
+            }
+            other => panic!("expected a single gap, got {other:?}"),
+        }
+        assert_eq!(p.timeline.end(), end, "no ripple: the length holds");
+
+        // A gap on one side only: with the right handle stale (the clip
+        // changed since), the left gap alone absorbs the span, the track
+        // keeps its length, and the stale clip never moves.
+        let mut p = clip_pair();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let batch = delete_under(&p, 1.0).unwrap(); // C1' -> gap [0..2)
+        h.apply(&mut p, batch, 0).unwrap();
+        let Segment::Clip(c2) = &mut p.timeline.video_track_mut().unwrap().segments[2] else {
+            unreachable!()
+        };
+        c2.asset_in += Seconds::from_integer(1); // stale right handle
+        let end = p.timeline.end(); // 5
+
+        let batch = delete_under(&p, 2.5).unwrap();
+        assert!(batch.desc.contains("span joins the gap"), "{}", batch.desc);
+        h.apply(&mut p, batch, 0).unwrap();
+        let segs = &p.timeline.video_track().unwrap().segments;
+        match &segs[..] {
+            [Segment::Gap(g), Segment::Clip(c)] => {
+                assert_eq!(g.duration, Seconds::from_integer(3), "2 + the span");
+                assert_eq!(c.asset_in, Seconds::from_integer(2), "C2 stays stale");
+            }
+            other => panic!("expected gap/clip, got {other:?}"),
+        }
+        assert_eq!(p.timeline.end(), end, "no ripple: the length holds");
+        assert_eq!(
+            p.timeline.video_track().unwrap().start_of(1),
+            Seconds::from_integer(3),
+            "C2 is unmoved"
+        );
     }
 
     /// A straddled transition that would shrink to under a frame is dropped
