@@ -167,7 +167,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   (`persist_playhead` → `Ok(false)`).
 - **Gaps and the pool.** `Mode::Pool(PoolState)` keeps "pool open" and its
   selection together; tracks are 1-based (0 refused); a shorter track pads
-  with a trailing gap in the row and the preview.
+  with a trailing gap in the row and the preview. The pool remembers the
+  selected asset (by id), preview clock, and timeline resume across toggles
+  and command detours (`remember_pool`); closing restores the cursor.
 - **One quantizer per axis.** Draw from the same function the playhead/cut
   indicator uses (`marker_col`), or drawn edges drift from real cuts.
 

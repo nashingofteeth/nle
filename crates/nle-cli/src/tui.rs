@@ -483,9 +483,12 @@ pub struct App {
     pub eof: bool,
     pub mpv_error: Option<String>,
     pub exit_message: Option<String>,
-    /// Remembered pool row so reopening the panel returns there. A sticky UI
-    /// preference, not panel state (whether the panel is open is `Mode::Pool`).
+    /// Remembered pool state so reopening the panel returns to the same
+    /// asset and preview clock. Sticky UI state, not panel state (whether the
+    /// panel is open is `Mode::Pool`).
     last_pool_sel: usize,
+    last_pool_pos: f64,
+    last_pool_asset: Option<u32>,
     /// The scale form's aspect lock is sticky across forms and edits and on by
     /// default; turning it off keeps later scale forms unlocked.
     fx_scale_lock: bool,
@@ -538,6 +541,8 @@ impl App {
             mpv_error: None,
             exit_message: None,
             last_pool_sel: 0,
+            last_pool_pos: 0.0,
+            last_pool_asset: None,
             fx_scale_lock: true,
             active_track: 0,
             job: None,
@@ -1061,6 +1066,17 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
 
 // ------------------------------------------------------------ keys
 
+/// Snapshot the pool's selected asset and preview clock for the next open.
+fn remember_pool(app: &mut App) {
+    let (sel, pos) = match &app.mode {
+        Mode::Pool(p) => (p.sel, p.pos),
+        _ => return,
+    };
+    app.last_pool_sel = sel;
+    app.last_pool_pos = pos;
+    app.last_pool_asset = app.project.media.get(sel).map(|a| a.id);
+}
+
 /// Pool-state accessors. `Mode::Pool` is `Copy`, so these take/return owned
 /// values and each borrow ends at the statement. That is what lets pool
 /// handlers stay `&mut App` while also touching `project`/`history` — a helper
@@ -1226,6 +1242,7 @@ fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('d') => remove_from_pool(app, player),
         // Import a file into the pool: opens the command line pre-filled.
         KeyCode::Char('i') => {
+            remember_pool(app);
             app.command_from_pool = true;
             app.mode = Mode::Command("import ".to_string());
         }
@@ -1315,31 +1332,50 @@ fn pool_select(app: &mut App, player: &dyn Mpv, sel: usize) {
     load_pool_preview(app, player);
 }
 
-/// Load the selected asset into the monitor as a raw file.
+/// Load the selected asset into the monitor as a raw file from its start.
 fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
+    load_pool_preview_at(app, player, 0.0);
+}
+
+/// Load the selected asset at `start` (clamped to its frames). Used by the
+/// reopen snapshot as well as a fresh selection.
+fn load_pool_preview_at(app: &mut App, player: &dyn Mpv, start: f64) {
     let Some(sel) = pool_sel(app) else { return };
-    let Some(path) = app.project.media.get(sel).map(|a| a.path.clone()) else {
+    let Some(asset) = app.project.media.get(sel) else {
         return;
     };
-    set_pool_pos(app, 0.0);
+    let path = asset.path.clone();
+    let dur = asset.duration().map(|d| secs(&d)).unwrap_or(0.0);
+    let last = pool_last_frame(app, dur);
+    let start = if start.is_finite() {
+        start.clamp(0.0, last)
+    } else {
+        0.0
+    };
+    set_pool_pos(app, start);
     app.pool_on_monitor = true;
     app.pool_handoff = None;
     app.pending_pause = None;
     app.eof = false; // a freshly loaded file is not at EOF
-    player.load(&path.display().to_string(), Some(0.0));
+    player.load(&path.display().to_string(), Some(start));
 }
 
 /// Open the pool: remember the timeline playhead, preview the last row.
 fn open_pool(app: &mut App, player: &dyn Mpv) {
+    let len = app.project.media.len();
+    // Prefer the remembered asset id: an import/removal may have moved rows.
     let sel = app
-        .last_pool_sel
-        .min(app.project.media.len().saturating_sub(1));
+        .last_pool_asset
+        .and_then(|id| app.project.media.iter().position(|a| a.id == id))
+        .unwrap_or_else(|| app.last_pool_sel.min(len.saturating_sub(1)));
+    let same_asset = app.project.media.get(sel).map(|a| a.id) == app.last_pool_asset;
+    let start = if same_asset { app.last_pool_pos } else { 0.0 };
     app.mode = Mode::Pool(PoolState {
         sel,
-        pos: 0.0,
+        pos: start,
         resume: app.playhead,
     });
-    load_pool_preview(app, player);
+    load_pool_preview_at(app, player, start);
     app.set_message("media");
 }
 
@@ -1365,9 +1401,7 @@ fn close_pool(app: &mut App, player: &dyn Mpv) {
 /// back **paused**: mpv is often playing at EOF, and an auto-playing EDL
 /// would let the cut magnet move the landing.
 fn close_pool_at(app: &mut App, player: &dyn Mpv, at: f64) {
-    if let Some(sel) = pool_sel(app) {
-        app.last_pool_sel = sel; // capture on exit so reopening returns here
-    }
+    remember_pool(app);
     app.mode = Mode::Normal;
     app.playhead = at.clamp(0.0, app.last_frame());
     app.pending_pause = Some(true);
@@ -3666,7 +3700,10 @@ fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
             .min(app.project.media.len().saturating_sub(1));
         set_pool_sel(app, sel);
         crate::log::line(&format!("load pool preview #{sel}"));
-        load_pool_preview(app, player);
+        // An undo/edit shouldn't rewind the preview; clamp the old clock to
+        // the (possibly different) selected asset.
+        let pos = pool_pos(app);
+        load_pool_preview_at(app, player, pos);
     } else {
         // Proxy renders are seconds of ffmpeg: build the EDL off-thread and
         // let the status row show progress. A newer edit supersedes this one.
@@ -4392,9 +4429,9 @@ fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
 fn render(f: &mut Frame, app: &App) {
     // Size the timeline to show every track, then give what's left to the
     // info panel and the bottom panels. The bottom panels are dropped before
-    // the timeline is allowed to hide a track. While the pool preview is
-    // *playing* the panel shows that asset's one-clip strip instead, so one
-    // row + marker is enough and the freed rows go to the pool list below.
+    // the timeline is allowed to hide a track. While the pool is open the
+    // panel is that asset's one-clip strip, so one row + marker is enough and
+    // the freed rows go to the pool list below.
     let track_count = if pool_strip_active(app) {
         1
     } else {
@@ -4847,9 +4884,9 @@ fn pool_set_track(app: &mut App, idx: usize) {
 }
 
 fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
-    // While the pool preview is playing the monitor is off the project, so
-    // the timeline row temporarily becomes the selected asset's own strip.
-    // Paused, fall through to the project: the insert point stays visible.
+    // While the pool is open the monitor is off the project, so the timeline
+    // row is the selected asset's own strip — playing, paused or ended. The
+    // project (and its insert point) returns on close.
     if pool_strip_active(app)
         && let Mode::Pool(st) = &app.mode
     {
@@ -10292,11 +10329,40 @@ mod tests {
         handle_key(&mut app, &fake, key('m')); // open
         handle_key(&mut app, &fake, key('j')); // second row
         assert_eq!(pool_sel(&app), Some(1));
+        set_pool_pos(&mut app, 3.0);
 
-        handle_key(&mut app, &fake, key('m')); // close (captures row 1)
+        handle_key(&mut app, &fake, key('m')); // close (captures row/clock)
         assert!(!is_pool(&app));
         handle_key(&mut app, &fake, key('m')); // reopen
         assert_eq!(pool_sel(&app), Some(1), "reopened on the last row");
+        assert_eq!(pool_pos(&app), 3.0, "and at the last preview clock");
+    }
+
+    // The `i` command closes the panel to use the command line; the selected
+    // asset and clock survive that detour too.
+    #[test]
+    fn pool_command_preserves_the_pool_state() {
+        let mut p = asset_project();
+        p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
+        p.timeline.video_track_mut().unwrap().segments.remove(1); // no black file
+        let mut app = App::new(p, PathBuf::from("t.json"));
+        app.loaded = true;
+        let fake = FakeMpv::new();
+        handle_key(&mut app, &fake, key('m'));
+        handle_key(&mut app, &fake, key('j'));
+        set_pool_pos(&mut app, 4.0);
+        handle_key(&mut app, &fake, key('i'));
+        assert!(matches!(app.mode, Mode::Command(_)));
+        handle_key(
+            &mut app,
+            &fake,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert!(!is_pool(&app));
+
+        handle_key(&mut app, &fake, key('m'));
+        assert_eq!(pool_sel(&app), Some(1), "same asset selected");
+        assert_eq!(pool_pos(&app), 4.0, "same preview clock");
     }
 
     // `i` in the pool opens the import path prompt (command line pre-filled).

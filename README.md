@@ -118,7 +118,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 #              (j/k, { }) + probe metadata; the monitor previews the file
 #              (space play, h/l ±1s, f/F frame, gg/0 start, G/$ end);
 #              while the pool is open the timeline row and the monitor show
-#              the selected asset (playing, paused or ended); closing
+#              the selected asset (playing, paused or ended); reopening
+#              returns to the same asset and preview clock, and closing
 #              restores the project at its insert cursor · space plays or
 #              restarts the asset · enter inserts and returns to the timeline ·
 #              i imports ·
