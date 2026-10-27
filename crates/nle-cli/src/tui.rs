@@ -468,6 +468,9 @@ pub struct App {
     /// async EDL reload is in flight the mode is already Normal, so this keeps
     /// `sync` from mapping the pooled clock onto the timeline playhead.
     pool_on_monitor: bool,
+    /// After closing the pool, the timeline EDL is loaded at this position.
+    /// Keep ignoring mpv's old pooled clock until the new file reports it.
+    pool_handoff: Option<f64>,
     // synced from mpv every tick
     pub paused: bool,
     pub loaded: bool,
@@ -524,6 +527,7 @@ impl App {
             message: String::new(),
             command_from_pool: false,
             pool_on_monitor: false,
+            pool_handoff: None,
             paused: true,
             loaded: false,
             dead: false,
@@ -602,10 +606,29 @@ impl App {
         // canonical positions that cuts, the white indicator, and edit
         // keys depend on.
         //
-        // In extend mode mpv plays the material preview, whose position 0
-        // is the range start: translate back to timeline coordinates.
+        // The pool left the monitor, but mpv may still report the pooled file
+        // until `loadfile` swaps in the timeline EDL. Wait until the new file
+        // reports the landing position before letting its clock drive the
+        // playhead — otherwise the pool's end can be snapped onto a cut.
+        let mut landed = false;
+        if self.pool_on_monitor
+            && let Some(landing) = self.pool_handoff
+            && st.file_loaded
+        {
+            let tol = self.project.fps.as_ref().map_or(0.05, |f| 2.0 / secs(f));
+            if st.time_pos.is_some_and(|t| (t - landing).abs() <= tol) {
+                self.pool_handoff = None;
+                self.pool_on_monitor = false;
+                // The model already owns the landing; don't snap it here.
+                self.playhead = landing.clamp(0.0, self.last_frame());
+                landed = true;
+            }
+        }
+        // In extend mode mpv plays the material preview, whose position 0 is
+        // the range start: translate back to timeline coordinates.
         if !st.paused
             && st.file_loaded
+            && !landed
             && let Some(t) = st.time_pos
         {
             if is_pool(self) {
@@ -802,7 +825,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     let mut out = format!("project: {}\n", path.display());
     out.push_str(&crate::show_report(&app.project));
     out.push_str(&format!(
-        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {}\nmessage: {:?}\n",
+        "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {} · pool-handoff: {:?}\nmessage: {:?}\n",
         app.mode,
         track_label(&app.project, app.active()),
         app.playhead,
@@ -810,6 +833,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
         app.paused,
         app.eof,
         app.pool_on_monitor,
+        app.pool_handoff,
         app.message,
     ));
     out.push_str(&format!("=== grid {w}x{h} ===\n"));
@@ -1291,6 +1315,7 @@ fn load_pool_preview(app: &mut App, player: &dyn Mpv) {
     };
     set_pool_pos(app, 0.0);
     app.pool_on_monitor = true;
+    app.pool_handoff = None;
     app.eof = false; // a freshly loaded file is not at EOF
     player.load(&path.display().to_string(), Some(0.0));
 }
@@ -1971,9 +1996,11 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
                 } else if !pool {
                     match result {
                         Ok(url) => {
-                            // The timeline is on the monitor again, so its
-                            // clock may drive the playhead once more.
-                            app.pool_on_monitor = false;
+                            // Keep ignoring the pooled clock until the EDL's
+                            // own file reports the landing (see `sync`).
+                            if app.pool_on_monitor {
+                                app.pool_handoff = Some(app.playhead);
+                            }
                             player.load(&url, Some(app.playhead));
                         }
                         Err(e) => preview_failed(app, &e.to_string()),
@@ -3756,6 +3783,7 @@ fn apply_extend_plan(app: &mut App, player: &dyn Mpv, plan: ExtendPlan, ripple: 
     // The material preview is not the pooled file; its clock maps back
     // through `preview_off` (see `sync`).
     app.pool_on_monitor = false;
+    app.pool_handoff = None;
     let flag = if ripple { " · RIPPLE" } else { "" };
     app.set_message(&format!(
         "extend {}{flag} — navigate, e to commit",
@@ -4053,6 +4081,7 @@ fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
     match preview::build_composite_edl(&app.project) {
         Ok(edl) => {
             app.pool_on_monitor = false;
+            app.pool_handoff = None;
             player.load(&edl, Some(pos.max(0.0)));
         }
         Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
@@ -7866,20 +7895,44 @@ mod tests {
             "still on the raw file until the EDL loads"
         );
 
-        let raw = PlaybackState {
-            time_pos: Some(2.5),
+        // `poll_preview` records the landing before it loads the EDL.
+        app.pool_handoff = Some(6.0);
+
+        // The old pooled clock still reports its end (and duration). Even
+        // though 2.9667 would snap to the cut at 3.0, it must be ignored.
+        let pooled = PlaybackState {
+            time_pos: Some(2.9667),
             paused: false,
             file_loaded: true,
+            duration: Some(3.0),
             ..Default::default()
         };
-        app.sync(&raw);
+        app.sync(&pooled);
         assert_eq!(
             app.playhead, 6.0,
             "the pooled clock must not move the playhead"
         );
 
-        // Once the timeline EDL is on the monitor, its clock drives again.
-        app.pool_on_monitor = false;
+        // Once the EDL reports the landing/duration, its clock drives again.
+        let edl = PlaybackState {
+            time_pos: Some(6.0),
+            paused: false,
+            file_loaded: true,
+            duration: Some(7.0),
+            ..Default::default()
+        };
+        app.sync(&edl);
+        assert_eq!(app.playhead, 6.0);
+        assert!(!app.pool_on_monitor);
+        assert!(app.pool_handoff.is_none());
+
+        let raw = PlaybackState {
+            time_pos: Some(2.5),
+            paused: false,
+            file_loaded: true,
+            duration: Some(7.0),
+            ..Default::default()
+        };
         app.sync(&raw);
         assert!((app.playhead - 2.5).abs() < 1e-9);
     }
@@ -9230,6 +9283,30 @@ mod tests {
             vec![Call::Load("edl://built".into(), Some(1.5))]
         );
         assert!(app.preview.is_none() && app.preview_progress.is_none());
+    }
+
+    // Leaving the pool records the landing; the old pooled clock stays
+    // ignored until the EDL is actually the monitor's file.
+    #[test]
+    fn poll_preview_records_the_pool_landing() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 2.0;
+        app.pool_on_monitor = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
+        tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
+            .unwrap();
+        poll_preview(&mut app, &fake);
+        assert!(app.pool_on_monitor, "still ignores the pooled clock");
+        assert_eq!(app.pool_handoff, Some(2.0));
+        assert_eq!(
+            fake.calls(),
+            vec![Call::Load("edl://timeline".into(), Some(2.0))]
+        );
     }
 
     // A build that finishes after a newer edit is discarded — its EDL is
