@@ -12,9 +12,13 @@ use crate::mpv::Mpv;
 
 use super::super::actions::run_action;
 use super::super::jobs::start_preview;
+use super::super::keys::completes_gg;
+use super::super::keys::do_redo;
+use super::super::keys::do_undo;
+use super::super::keys::select_active_track;
 use super::super::{
-    App, Mode, Pending, PoolState, completes_gg, do_redo, do_undo, is_pool, pool_pos, pool_resume,
-    pool_sel, remember_pool, secs, select_active_track, set_pool_pos, set_pool_sel,
+    App, Mode, Pending, PoolState, is_pool, pool_pos, pool_resume, pool_sel, remember_pool, secs,
+    set_pool_pos, set_pool_sel,
 };
 /// Media-pool panel keys: move the list (loading each asset for preview),
 /// insert/remove, and seek/play the preview.

@@ -1,4 +1,5 @@
 use super::super::jobs::PreviewMsg;
+use super::super::keys::handle_key;
 use super::super::keys::pool::{
     close_pool_at, insert_from_pool, load_pool_preview, pool_last_frame, pool_step_target,
     pool_strip_active,

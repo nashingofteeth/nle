@@ -6,6 +6,7 @@ use super::super::panels::timeline::render_timeline;
 use super::super::*;
 use nle_core::time::Seconds;
 
+use super::super::keys::handle_key;
 use super::*;
 use ratatui::layout::Rect;
 use ratatui::widgets::Block;

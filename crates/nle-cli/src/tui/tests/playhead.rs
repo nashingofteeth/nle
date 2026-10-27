@@ -2,6 +2,7 @@ use super::super::actions::{
     Anchor, GapAnchor, MediaAnchor, clip_anchor, edit_anchor, edit_yank, reanchor_playhead,
     trim_key,
 };
+use super::super::keys::handle_key;
 use super::super::*;
 use super::*;
 use nle_core::edit;

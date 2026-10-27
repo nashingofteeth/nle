@@ -2,6 +2,7 @@ use super::super::actions::clip_edge_under;
 use super::super::keys::extend::{
     ExtendPreviewSpec, Side, armed_on_side, flip_target, plan_for_armed, run_commit_action,
 };
+use super::super::keys::handle_key;
 use super::super::*;
 use super::*;
 use nle_core::time::Seconds;

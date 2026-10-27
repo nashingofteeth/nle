@@ -1,4 +1,5 @@
 use super::super::keys::fx::{form_for, form_for_effect};
+use super::super::keys::handle_key;
 use super::super::panels::fx::render_fx;
 use super::super::*;
 use super::*;

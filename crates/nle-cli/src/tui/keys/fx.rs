@@ -10,11 +10,11 @@ use nle_core::{Action, EditError, TransitionLen, edit, secs_f64};
 use crate::mpv::Mpv;
 
 use super::super::actions::run_action;
+use super::super::keys::{do_redo, do_undo};
 use super::super::{
     App, FieldKind, FxField, FxForm, FxState, Mode, TransitionForm, clamp_fx_sel, clip_by_id,
     clip_ending_at, clip_under, fx_state, fx_state_mut, set_fx_form, set_fx_sel,
 };
-use super::super::{do_redo, do_undo};
 /// `x` — open the effects panel on the clip under the playhead (or the clip
 /// ending there, so `xx` works at a clip|gap cut). Effects are video filters,
 /// so an audio clip gets the model's own refusal.

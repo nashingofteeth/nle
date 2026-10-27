@@ -1,4 +1,5 @@
 use super::super::keys::fx::form_for_effect;
+use super::super::keys::{completes_gg, handle_key};
 use super::super::*;
 use super::*;
 use nle_core::Armed;
