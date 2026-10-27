@@ -661,14 +661,18 @@ impl App {
         self.loaded = st.file_loaded;
         self.dead = st.dead;
         self.eof = st.eof;
-        // Pool at EOF: pin the clock to the last frame so it doesn't read
-        // a couple frames short of the file's probe duration.
+        // Pool at EOF: the playback is over, so the project timeline (not
+        // the strip) is on screen. Pin the asset clock to its last frame and
+        // restore the timeline cursor to the pre-pool position now — the
+        // insert point must not wait for Esc.
         if is_pool(self) && st.eof {
             let sel = pool_sel(self).unwrap_or(0);
             if let Some(d) = self.project.media.get(sel).and_then(|a| a.duration()) {
                 let last = pool_last_frame(self, secs(&d));
                 set_pool_pos(self, last);
             }
+            let resume = pool_resume(self);
+            self.playhead = resume.clamp(0.0, self.last_frame());
         }
         if let Some(e) = &st.last_error {
             if self.mpv_error.as_deref() != Some(e.as_str()) {
@@ -4945,10 +4949,11 @@ fn render_timeline(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// True while the timeline panel should show the pooled asset instead of the
-/// project: the pool is open **and** its preview is playing. Paused, the
-/// project is back so the insert point (and the `enter` target) is visible.
+/// project: the pool is open **and** its preview is playing. Paused (or at
+/// EOF — mpv reports `pause: false` for a moment at the end), the project is
+/// back so the insert point (and the `enter` target) is visible.
 fn pool_strip_active(app: &App) -> bool {
-    is_pool(app) && !app.paused
+    is_pool(app) && !app.paused && !app.eof
 }
 
 /// The pool previews a raw file, so the monitor is not on the project
@@ -6373,6 +6378,19 @@ mod tests {
             buf[(want as u16, 2u16)].symbol(),
             "▏",
             "marker follows the preview clock:\n{playing}"
+        );
+
+        // The instant the file ends, the project is back even though mpv may
+        // still report pause=false for a tick: the insert cursor is visible.
+        app.eof = true;
+        let (ended, _) = draw(&app);
+        assert!(
+            ended.contains("red.mp4"),
+            "EOF returns to the project: {ended}"
+        );
+        assert!(
+            !ended.contains("pooled.mp4"),
+            "the strip is playing-only: {ended}"
         );
     }
 
@@ -7992,6 +8010,30 @@ mod tests {
         app.sync(&eof);
         assert_eq!(app.playhead, before);
         assert_eq!(pool_resume(&app), before);
+    }
+
+    // At EOF the project timeline is back; restore the insert cursor then,
+    // not only when the pool closes (and hide the strip in the same tick,
+    // even before mpv flips pause).
+    #[test]
+    fn pool_eof_restores_the_insert_cursor() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.5;
+        open_pool_mode(&mut app, 0);
+        // Simulate the cursor straying during preview; EOF must pull it back.
+        app.playhead = 4.0;
+        app.paused = false;
+        app.eof = false;
+        let eof = PlaybackState {
+            paused: false, // mpv reports pause=false at the EOF edge
+            file_loaded: true,
+            eof: true,
+            time_pos: Some(10.0),
+            ..Default::default()
+        };
+        app.sync(&eof);
+        assert_eq!(app.playhead, 1.5, "the insert cursor is restored at EOF");
+        assert!(!pool_strip_active(&app), "the strip hands back at EOF");
     }
 
     // Clip-edge dividers on the track row land on the same columns as the
