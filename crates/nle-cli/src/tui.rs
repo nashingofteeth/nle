@@ -4557,10 +4557,10 @@ fn hints_for(app: &App) -> Vec<&'static str> {
     if let Mode::Command(_) = app.mode {
         return vec![
             "type a command · enter run · esc cancel · flags: --at T --track N --ripple",
-            "edits   :split :trim-in|out :delete :yank :paste :gap :extend :speed :undo :redo",
-            "tracks  :track add video|audio · :track mute [N] · :track rm N · :track ls",
+            "edits   :split :trim-in|out :delete :yank :paste :gap :extend :speed",
+            "history :undo :redo · tracks :track add video|audio · :track rm N",
             "media   :import PATH… · :add FILE · :media ls · :media rm N",
-            "more    :show :seek T :purge :detect :edl-import :otio-import :export · :help · :q",
+            "more    :show :seek :purge :detect :edl-import :otio-import :export",
         ];
     }
     if matches!(app.mode, Mode::Extend(_)) {
@@ -4573,7 +4573,7 @@ fn hints_for(app: &App) -> Vec<&'static str> {
     if is_pool(app) {
         return vec![
             "media pool — the monitor previews the selected file",
-            "j/k assets · { } list ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
+            "j/k assets · { } ends · h/l ±1s · H/L ±5s · f/F frame · gg/0 start · G/$ end",
             "space play · enter insert · i import · d remove · u undo · m/esc close",
             "tracks     t/T target · <N>t jump · insert goes to the active track",
         ];
@@ -4588,7 +4588,8 @@ fn hints_for(app: &App) -> Vec<&'static str> {
         if let Some(form) = fx_state(app).and_then(|st| st.form.as_ref()) {
             return vec![
                 form_hint(form.kind),
-                "letters jump · tab/↑↓ field · space toggles lock · enter applies · ctrl-u clears · esc cancels",
+                "letters jump · tab/↑↓ field · space toggles lock · enter applies",
+                "ctrl-u clears · esc cancels",
             ];
         }
         return vec![
@@ -4600,11 +4601,10 @@ fn hints_for(app: &App) -> Vec<&'static str> {
     vec![
         "transport  space play · h/l ±1s · H/L ±5s · f/F frame · gg/G/0/$ ends",
         "motion     j/k cuts · w/b clips · n/N gaps · < > (, .) clip start/end",
-        "edit       i/o trim · I/O ripple-trim · s split · _ gap · dd/D delete · yy/p/P",
+        "edit       i/o trim · I/O ripple · s split · _ gap · dd/D del · yy/p/P",
         "           r speed · X transition · e/E extend · [ ] side · m pool",
-        "extend     e/E enter · [ ] side · m pool · u undo · Esc cancel · : cmd · q quit",
-        "effects    x panel · c/s/e/o add · d/D drop/clear (in the panel)",
-        "tracks     t/T cycle · <N>t jump to N · :track add video|audio",
+        "effects    x panel · c/s/e/o add/edit · d/D drop · u undo · Ctrl-r redo",
+        "tracks     t/T cycle · <N>t jump · :track add · : cmd · Esc · q quit",
     ]
 }
 
@@ -6377,6 +6377,89 @@ mod tests {
             !text.contains("a2.mp4"),
             "list scrolled, early rows gone:\n{text}"
         );
+    }
+
+    // The keys panel reserves six inner rows (panel_heights gives it 8 with
+    // borders) and wraps at the inner width (78 at 80 columns) — one row of
+    // margin, the repo's "≲76 columns" rule. A sheet that outgrows the rows
+    // is silently clipped: the normal sheet had seven lines for six rows,
+    // and one line wrapped past the width. Count *rendered* rows, so wrapped
+    // prose (the effects form's description) is allowed when it still fits.
+    #[test]
+    fn every_mode_hints_fit_the_keys_panel() {
+        let cases: Vec<(&str, App)> = vec![
+            ("normal", App::new(asset_project(), PathBuf::from("t.json"))),
+            ("command", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Command("x".into());
+                a
+            }),
+            ("extend", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Extend(ExtendState {
+                    track: 0,
+                    armed: Armed::Clip { id: 1, head: false },
+                    edge_pos: 3.0,
+                    ripple: false,
+                    lo: 0.0,
+                    hi: Some(9.0),
+                    mat: None,
+                    preview_off: -1.0,
+                });
+                a
+            }),
+            ("pool", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                open_pool_mode(&mut a, 0);
+                a
+            }),
+            ("transition", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Transition(TransitionForm {
+                    id: 1,
+                    start: 2.0,
+                    kind: TransitionKind::Dissolve,
+                    frames: String::new(),
+                    current: 30,
+                });
+                a
+            }),
+            ("fx list", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                a.mode = Mode::Fx(FxState {
+                    clip: 1,
+                    sel: 0,
+                    form: None,
+                });
+                a
+            }),
+            ("fx form", {
+                let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+                let effect = Effect::Crop {
+                    left: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                };
+                a.mode = Mode::Fx(FxState {
+                    clip: 1,
+                    sel: 0,
+                    form: Some(form_for_effect(&effect, 0)),
+                });
+                a
+            }),
+        ];
+        for (name, app) in &cases {
+            let rows: usize = hints_for(app)
+                .iter()
+                .map(|l| l.chars().count().div_ceil(76))
+                .sum();
+            assert!(rows <= 6, "[{name}] {rows} rendered rows");
+        }
+        // At the default 24-row terminal the panel really is six inner rows:
+        // if this changes, the ceiling above must follow.
+        let (_, keys_h, _) = panel_heights(3, 24);
+        assert_eq!(keys_h, 8, "six inner rows for the hint sheet");
     }
 
     // While the pool is open the timeline panel is the asset's own strip and
