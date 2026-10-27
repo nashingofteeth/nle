@@ -7,7 +7,9 @@ use super::super::motion::secs;
 use super::super::*;
 use super::*;
 use nle_core::edit;
+use nle_core::time::Seconds;
 use nle_core::time::frame_to_secs;
+use nle_core::{Project, frame_of};
 
 // Media pool: an asset used by a clip can't be removed; an unused one
 // goes. Insert-from-pool is the shared ripple path (tested in core).

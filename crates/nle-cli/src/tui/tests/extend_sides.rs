@@ -1,6 +1,11 @@
 use super::super::actions::clip_edge_under;
+use super::super::keys::extend::{
+    ExtendPreviewSpec, Side, armed_on_side, flip_target, plan_for_armed, run_commit_action,
+};
 use super::super::*;
 use super::*;
+use nle_core::time::Seconds;
+use nle_core::{Armed, CommitKind, clip_span, plan_commit, resolve_armed};
 
 // Any gap (here a middle one) can be armed at either edge and
 // extended. The tail ripples/overwrites what follows; the head

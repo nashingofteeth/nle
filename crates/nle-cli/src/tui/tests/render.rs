@@ -1,3 +1,4 @@
+use super::super::keys::extend::plan_for_armed;
 use super::super::keys::fx::form_for_effect;
 use super::super::motion::marker_col;
 use super::super::panels::fx::render_transition_form;
@@ -7,7 +8,9 @@ use super::super::panels::{hints_for, panel_heights, render};
 use super::super::*;
 use super::*;
 use nle_core::edit;
+use nle_core::time::Seconds;
 use nle_core::timeline::Effect;
+use nle_core::{Armed, Project, track_label};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 

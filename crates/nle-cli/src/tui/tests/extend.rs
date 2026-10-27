@@ -1,8 +1,14 @@
+use super::super::keys::extend::{
+    ExtendPreviewSpec, Side, armed_on_side, clamp_extend, extend_step_index, plan_extend,
+    plan_for_armed, projected_total, run_commit_action, snap_extend_target,
+};
 use super::super::motion::{on_boundary, secs};
 use super::super::panels::timeline::render_timeline;
 use super::super::*;
 use super::*;
+use nle_core::time::Seconds;
 use nle_core::time::frame_to_secs;
+use nle_core::{Armed, CommitKind, Project, frame_of, plan_commit, resolve_armed};
 use ratatui::layout::Rect;
 
 #[test]

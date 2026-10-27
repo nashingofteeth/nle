@@ -6,8 +6,10 @@
 use super::keys::command::run_command;
 use super::panels::status::render_status;
 use super::*;
+use nle_core::Project;
 use nle_core::edit;
 use nle_core::media::{RawFormat, RawProbe, RawStream};
+use nle_core::time::Seconds;
 use nle_core::timeline::{Gap as TimelineGap, Timeline, Track, TrackKind};
 use std::path::PathBuf;
 

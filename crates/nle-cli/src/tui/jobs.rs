@@ -6,7 +6,8 @@ use std::time::Instant;
 use crate::mpv::Mpv;
 use crate::preview;
 
-use super::{App, extend_state, is_pool, reload_project};
+use super::keys::extend::extend_state;
+use super::{App, is_pool, reload_project};
 /// A background job (an ffmpeg render, a heavy import): its label for
 /// notices, whether the project file changed underneath us (reload after),
 /// and the channel its worker reports on. One at a time — the monitor

@@ -2,6 +2,8 @@ use super::super::jobs::start_job;
 use super::super::keys::command::{import_command, parse_defaults, run_command};
 use super::super::*;
 use super::*;
+use nle_core::time::Seconds;
+use nle_core::{Action, Target};
 
 #[test]
 fn track_command_adds_mutes_and_removes() {

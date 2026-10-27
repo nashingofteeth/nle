@@ -2,6 +2,8 @@ use super::super::jobs::PreviewMsg;
 use super::super::motion::{fmt_timecode, secs};
 use super::super::*;
 use super::*;
+use nle_core::time::Seconds;
+use nle_core::{Armed, Project};
 
 // The transport flush: a move is detected in frames (the two float
 // paths can differ in the last ulp, which must not retrigger it), and

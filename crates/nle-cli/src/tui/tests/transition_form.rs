@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use nle_core::time::Seconds;
 
 // `x` adds a cross-dissolve at the boundary under the playhead.
 #[test]

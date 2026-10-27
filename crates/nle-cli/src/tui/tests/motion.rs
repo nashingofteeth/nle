@@ -4,6 +4,8 @@ use super::super::motion::{
 };
 use super::super::panels::timeline::render_timeline;
 use super::super::*;
+use nle_core::time::Seconds;
+
 use super::*;
 use ratatui::layout::Rect;
 use ratatui::widgets::Block;

@@ -8,9 +8,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::super::keys::extend::projected_total;
 use super::super::{
     App, CHOMP, CROC, Mode, PREVIEW_NOTICE_DELAY, PreviewProgress, fmt_timecode, is_pool, pool_pos,
-    pool_sel, projected_total, secs,
+    pool_sel, secs,
 };
 pub(crate) fn logo(app: &App) -> &'static str {
     match app.chomp_until {
