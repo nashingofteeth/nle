@@ -139,7 +139,7 @@ pub(crate) fn add_command(
     let mut out_point = None;
     match (|| -> Result<(), String> {
         if let Some(n) = flag_usize(f, "track")? {
-            track = crate::cli_index(n, "--track")?;
+            track = crate::cmd::cli_index(n, "--track")?;
         }
         at = flag_time(f, "at")?.unwrap_or(at);
         in_point = f.take("in");
@@ -154,7 +154,7 @@ pub(crate) fn add_command(
     let Some(kind) = app.project.timeline.track(track).map(|t| t.kind) else {
         return Some(format!("no track #{}", track + 1));
     };
-    let (scratch, imported) = match crate::stage_clip(
+    let (scratch, imported) = match crate::cmd::project::stage_clip(
         &mut app.project,
         &mut app.history,
         &file,
@@ -293,7 +293,7 @@ pub(crate) fn detect_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     };
     let project_path = app.path.clone();
     std::thread::spawn(move || {
-        let result = crate::detect_edits_work(crate::DetectArgs {
+        let result = crate::cmd::detect::detect_edits_work(crate::cmd::detect::DetectArgs {
             project: &project_path,
             file: &file,
             threshold,
@@ -347,7 +347,7 @@ pub(crate) fn edl_import_command(app: &mut App, f: &mut action::Flags) -> Option
     };
     let project_path = app.path.clone();
     std::thread::spawn(move || {
-        let result = crate::import_edl_work(
+        let result = crate::cmd::import::import_edl_work(
             &project_path,
             &file,
             &media,
@@ -391,7 +391,7 @@ pub(crate) fn otio_import_command(app: &mut App, f: &mut action::Flags) -> Optio
     };
     let project_path = app.path.clone();
     std::thread::spawn(move || {
-        let result = crate::import_otio_work(
+        let result = crate::cmd::import::import_otio_work(
             &project_path,
             &file,
             media.as_deref(),
