@@ -19,7 +19,8 @@ use crate::timeline::{
     Clip, Effect, Gap, Segment, Track, Transition, TransitionKind, TransitionSource,
 };
 
-use super::{Batch, EditError, EditOp, HISTORY_VERSION, MAX_HISTORY, video_track_index};
+use super::util::video_track_index;
+use super::{Batch, EditError, EditOp, HISTORY_VERSION, MAX_HISTORY};
 
 /// Undo/redo stack of project changes. `apply` (timeline) and `remove_asset`
 /// (pool) are the only ways in: each snapshots the affected state before
