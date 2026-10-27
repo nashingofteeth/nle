@@ -1,5 +1,7 @@
+use super::super::keys::fx::form_for_effect;
 use super::super::*;
 use super::*;
+use nle_core::timeline::Effect;
 
 // Ctrl-C quits from whichever panel owns the keys — raw mode means no
 // SIGINT, and the panels added after normal mode each dropped the guard.

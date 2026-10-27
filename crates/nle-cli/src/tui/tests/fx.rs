@@ -1,6 +1,8 @@
+use super::super::keys::fx::{form_for, form_for_effect};
 use super::super::panels::fx::render_fx;
 use super::super::*;
 use super::*;
+use nle_core::timeline::Effect;
 
 // `j`/`k` move the row cursor; `d` drops that row (one undo step) and the
 // cursor clamps onto the surviving list.

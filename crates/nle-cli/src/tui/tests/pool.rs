@@ -6,6 +6,7 @@ use super::super::keys::pool::{
 use super::super::motion::secs;
 use super::super::*;
 use super::*;
+use nle_core::edit;
 use nle_core::time::frame_to_secs;
 
 // Media pool: an asset used by a clip can't be removed; an unused one

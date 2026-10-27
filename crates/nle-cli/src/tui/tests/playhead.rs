@@ -4,6 +4,7 @@ use super::super::actions::{
 };
 use super::super::*;
 use super::*;
+use nle_core::edit;
 use nle_core::time::frame_to_secs;
 
 // Post-action playhead placement, one row per settled rule. Each case
