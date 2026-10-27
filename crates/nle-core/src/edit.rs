@@ -2142,7 +2142,11 @@ fn trim_blend_on(
             src_out: a_out,
             ..
         },
-        TransitionSource::Clip { src_out: b_out, .. },
+        TransitionSource::Clip {
+            src_in: b_in,
+            src_out: b_out,
+            ..
+        },
     ) = (&trans.a, &trans.b)
     else {
         return Err(EditError::NoClipSide);
@@ -2166,8 +2170,8 @@ fn trim_blend_on(
             },
             TransitionSource::Clip {
                 asset: b_asset,
-                src_in: next_in,
-                src_out: next.asset_in,
+                src_in: *b_in,
+                src_out: next_in,
                 effects: next.effects.clone(),
             },
             EditOp::Replace {
@@ -7093,12 +7097,56 @@ mod tests {
                 );
                 assert_eq!(
                     side(t, false),
-                    (Seconds::new(1, 2), Seconds::from_integer(1)),
-                    "b follows C2's in"
+                    (Seconds::from_integer(0), Seconds::new(1, 2)),
+                    "b keeps its start and ends at C2's new in"
                 );
             }
             other => panic!("expected clip/blend/clip, got {other:?}"),
         }
+        assert_eq!(
+            (side_rate(&p, 1, true), side_rate(&p, 1, false)),
+            (Seconds::from_integer(1), Seconds::from_integer(1)),
+            "both sides still play at their neighbour's rate"
+        );
+
+        // Off the midpoint (`o` at 2.25 snaps to frame 68 = 34/15): the
+        // blend [2, 34/15); `b` must still end at C2's new in or the seam
+        // skips (and a retime on this blend would refuse with NoClipSide).
+        let mut p = clip_pair();
+        let mut h = History::default();
+        let batch = add_transition(
+            &p,
+            0,
+            3.0,
+            TransitionKind::Dissolve,
+            Seconds::from_integer(1),
+        )
+        .unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        let batch = trim_at_on(&p, 0, 2.25, true, false).unwrap();
+        h.apply(&mut p, batch, 0).unwrap();
+        match &p.timeline.video_track().unwrap().segments[..] {
+            [_, Segment::Transition(t), Segment::Clip(c2)] => {
+                assert_eq!(
+                    side(t, false),
+                    (Seconds::from_integer(0), Seconds::new(4, 15)),
+                    "b spans back from C2's new in"
+                );
+                assert_eq!(c2.asset_in, Seconds::new(4, 15), "C2 reclaimed its head");
+                assert!(
+                    retime_transition_on(&p, 0, 2.125, Seconds::from_integer(1))
+                        .unwrap()
+                        .is_some(),
+                    "the trimmed blend can still be retimed"
+                );
+            }
+            other => panic!("expected clip/blend/clip, got {other:?}"),
+        }
+        assert_eq!(
+            side_rate(&p, 1, false),
+            Seconds::from_integer(1),
+            "b still plays at C2's rate off the midpoint"
+        );
         assert_eq!(
             (side_rate(&p, 1, true), side_rate(&p, 1, false)),
             (Seconds::from_integer(1), Seconds::from_integer(1)),
