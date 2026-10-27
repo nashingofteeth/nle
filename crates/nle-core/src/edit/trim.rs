@@ -805,6 +805,9 @@ pub fn trim_out_ripple_on(
     }
 }
 
+/// Trim a straddled follower's head to `t`, or absorb it whole when under
+/// a frame would remain. A straddled gap simply shrinks to its uncovered
+/// remainder. Appends to `ops`/`absorbed`.
 pub(super) fn trim_or_absorb_head(
     project: &Project,
     ti: usize,

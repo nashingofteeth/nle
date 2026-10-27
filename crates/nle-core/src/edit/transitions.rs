@@ -374,9 +374,6 @@ pub(super) struct Straddle {
     pub(super) seg: Segment,
 }
 
-/// Trim a straddled follower's head to `t`, or absorb it whole when under
-/// a frame would remain. A straddled gap simply shrinks to its uncovered
-/// remainder. Appends to `ops`/`absorbed`.
 /// A transition side's source span, or `None` for black.
 pub(super) fn side_span(side: &TransitionSource) -> Option<Seconds> {
     match side {
