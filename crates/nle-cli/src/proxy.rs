@@ -14,6 +14,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use nle_core::Project;
@@ -190,8 +191,8 @@ pub fn prune_at(
 }
 
 /// A cache entry's name: `<hash>.mp4`, or a crashed render's
-/// `<hash>.tmp-<pid>.mp4`. The hash is written as `{hash:x}`, so it is 1–16
-/// hex digits; anything else in the directory is not ours to delete.
+/// `<hash>.tmp-<pid>-<seq>.mp4`. The hash is written as `{hash:x}`, so it is
+/// 1–16 hex digits; anything else in the directory is not ours to delete.
 fn is_entry_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".mp4") else {
         return false;
@@ -203,7 +204,22 @@ fn is_entry_name(name: &str) -> bool {
     !hash.is_empty()
         && hash.len() <= 16
         && hash.bytes().all(|b| b.is_ascii_hexdigit())
-        && pid.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        && pid.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit() || b == b'-'))
+}
+
+/// A render-local uniquifier for the tmp names below. The pid guards against
+/// *other* processes, but this process renders from several threads (the
+/// preview worker and the key handler both can), and two renders landing on
+/// one tmp name drove two ffmpegs into one file and renamed a corrupt
+/// result into the cache.
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The tmp name a render writes into: `<base>.tmp-<pid>-<seq>.mp4` (still
+/// ending in `.mp4` so ffmpeg infers the muxer, and still a prune candidate
+/// if the process crashes mid-render).
+pub fn tmp_file(base: &str) -> String {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{base}.tmp-{}-{seq}.mp4", std::process::id())
 }
 
 /// Everything the render depends on: the segment (effects, transition,
@@ -301,7 +317,7 @@ fn render_cached(
     if complete(&path) {
         return Ok(path);
     }
-    let tmp = dir.join(format!("{hash:x}.tmp-{}.mp4", std::process::id()));
+    let tmp = dir.join(tmp_file(&format!("{hash:x}")));
     let spec = ExportSpec {
         output: tmp.clone(),
         encoder: Encoder::Cpu,

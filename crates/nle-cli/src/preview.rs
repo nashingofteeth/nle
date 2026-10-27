@@ -675,7 +675,7 @@ pub fn ensure_black_file(
     // Write to a temp name (still ending in .mp4 so ffmpeg can infer the
     // muxer), then rename — a crash mid-generate can't leave a half-written
     // file that later loads "successfully".
-    let tmp = dir.join(format!("{name}.tmp-{}.mp4", std::process::id()));
+    let tmp = dir.join(crate::proxy::tmp_file(&name));
     let fps_s = format!("{}/{}", fps.numer(), fps.denom());
     let len_s = BLACK_FILE_SECS.to_string();
     // Captured, not inherited: this runs from the monitor's reload too, and

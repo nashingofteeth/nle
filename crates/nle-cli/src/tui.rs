@@ -2215,7 +2215,7 @@ fn cache_command(f: &mut action::Flags) -> Option<String> {
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
-    match crate::proxy::prune(Duration::from_secs(days * 86_400), dry_run) {
+    match crate::proxy::prune(Duration::from_secs(days.saturating_mul(86_400)), dry_run) {
         Ok(report) => Some(report.summary(dry_run)),
         Err(e) => Some(format!("prune failed: {e}")),
     }
