@@ -18,6 +18,10 @@ mod proxy;
 #[cfg(feature = "tui")]
 mod tui;
 
+// Declared after the macros: a child module only sees a macro_rules! that
+// precedes the `mod` declaration.
+mod cmd;
+
 /// Print a line, tolerating a closed consumer (`nle show | head`). Rust
 /// ignores `SIGPIPE`, so `say!` *panics* on the broken pipe; a Unix
 /// tool should just stop talking. Same syntax as `say!` — all CLI
@@ -58,8 +62,10 @@ use nle_core::{
     VideoSettings, format_seconds, frame_of, load_register, parse_rate, parse_time, run_action,
     save_register, track_label,
 };
+#[cfg(test)]
+use nle_ffmpeg::RawProbe;
 use nle_ffmpeg::detect::{DetectOptions, detect};
-use nle_ffmpeg::{Encoder, ExportSpec, RawProbe, RawStream, TrimSpec, probe};
+use nle_ffmpeg::{Encoder, probe};
 
 #[derive(Parser)]
 #[command(
@@ -605,6 +611,9 @@ impl From<EncoderArg> for Encoder {
         }
     }
 }
+
+use cmd::export::{cmd_export, run_export};
+use cmd::media::{cmd_probe, cmd_trim};
 
 // ------------------------------------------------------------ action mapping
 
@@ -2383,64 +2392,6 @@ fn next_clip_id(project: &Project) -> u32 {
         .map_or(1, |m| m + 1)
 }
 
-fn cmd_export(
-    project_path: &Path,
-    output: &Path,
-    encoder: Encoder,
-    crf: u8,
-    preset: &str,
-    bitrate: &str,
-) -> Result<()> {
-    say!(
-        "{}",
-        run_export(project_path, output, encoder, crf, preset, bitrate)?
-    );
-    Ok(())
-}
-
-/// Render the timeline to `output`; returns the summary line. Split from
-/// [`cmd_export`] so the TUI's `:export` can run the same code.
-#[allow(clippy::too_many_arguments)]
-fn run_export(
-    project_path: &Path,
-    output: &Path,
-    encoder: Encoder,
-    crf: u8,
-    preset: &str,
-    bitrate: &str,
-) -> Result<String> {
-    let project = Project::load(project_path)?;
-    let spec = ExportSpec {
-        output: output.to_path_buf(),
-        encoder,
-        crf,
-        preset: preset.to_string(),
-        bitrate: bitrate.to_string(),
-    };
-    log::line(&format!(
-        "export -> {} ({:?})",
-        output.display(),
-        spec.encoder
-    ));
-    let plan = nle_ffmpeg::export(&project, &spec)?;
-    let actual = nle_ffmpeg::probe(output)?;
-    let shown = actual
-        .format
-        .duration
-        .as_deref()
-        .and_then(parse_f64)
-        .map(|d| format!("{d:.2}"))
-        .unwrap_or_else(|| "?".into());
-    Ok(format!(
-        "✓ {}  ({} s · {} frames @ {}/{})",
-        output.display(),
-        shown,
-        plan.frames,
-        plan.fps.numer(),
-        plan.fps.denom()
-    ))
-}
-
 /// What a work function produced: warnings for stderr (or the log) and
 /// the summary line the caller shows. Keeps the TUI free of stray prints
 /// — a `say!` would draw over the terminal UI.
@@ -2491,174 +2442,7 @@ fn asset_summary(a: &Asset) -> String {
 
 // ------------------------------------------------------------ media cmds (M0)
 
-fn cmd_probe(file: &Path, json: bool) -> Result<()> {
-    let report = probe(file)?;
-    if json {
-        say!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
-    }
-    print_summary(file, &report);
-    Ok(())
-}
-
-fn print_summary(path: &Path, report: &RawProbe) {
-    say!("{}", path.display());
-
-    let f = &report.format;
-    let mut container = f.format_name.clone();
-    if let Some(brand) = f.tags.as_ref().and_then(|t| t.get("major_brand")) {
-        container.push_str(&format!(" ({brand})"));
-    }
-    let mut meta = vec![container];
-    if let Some(d) = f.duration.as_deref().and_then(parse_f64) {
-        meta.push(format!("{d:.2} s"));
-    }
-    if let Some(b) = f.size.as_deref().and_then(parse_u64) {
-        meta.push(human_bytes(b));
-    }
-    if let Some(b) = f.bit_rate.as_deref().and_then(parse_u64) {
-        meta.push(format!("{} kb/s", b / 1000));
-    }
-    say!("  container  {}", meta.join("  ·  "));
-
-    for s in &report.streams {
-        match s.codec_type.as_deref() {
-            Some("video") => say!("  video #{}   {}", s.index, video_desc(s)),
-            Some("audio") => say!("  audio #{}   {}", s.index, audio_desc(s)),
-            other => say!(
-                "  {} #{}   {}",
-                other.unwrap_or("data"),
-                s.index,
-                s.codec_name.as_deref().unwrap_or("?")
-            ),
-        }
-    }
-}
-
-fn video_desc(s: &RawStream) -> String {
-    let mut bits = Vec::new();
-    let codec = s.codec_name.clone().unwrap_or_else(|| "?".into());
-    bits.push(match &s.profile {
-        Some(p) => format!("{codec} ({p})"),
-        None => codec,
-    });
-    if let (Some(w), Some(h)) = (s.width, s.height) {
-        bits.push(format!("{w}×{h}"));
-    }
-    if let Some(rate) = s.r_frame_rate.as_deref().and_then(parse_rate) {
-        let decimal = *rate.numer() as f64 / *rate.denom() as f64;
-        bits.push(format!(
-            "{}/{} fps ({decimal:.2})",
-            rate.numer(),
-            rate.denom()
-        ));
-    }
-    if let Some(p) = &s.pix_fmt {
-        bits.push(p.clone());
-    }
-    if let Some(b) = s.bit_rate.as_deref().and_then(parse_u64) {
-        bits.push(format!("{} kb/s", b / 1000));
-    }
-    bits.join("  ·  ")
-}
-
-fn audio_desc(s: &RawStream) -> String {
-    let mut bits = Vec::new();
-    bits.push(s.codec_name.clone().unwrap_or_else(|| "?".into()));
-    if let Some(sr) = &s.sample_rate {
-        bits.push(format!("{sr} Hz"));
-    }
-    if let Some(layout) = &s.channel_layout {
-        bits.push(layout.clone());
-    } else if let Some(c) = s.channels {
-        bits.push(format!("{c} ch"));
-    }
-    if let Some(b) = s.bit_rate.as_deref().and_then(parse_u64) {
-        bits.push(format!("{} kb/s", b / 1000));
-    }
-    bits.join("  ·  ")
-}
-
-fn parse_f64(s: &str) -> Option<f64> {
-    s.parse().ok()
-}
-
-fn parse_u64(s: &str) -> Option<u64> {
-    s.parse().ok()
-}
-
-fn human_bytes(b: u64) -> String {
-    const MIB: f64 = (1 << 20) as f64;
-    if b >= 1 << 20 {
-        format!("{:.1} MiB", b as f64 / MIB)
-    } else {
-        format!("{:.0} KiB", b as f64 / 1024.0)
-    }
-}
-
 // ------------------------------------------------------------ trim (M0)
-
-#[allow(clippy::too_many_arguments)]
-fn cmd_trim(
-    input: &Path,
-    in_point: &str,
-    out_point: &str,
-    output: &Path,
-    encoder: Encoder,
-    copy: bool,
-    crf: u8,
-    preset: &str,
-    bitrate: &str,
-) -> Result<()> {
-    let start = parse_time(in_point).with_context(|| format!("invalid --in time: {in_point:?}"))?;
-    let end =
-        parse_time(out_point).with_context(|| format!("invalid --out time: {out_point:?}"))?;
-    let duration = end - start;
-    if duration <= Seconds::from_integer(0) {
-        bail!("--out ({out_point}) must be later than --in ({in_point})");
-    }
-    // ffmpeg happily cuts past the end and hands back a shorter file; say so
-    // instead of silently writing something else than what was asked for.
-    let report = probe(input).with_context(|| format!("probing {}", input.display()))?;
-    if let Some(file_dur) = report.duration()
-        && end > file_dur
-    {
-        bail!(
-            "--out ({}) is beyond the file's duration ({})",
-            format_seconds(&end),
-            format_seconds(&file_dur)
-        );
-    }
-
-    let spec = TrimSpec {
-        input: input.to_path_buf(),
-        output: output.to_path_buf(),
-        start,
-        end,
-        encoder,
-        copy,
-        crf,
-        preset: preset.to_string(),
-        bitrate: bitrate.to_string(),
-    };
-    log::line(&format!(
-        "trim {} -> {} [{}..{}]",
-        input.display(),
-        output.display(),
-        format_seconds(&start),
-        format_seconds(&end)
-    ));
-    nle_ffmpeg::trim(&spec)?;
-    // Report the ACTUAL duration of what we wrote, not what we asked for —
-    // stream copy lands within a frame or two of the request.
-    let actual = nle_ffmpeg::probe(&spec.output)?;
-    let shown = match actual.format.duration.as_deref().and_then(parse_f64) {
-        Some(d) => format!("{d:.2} s"),
-        None => "?".to_string(),
-    };
-    say!("✓ {}  ({})", output.display(), shown);
-    Ok(())
-}
 
 #[cfg(test)]
 mod tests {
