@@ -216,6 +216,24 @@ fn transitions() {
                     &["transition", "--at", "0", "--frames", "15"],
                 ],
             ),
+            (
+                "transition --frames 2^63-1",
+                &[&["transition", "--at", "3", "--frames", "9223372036854775807"]],
+            ),
+            (
+                "transition --dur 1e300",
+                &[&[
+                    "transition",
+                    "--at",
+                    "3",
+                    "--dur",
+                    "1000000000000000000000000000000",
+                ]],
+            ),
+            (
+                "transition --frames -1",
+                &[&["transition", "--at", "3", "--frames", "-1"]],
+            ),
         ],
     );
 }

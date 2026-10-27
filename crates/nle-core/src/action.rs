@@ -294,16 +294,23 @@ pub fn run_action(
             let existing = edit::transition_at(project, *track, *at)?;
             let Some((_, transition, _)) = existing else {
                 // No blend at the position: frames/dur add one; a rate can
-                // only retime an existing blend.
-                let dur = match len {
-                    TransitionLen::Frames(n) => frames_to_seconds(*n, fps),
+                // only retime an existing blend. The saturating cast (a
+                // `--dur 1e300` → `i64::MAX` frame count) is refused by
+                // `transition_frames` before any rational math runs.
+                let requested = match len {
+                    TransitionLen::Frames(n) => *n,
                     TransitionLen::Seconds(s) => {
-                        frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps)
+                        if s.is_finite() {
+                            (*s * secs_f64(&fps)).round() as i64
+                        } else {
+                            0
+                        }
                     }
                     TransitionLen::Percent(_) => {
                         return Err(EditError::NoTransition(format!("{at} s")));
                     }
                 };
+                let dur = transition_frames(requested, &fps)?;
                 // `add_transition` ids the blend with the next segment id;
                 // keep it so the playhead can land in the new blend below.
                 let blend_id = project.next_clip_id();
@@ -313,23 +320,24 @@ pub fn run_action(
                 return Ok(out);
             };
             // An existing blend is retimed; its kind stays.
-            let dur = match len {
-                TransitionLen::Frames(n) => frames_to_seconds(*n, fps),
+            let requested = match len {
+                TransitionLen::Frames(n) => *n,
                 TransitionLen::Seconds(s) => {
-                    frames_to_seconds((s * secs_f64(&fps)).round() as i64, fps)
+                    if s.is_finite() {
+                        (*s * secs_f64(&fps)).round() as i64
+                    } else {
+                        0
+                    }
                 }
                 TransitionLen::Percent(p) => {
                     if !p.is_finite() || *p <= 0.0 {
                         return Err(EditError::BadSpeed(format!("{p}")));
                     }
                     let old_frames = (transition.dur * fps).round().to_integer();
-                    let frames = ((old_frames as f64 * 100.0 / p).round() as i64).max(1);
-                    if frames as f64 > MAX_TIMELINE_SECONDS as f64 * secs_f64(&fps) {
-                        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
-                    }
-                    frames_to_seconds(frames, fps)
+                    ((old_frames as f64 * 100.0 / p).round() as i64).max(1)
                 }
             };
+            let dur = transition_frames(requested, &fps)?;
             let blend_id = transition.id;
             let Some(batch) = edit::retime_transition_on(project, *track, *at, dur)? else {
                 return Ok(Outcome {
@@ -1184,6 +1192,23 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
         }),
         _ => Err(ParseError::Invalid(EFFECT_USAGE.to_string())),
     }
+}
+
+/// A saturating frame count divided by a non-integer fps would multiply
+/// into overflow inside num-rational *before* `add_transition`'s own
+/// "whole frames, at least one" check sees it: `--frames 2^63-1` panicked
+/// the debug binary ("attempt to multiply with overflow") and wrapped into
+/// a wrong-length blend in release. Land the request on the frame count
+/// the percent form bounds, and refuse the range ends there.
+fn transition_frames(frames: i64, fps: &Seconds) -> Result<Seconds, EditError> {
+    if frames < 1 {
+        return Err(EditError::TooShort);
+    }
+    let limit = MAX_TIMELINE_SECONDS as f64 * secs_f64(fps);
+    if frames as f64 > limit {
+        return Err(EditError::TooLong(MAX_TIMELINE_SECONDS));
+    }
+    Ok(frames_to_seconds(frames, *fps))
 }
 
 /// Parse one `:cmd` line into an [`Action`].
