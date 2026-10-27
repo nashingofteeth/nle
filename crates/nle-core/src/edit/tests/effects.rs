@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::timeline::Effect;
 
 // A transition renders its neighbours' material, so each side carries a
 // copy of that neighbour's effects; effect edits keep the copies in sync,
