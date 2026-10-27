@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::timeline::{Clip, Gap, Segment};
 
 #[test]
 fn i_trims_clip_head_and_leaves_a_gap() {

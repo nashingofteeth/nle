@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::timeline::{Clip, Gap, Segment, TransitionKind};
 
 #[test]
 fn s_splits_a_clip() {

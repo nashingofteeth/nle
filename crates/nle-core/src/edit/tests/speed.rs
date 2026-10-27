@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::timeline::{Clip, Gap, Segment};
 
 #[test]
 fn speed_change_always_ripples() {

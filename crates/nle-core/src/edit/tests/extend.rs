@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::timeline::{Clip, Gap, Segment};
 
 #[test]
 fn extend_tail_grows_clip_and_followers_shift() {

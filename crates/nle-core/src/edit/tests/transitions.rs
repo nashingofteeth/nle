@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::timeline::{Clip, Gap, Segment, TrackKind, TransitionKind, TransitionSource};
 
 // A transition renders as video (`xfade`); on an audio track the export
 // graph would carry a filter it can't apply, so refuse it — as effects are.

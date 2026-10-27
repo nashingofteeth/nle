@@ -6,6 +6,9 @@
 use super::*;
 use crate::media::{RawFormat, RawProbe, RawStream};
 use crate::project::VideoSettings;
+use crate::timeline::{
+    Clip, Gap, Segment, TrackKind, Transition, TransitionKind, TransitionSource,
+};
 
 mod blend_trim;
 mod clamp;

@@ -214,3 +214,12 @@ pub(super) fn gap_piece(duration: Seconds) -> Option<Segment> {
         None
     }
 }
+
+/// Describe an absorbed segment for the batch description.
+pub(super) fn segment_note(seg: &Segment) -> String {
+    match seg {
+        Segment::Gap(_) => "gap".to_string(),
+        Segment::Clip(c) => format!("clip #{}", c.id),
+        Segment::Transition(t) => format!("transition #{}", t.id),
+    }
+}

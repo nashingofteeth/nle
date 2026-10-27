@@ -1,5 +1,8 @@
 use super::super::*;
 use super::*;
+use crate::timeline::{
+    Clip, Segment, Track, TrackKind, Transition, TransitionKind, TransitionSource,
+};
 
 // The transition is part of both neighbours: `o`/`O` moves the blend's
 // right edge (the preceding clip's far end) and `i`/`I` its left edge. The

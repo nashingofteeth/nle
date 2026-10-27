@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::super::*;
 use super::*;
+use crate::timeline::{Clip, Segment};
 
 #[test]
 fn failed_batches_leave_no_trace() {
