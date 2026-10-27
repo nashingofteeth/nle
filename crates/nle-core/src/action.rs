@@ -1157,11 +1157,25 @@ pub fn effect_from_args(kind: &str, a: EffectArgs) -> Result<Effect, ParseError>
         }),
         // ffmpeg's `eq` is neutral at brightness 0 / contrast 1 /
         // saturation 1: 0 contrast and saturation mean flat and grey.
-        "eq" => Ok(Effect::Eq {
-            brightness: a.brightness.unwrap_or(0.0),
-            contrast: a.contrast.unwrap_or(1.0),
-            saturation: a.saturation.unwrap_or(1.0),
-        }),
+        // The values ride straight into the project JSON, so they must be
+        // bounded: a non-finite float serializes as `null` and a project
+        // that can no longer load, and anything outside ffmpeg's own
+        // accepted ranges would merely fail the render later. Both are
+        // refused here, where the CLI and the TUI form meet.
+        "eq" => {
+            let bounded = |v: Option<f64>, n: &str, default: f64, min: f64, max: f64| {
+                let v = v.unwrap_or(default);
+                if !v.is_finite() || !(min..=max).contains(&v) {
+                    return Err(ParseError::Invalid(format!("{n} must be {min}–{max}")));
+                }
+                Ok(v)
+            };
+            Ok(Effect::Eq {
+                brightness: bounded(a.brightness, "eq brightness", 0.0, -1.0, 1.0)?,
+                contrast: bounded(a.contrast, "eq contrast", 1.0, -1000.0, 1000.0)?,
+                saturation: bounded(a.saturation, "eq saturation", 1.0, 0.0, 3.0)?,
+            })
+        }
         "lut" => Ok(Effect::Lut {
             path: a
                 .path

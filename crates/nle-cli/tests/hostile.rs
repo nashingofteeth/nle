@@ -273,6 +273,18 @@ fn effects() {
                 ]],
             ),
             (
+                "effect eq brightness nan",
+                &[&["effect", "eq", "--clip", "1", "--brightness", "nan"]],
+            ),
+            (
+                "effect eq contrast inf",
+                &[&["effect", "eq", "--clip", "1", "--contrast", "inf"]],
+            ),
+            (
+                "effect eq saturation out of range",
+                &[&["effect", "eq", "--clip", "1", "--saturation", "4"]],
+            ),
+            (
                 "effect lut a missing file",
                 &[&["effect", "lut", "--clip", "1", "--path", "/nope.cube"]],
             ),
