@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::time::Seconds;
 use crate::timeline::{Effect, Track};
 
 // A transition renders its neighbours' material, so each side carries a

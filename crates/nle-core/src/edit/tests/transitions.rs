@@ -1,5 +1,8 @@
+use super::super::transitions::Straddle;
+use super::super::trim::trim_or_absorb_head;
 use super::super::*;
 use super::*;
+use crate::time::Seconds;
 use crate::timeline::{Clip, Gap, Segment, TrackKind, TransitionKind, TransitionSource};
 
 // A transition renders as video (`xfade`); on an audio track the export

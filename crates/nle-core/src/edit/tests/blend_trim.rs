@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::time::Seconds;
 use crate::timeline::{
     Clip, Segment, Track, TrackKind, Transition, TransitionKind, TransitionSource,
 };

@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::time::Seconds;
 use crate::timeline::{Gap, MAX_TIMELINE_SECONDS, Segment};
 
 #[test]

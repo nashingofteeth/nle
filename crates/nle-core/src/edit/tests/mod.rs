@@ -6,6 +6,7 @@
 use super::*;
 use crate::media::{RawFormat, RawProbe, RawStream};
 use crate::project::VideoSettings;
+use crate::time::Seconds;
 use crate::timeline::{
     Clip, Gap, Segment, TrackKind, Transition, TransitionKind, TransitionSource,
 };

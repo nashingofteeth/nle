@@ -1,5 +1,6 @@
 use super::super::*;
 use super::*;
+use crate::time::Seconds;
 use crate::timeline::{Clip, Gap, Segment};
 
 #[test]

@@ -6,12 +6,11 @@ use crate::project::Project;
 use crate::time::Seconds;
 use crate::timeline::{Clip, Gap, Segment};
 
+use super::clip::trim_consume_target_on;
 use super::transitions::{Straddle, shift_blend_side};
+use super::trim::{ripple_gap_in_on, trim_or_absorb_head, trim_or_absorb_tail};
 use super::util::{secs_f64, segment_note, snap, source_span, stamp, track_at, video_track_index};
-use super::{
-    Batch, EditError, EditOp, ripple_gap_in_on, trim_consume_target_on, trim_or_absorb_head,
-    trim_or_absorb_tail,
-};
+use super::{Batch, EditError, EditOp};
 
 pub fn extend_edge(
     project: &Project,

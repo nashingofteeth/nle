@@ -1,6 +1,7 @@
 use super::super::util::at_least_a_frame;
 use super::super::*;
 use super::*;
+use crate::time::Seconds;
 use crate::timeline::{Clip, Gap, Segment, TransitionKind};
 
 #[test]
