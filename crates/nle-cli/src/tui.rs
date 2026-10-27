@@ -4724,8 +4724,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         style
     };
 
-    // In the pool the monitor shows a raw file, so the clock reads the
-    // asset position/duration and the mode tag says POOL.
+    // In the pool the monitor shows a raw file, so the **asset** clock is
+    // shown after the mode tag with a `pool` label. The main clock stays the
+    // timeline cursor (the marker in the timeline): the two are different
+    // positions and must not look like one drifting playhead.
     if is_pool(app) {
         let sel = pool_sel(app).unwrap_or(0);
         let (pos, dur) = match app.project.media.get(sel) {
@@ -4740,11 +4742,25 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(format!(" {name} · "), style),
             Span::styled(
-                fmt_timecode(pos, fs.as_ref()),
+                fmt_timecode(app.playhead, app.project.fps.as_ref()),
                 style.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" / {} · ", fmt_timecode(dur, fs.as_ref())), style),
+            Span::styled(
+                format!(
+                    " / {} · ",
+                    fmt_timecode(app.total(), app.project.fps.as_ref())
+                ),
+                style,
+            ),
             Span::styled(format!("{icon} · POOL{count}"), style),
+            Span::styled(
+                format!(
+                    " · pool {} / {}",
+                    fmt_timecode(pos, fs.as_ref()),
+                    fmt_timecode(dur, fs.as_ref())
+                ),
+                style,
+            ),
         ]);
         f.render_widget(Paragraph::new(line), area);
         return;
@@ -8942,6 +8958,28 @@ mod tests {
             fake.calls().is_empty(),
             "no monitor reload: {:?}",
             fake.calls()
+        );
+    }
+
+    // POOL shows the timeline cursor (what the marker shows) first, then the
+    // pooled asset's own clock — never one clock that looks like the playhead.
+    #[test]
+    fn the_pool_status_separates_timeline_and_asset_clocks() {
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.playhead = 1.5;
+        open_pool_mode(&mut app, 0);
+        set_pool_pos(&mut app, 4.0);
+        let text = status_row(&app);
+        let fps = Seconds::new(30, 1);
+        assert!(text.contains("POOL"), "{text}");
+        assert!(
+            text.contains(&fmt_timecode(1.5, Some(&fps))),
+            "timeline cursor: {text}"
+        );
+        assert!(text.contains("pool "), "{text}");
+        assert!(
+            text.contains(&fmt_timecode(4.0, Some(&fps))),
+            "asset clock: {text}"
         );
     }
 
