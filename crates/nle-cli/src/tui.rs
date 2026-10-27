@@ -2037,14 +2037,20 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
             Ok(PreviewMsg::Done(result)) => {
                 let stale = app.preview_dirty;
                 let pool = is_pool(app);
+                let extending = extend_state(app).is_some();
                 app.preview = None;
                 app.preview_progress = None;
                 if stale {
                     app.preview_dirty = false;
-                    if !pool {
+                    if !pool && !extending {
                         start_preview(app);
                     }
-                } else if !pool {
+                } else if !pool && !extending {
+                    // Extend mode owns the monitor like the pool does: over
+                    // the material preview it handed to mpv, whose clock is
+                    // translated through `preview_off`. A timeline build
+                    // finishing mid-session must not replace that picture
+                    // (`exit_extend` reloads when extend leaves).
                     match result {
                         Ok(url) => {
                             // Keep ignoring the pooled clock until the EDL's
@@ -2075,7 +2081,18 @@ fn poll_preview(app: &mut App, player: &dyn Mpv) {
 
 /// Keep the timeline's notice: a monitor problem must not erase what
 /// happened to the model (the same rule as the old inline rebuild).
+/// A failed rebuild during a hand-off (pool close, extend exit/commit)
+/// also gives the hand-off up: the timeline EDL will never land, and
+/// `sync` gates on `pool_on_monitor`, so the playhead would ignore mpv
+/// forever. The monitor keeps the old (paused) file; the next action's
+/// rebuild fixes the picture — and this notice says what didn't.
+/// In the pool the pooled asset legitimately owns the monitor: there the
+/// flag stands.
 fn preview_failed(app: &mut App, why: &str) {
+    if !is_pool(app) {
+        app.pool_on_monitor = false;
+        app.pool_handoff = None;
+    }
     let msg = if app.message.is_empty() {
         format!("preview failed: {why}")
     } else {
@@ -4133,18 +4150,23 @@ fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
 }
 
 /// Leave extend mode: project timeline back on the monitor, playhead at
-/// `pos`.
+/// `pos`. The rebuild rides the preview worker like every other monitor
+/// hand-over — a cold proxy is seconds of ffmpeg on the key thread, which
+/// froze the whole TUI — so the exit parked below lets `poll_preview` land
+/// the EDL. Pause first: an auto-playing EDL streams past the landing and
+/// the position check in `sync` would never clear (the same reason
+/// `close_pool_at` pauses).
 fn exit_extend(app: &mut App, player: &dyn Mpv, pos: f64, msg: &str) {
-    match preview::build_composite_edl(&app.project) {
-        Ok(edl) => {
-            app.pool_on_monitor = false;
-            app.pool_handoff = None;
-            player.load(&edl, Some(pos.max(0.0)));
-        }
-        Err(e) => app.set_message(&format!("preview rebuild failed: {e}")),
-    }
     app.playhead = pos;
     app.mode = Mode::Normal;
+    // The material preview is still (or just now) the monitor's file; its
+    // clock must not drive the playhead until the timeline EDL reports its
+    // landing. The poll raises `pool_handoff` when it loads.
+    app.pool_on_monitor = true;
+    app.pool_handoff = None;
+    app.pending_pause = Some(true);
+    player.set_pause(true);
+    start_preview(app);
     app.set_message(msg);
 }
 
@@ -4237,6 +4259,16 @@ fn commit_extend(app: &mut App, player: &dyn Mpv) {
         },
     ) {
         app.mode = Mode::Normal;
+        // The monitor still shows the material preview while the post-edit
+        // rebuild renders, and translating its clock back needs extend
+        // mode's `preview_off`. Raise the hand-off so `sync` ignores mpv
+        // until the timeline EDL lands, and pause like `close_pool_at`:
+        // an auto-playing EDL reports past the landing and the check would
+        // never clear. Resume is one press of `space`.
+        app.pool_on_monitor = true;
+        app.pool_handoff = None;
+        app.pending_pause = Some(true);
+        player.set_pause(true);
     }
 }
 
@@ -9493,6 +9525,85 @@ mod tests {
         poll_preview(&mut app, &fake);
         assert!(fake.calls().is_empty(), "the pool asset stays");
         assert!(app.preview.is_none());
+    }
+
+    // Extend mode owns the monitor the same way (over the material preview,
+    // whose clock is translated through `preview_off`): a timeline build
+    // that finishes mid-session must not replace that picture — and its
+    // landing through `sync`'s `t + preview_off` would move the playhead
+    // off by the preview origin while playing.
+    #[test]
+    fn a_preview_finishing_in_extend_mode_does_not_steal_the_monitor() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.mode = Mode::Extend(ExtendState {
+            track: 0,
+            armed: Armed::Clip { id: 1, head: false },
+            edge_pos: 3.0,
+            ripple: false,
+            lo: 0.0,
+            hi: Some(9.0),
+            mat: None,
+            preview_off: -1.0,
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
+        tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
+            .unwrap();
+        poll_preview(&mut app, &fake);
+        assert!(fake.calls().is_empty(), "the material preview stays");
+        assert!(app.preview.is_none(), "the build is not queued to restart");
+        assert!(!app.preview_dirty);
+    }
+
+    // A failed rebuild during a monitor hand-off must give the hand-off up:
+    // the timeline EDL will never land, and leaving `pool_on_monitor` set
+    // would have the playhead ignore mpv for the rest of the session.
+    #[test]
+    fn a_failed_handoff_gives_the_hand_off_up() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        app.set_message("timeline");
+        app.pool_on_monitor = true;
+        app.pool_handoff = Some(2.0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
+        tx.send(PreviewMsg::Done(Err("ffmpeg: no such file".into())))
+            .unwrap();
+        poll_preview(&mut app, &fake);
+        assert!(!app.pool_on_monitor, "the playhead must follow again");
+        assert_eq!(app.pool_handoff, None);
+        assert_eq!(
+            app.message,
+            "timeline — preview failed: ffmpeg: no such file"
+        );
+    }
+
+    // In the pool the pooled asset legitimately owns the monitor, so a
+    // failure there leaves the hand-off flags alone (the asset keeps the
+    // preview and the pool playhead keeps following it).
+    #[test]
+    fn a_failed_handoff_in_the_pool_keeps_the_flags() {
+        let fake = FakeMpv::new();
+        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        open_pool_mode(&mut app, 0);
+        app.set_message("media");
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.preview = Some(PreviewJob {
+            rx,
+            started: Instant::now(),
+        });
+        tx.send(PreviewMsg::Done(Err("worker boom".into())))
+            .unwrap();
+        poll_preview(&mut app, &fake);
+        assert!(app.pool_on_monitor, "the pool owns the monitor");
+        assert_eq!(app.message, "media", "the pool drops build failures");
     }
 
     /// Give one clip an explicit effect list (the panel tests don't need the
