@@ -185,11 +185,15 @@ impl Effect {
                 content,
             ),
             // The path is quoted: `:`/`,` in it would otherwise split the
-            // filtergraph, and a literal `'` is escaped the ffmpeg way.
-            Effect::Lut { path } => (
-                format!("lut3d=file='{}'", path.replace('\'', r"'\''")),
-                content,
-            ),
+            // filtergraph, a literal `'` is escaped the ffmpeg way, and a
+            // literal `\` has to be doubled — the option parser treats it as
+            // an escape even inside the quotes, so a lone one eats whatever
+            // follows (a trailing `\` swallowed the closing quote and the
+            // rest of the graph with it).
+            Effect::Lut { path } => {
+                let escaped = path.replace('\\', r"\\").replace('\'', r"'\''");
+                (format!("lut3d=file='{escaped}'"), content)
+            }
         }
     }
 }
@@ -995,6 +999,29 @@ mod tests {
             ),
             r"lut3d=file='/luts/it'\''s.cube'",
             "a quote is escaped the ffmpeg way"
+        );
+        // The option parser reads `\` as an escape even inside the quotes:
+        // one literal backslash must reach it as two, and a trailing one
+        // must not eat the closing quote.
+        assert_eq!(
+            Effect::chain(
+                &[Effect::Lut {
+                    path: r"C:\luts\film.cube".into()
+                }],
+                (0, 0)
+            ),
+            r"lut3d=file='C:\\luts\\film.cube'",
+            "a backslash is doubled"
+        );
+        assert_eq!(
+            Effect::chain(
+                &[Effect::Lut {
+                    path: r"C:\luts\".into()
+                }],
+                (0, 0)
+            ),
+            r"lut3d=file='C:\\luts\\'",
+            "a trailing backslash cannot escape the quote"
         );
     }
 }
