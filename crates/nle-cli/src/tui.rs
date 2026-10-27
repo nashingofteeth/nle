@@ -277,10 +277,6 @@ pub struct PoolState {
     pub sel: usize,
     pub pos: f64,
     pub resume: f64,
-    /// The timeline's pause state when the pool opened; restored when the
-    /// timeline EDL comes back so a pool playthrough can't auto-play the
-    /// project (and let mpv's clock snap the landing onto a cut).
-    pub paused: bool,
 }
 
 /// A one-field transition length form, opened by `x`/`X` when the playhead
@@ -1337,7 +1333,6 @@ fn open_pool(app: &mut App, player: &dyn Mpv) {
         sel,
         pos: 0.0,
         resume: app.playhead,
-        paused: app.paused,
     });
     load_pool_preview(app, player);
     app.set_message("media");
@@ -1346,11 +1341,13 @@ fn open_pool(app: &mut App, player: &dyn Mpv) {
 /// Close the pool: reload the project timeline at the remembered playhead.
 /// A `:` line opened from the pool (`i`) leaves the monitor on the pooled
 /// file: put the timeline back on it, as `close_pool` does.
-fn leave_pool_command(app: &mut App, _player: &dyn Mpv) {
+fn leave_pool_command(app: &mut App, player: &dyn Mpv) {
     if !app.command_from_pool {
         return;
     }
     app.command_from_pool = false;
+    app.pending_pause = Some(true);
+    player.set_pause(true);
     app.reload_requested = true;
 }
 
@@ -1359,19 +1356,19 @@ fn close_pool(app: &mut App, player: &dyn Mpv) {
 }
 
 /// Close the pool and put the playhead at `at`: the pre-pool position on a
-/// manual close, or the frame an insert landed on. The timeline's pre-pool
-/// pause state is restored when the EDL loads.
-fn close_pool_at(app: &mut App, _player: &dyn Mpv, at: f64) {
+/// manual close, or the frame an insert landed on. Always hands the timeline
+/// back **paused**: mpv is often playing at EOF, and an auto-playing EDL
+/// would let the cut magnet move the landing.
+fn close_pool_at(app: &mut App, player: &dyn Mpv, at: f64) {
     if let Some(sel) = pool_sel(app) {
         app.last_pool_sel = sel; // capture on exit so reopening returns here
     }
-    let paused = match &app.mode {
-        Mode::Pool(p) => p.paused,
-        _ => app.paused,
-    };
     app.mode = Mode::Normal;
     app.playhead = at.clamp(0.0, app.last_frame());
-    app.pending_pause = Some(paused);
+    app.pending_pause = Some(true);
+    // Set it now so the subsequent async `loadfile` starts paused (mpv keeps
+    // the pause property; the pending value re-applies it after the load).
+    player.set_pause(true);
     // The monitor was on the pooled asset; rebuild the timeline EDL (from the
     // cache unless something changed) and reload when it is ready.
     start_preview(app);
@@ -7828,7 +7825,6 @@ mod tests {
             sel,
             pos: 0.0,
             resume: app.playhead,
-            paused: app.paused,
         });
     }
 
@@ -9304,16 +9300,23 @@ mod tests {
         assert!(app.preview.is_none() && app.preview_progress.is_none());
     }
 
-    // The pool remembers the timeline's pause state: a full playthrough
-    // (pool ends playing) must not auto-play the project on hand-back.
+    // A pool always hands the timeline back paused at the pre-pool cursor:
+    // mpv reports pause=false at EOF, so the EDL must not load playing.
     #[test]
-    fn a_pool_close_restores_the_timeline_pause_state() {
+    fn a_pool_close_pauses_at_the_landing() {
         let fake = FakeMpv::new();
         let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        app.paused = true;
+        app.paused = false; // even a playing timeline is paused on hand-back
         open_pool_mode(&mut app, 0);
         close_pool_at(&mut app, &fake, 1.0);
-        assert_eq!(app.pending_pause, Some(true), "the timeline was paused");
+        assert_eq!(app.pending_pause, Some(true));
+        assert!(
+            fake.calls()
+                .iter()
+                .any(|c| matches!(c, Call::SetPause(true))),
+            "pause before the EDL loads: {:?}",
+            fake.calls()
+        );
 
         let (tx, rx) = std::sync::mpsc::channel();
         app.preview = Some(PreviewJob {
@@ -9323,20 +9326,16 @@ mod tests {
         tx.send(PreviewMsg::Done(Ok("edl://timeline".into())))
             .unwrap();
         poll_preview(&mut app, &fake);
-        assert!(
+        assert_eq!(
             fake.calls()
                 .iter()
-                .any(|c| matches!(c, Call::SetPause(true))),
-            "the EDL loads paused: {:?}",
+                .filter(|c| matches!(c, Call::SetPause(true)))
+                .count(),
+            2,
+            "and again on the new file: {:?}",
             fake.calls()
         );
         assert_eq!(app.pending_pause, None);
-
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
-        app.paused = false;
-        open_pool_mode(&mut app, 0);
-        close_pool_at(&mut app, &fake, 1.0);
-        assert_eq!(app.pending_pause, Some(false), "a playing timeline resumes");
     }
 
     // Leaving the pool records the landing; the old pooled clock stays
