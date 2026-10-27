@@ -43,8 +43,10 @@ pub enum CompileError {
     AllMuted,
     #[error("asset #{0} is referenced by the timeline but missing from the media pool")]
     MissingAsset(u32),
-    #[error("transitions aren't exported yet (M5)")]
+    #[error("a transition must render through the multi-track path")]
     Transition,
+    #[error("a transition is on an audio track — transitions are video-only")]
+    TransitionOnAudioTrack,
     #[error("asset #{0} has no picture size — cannot resolve a percentage crop")]
     MissingGeometry(u32),
 }
@@ -380,7 +382,14 @@ fn compile_multi_track(project: &Project) -> Result<ExportPlan, CompileError> {
             match seg {
                 // A transition: two source sides, each retimed to exactly
                 // `dur`, crossfaded into one video output and one audio.
+                // Video-only: the edit paths refuse one on an audio track
+                // (`TransitionsNeedVideo`), and a hand-edited project that
+                // holds one must not compile into a graph whose xfade
+                // reads a stream that isn't there.
                 Segment::Transition(tr) => {
+                    if !is_video {
+                        return Err(CompileError::TransitionOnAudioTrack);
+                    }
                     let dur = tr.dur;
                     let dur_s = format_seconds(&dur);
                     let (mut vl, mut al) = (Vec::new(), Vec::new());
@@ -792,6 +801,33 @@ mod tests {
             }),
         ];
         p
+    }
+
+    // A transition on an audio track never came from an edit path (they
+    // refuse one there); a hand-edited project must not compile into a graph
+    // whose xfade reads a stream that doesn't exist — refuse with a clear
+    // error.
+    #[test]
+    fn a_transition_on_an_audio_track_is_refused() {
+        let mut p = project_with_two_clips();
+        let a = p.media[0].id;
+        let ti = p.timeline.add_track(TrackKind::Audio);
+        p.timeline.tracks[ti].segments = vec![Segment::Transition(Transition {
+            id: 1,
+            dur: Seconds::from_integer(1),
+            kind: TransitionKind::Dissolve,
+            a: TransitionSource::Clip {
+                asset: a,
+                src_in: Seconds::from_integer(0),
+                src_out: Seconds::from_integer(1),
+                effects: Vec::new(),
+            },
+            b: TransitionSource::Black,
+        })];
+        assert!(matches!(
+            compile_export(&p),
+            Err(CompileError::TransitionOnAudioTrack)
+        ));
     }
 
     #[test]

@@ -704,6 +704,9 @@ impl Timeline {
                         }
                     }
                     Segment::Transition(t) => {
+                        if track.kind != TrackKind::Video {
+                            return Err(bad("a transition is on an audio track"));
+                        }
                         if t.dur <= Seconds::from_integer(0) {
                             return Err(bad("transition has a non-positive duration"));
                         }
@@ -933,6 +936,18 @@ mod tests {
 
         t.tracks[0].segments = vec![trans(1, clip(0, 1))];
         assert!(t.validate().is_ok());
+
+        // A transition on an audio track can't render (the exporter's graph
+        // is video-only for it) — the loader refuses the hand-edited state
+        // the edit paths already forbid.
+        let mut t = Timeline::new();
+        t.add_track(TrackKind::Audio);
+        t.tracks[1].segments = vec![trans(1, clip(0, 1))];
+        assert!(
+            matches!(t.validate(), Err(TimelineError::Corrupt(ref m)) if m.contains("audio")),
+            "{:?}",
+            t.validate()
+        );
     }
 
     /// Hand-edited arithmetic that the rational can't hold is rejected, not a
