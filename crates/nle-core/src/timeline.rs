@@ -341,21 +341,27 @@ fn offset_content(xpct: f64, ypct: f64, canvas: (u32, u32), content: Content) ->
     if dx == 0 && dy == 0 {
         return (String::new(), content);
     }
-    let nx = content.x + dx;
-    let ny = content.y + dy;
+    // The casts saturate (a hand-edited `1e300` percent becomes
+    // `i64::MAX`), so the i64 adds must not assume the add stays in range:
+    // `x + i64::MAX` overflow-panicked the debug build and wrapped into
+    // garbage crop/pad coordinates in release. Saturate instead — the
+    // result is "the picture moved to or past the edge", which is what a
+    // huge percentage means.
+    let nx = content.x.saturating_add(dx);
+    let ny = content.y.saturating_add(dy);
     // The part of the moved picture still on the canvas.
     let ix = nx.max(0);
     let iy = ny.max(0);
-    let vw = (nx + content.w).min(fw) - ix;
-    let vh = (ny + content.h).min(fh) - iy;
+    let vw = nx.saturating_add(content.w).min(fw).saturating_sub(ix);
+    let vh = ny.saturating_add(content.h).min(fh).saturating_sub(iy);
     if vw < 2 || vh < 2 {
         // Fully (or within a pixel) off canvas: a transparent layer. At
         // ±100% of the canvas the picture is entirely outside.
         return (transparent_filter(), Content::empty());
     }
     // Source offset inside the picture and destination on the canvas.
-    let sx = ix - nx;
-    let sy = iy - ny;
+    let sx = ix.saturating_sub(nx);
+    let sy = iy.saturating_sub(ny);
     let next = Content {
         x: ix,
         y: iy,
