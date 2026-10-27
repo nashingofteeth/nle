@@ -601,12 +601,13 @@ impl From<EncoderArg> for Encoder {
 }
 
 use cmd::detect::{DetectArgs, cmd_detect_edits};
-use cmd::export::{cmd_export, run_export};
+use cmd::export::cmd_export;
 use cmd::import::{cmd_import, cmd_import_edl, cmd_import_otio};
 use cmd::media::{cmd_probe, cmd_trim};
+#[cfg(feature = "tui")]
+use cmd::project::cmd_edit;
 use cmd::project::{
-    cmd_add, cmd_cache, cmd_edit, cmd_edl, cmd_init, cmd_media_ls, cmd_seek, cmd_show,
-    cmd_track_ls, show_report,
+    cmd_add, cmd_cache, cmd_edl, cmd_init, cmd_media_ls, cmd_seek, cmd_show, cmd_track_ls,
 };
 use cmd::{run_cli_action, to_action};
 
@@ -814,6 +815,7 @@ mod tests {
 
     use crate::cmd::detect::{append_spans, snap_fps_for};
     use crate::cmd::import::match_asset;
+    use crate::cmd::project::show_report;
     use std::path::Path;
 
     use nle_core::Edge;

@@ -601,7 +601,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
     let buf = term.backend().buffer();
 
     let mut out = format!("project: {}\n", path.display());
-    out.push_str(&crate::show_report(&app.project));
+    out.push_str(&crate::cmd::project::show_report(&app.project));
     out.push_str(&format!(
         "\nmode: {:?} · active: {} · playhead: {} s (f{}) · paused: {} · eof: {} · pool-on-monitor: {} · pool-handoff: {:?}\nmessage: {:?}\n",
         app.mode,

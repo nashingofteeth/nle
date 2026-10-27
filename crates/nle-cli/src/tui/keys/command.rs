@@ -253,8 +253,9 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     };
     let project_path = app.path.clone();
     std::thread::spawn(move || {
-        let result = crate::run_export(&project_path, &output, encoder, crf, &preset, &bitrate)
-            .map_err(|e| e.to_string());
+        let result =
+            crate::cmd::export::run_export(&project_path, &output, encoder, crf, &preset, &bitrate)
+                .map_err(|e| e.to_string());
         let _ = job.send(result);
     });
     Some(notice)
@@ -483,7 +484,7 @@ pub(crate) fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<
 
 /// `:show` — the summary line; the full segment dump goes to the log.
 pub(crate) fn show_command(app: &App) -> String {
-    let report = crate::show_report(&app.project);
+    let report = crate::cmd::project::show_report(&app.project);
     crate::log::line(&report);
     report.lines().next().unwrap_or_default().to_string()
 }
