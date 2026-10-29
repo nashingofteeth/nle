@@ -48,9 +48,9 @@ transitive tree for most needs).
 **Ask before editing `PLAN.md` or `AGENTS.md`**, and propose the exact
 wording. `README.md` and `docs/` may be updated as part of a change.
 
-**Default is don't add.** A durable note earns a place only if it changes an
-agent's default action and is not obvious from the code, a test, `README.md`,
-or a commit body. Otherwise it stays a commit message.
+**Default is don't add.** A note earns a place only if it changes an agent's
+default action and is not obvious from the code, a test, `README.md`, or a
+commit body. Otherwise it stays a commit message.
 
 1. **Scope.** Always-relevant → `AGENTS.md`; one subsystem →
    `docs/pitfalls/<area>.md` plus an index line; a war story or measurement →
@@ -88,16 +88,9 @@ explainers, and commit-adjacent notes:
 
 ## Verify before every commit
 
-Run `scripts/check.sh`; do not commit otherwise. It is:
-
-```sh
-cargo fmt --all --check                      # formatting is enforced
-cargo clippy --all-targets -- -D warnings    # warnings are errors
-cargo test                                   # unit + behaviour + hostile batteries
-cargo build --release
-cargo install --path crates/nle-cli
-./demo.sh                                    # end-to-end pixel checks (release binary)
-```
+Run `scripts/check.sh`; do not commit otherwise — it is the gate list (fmt,
+shellcheck, clippy, `cargo doc -D warnings`, tests, release build, install,
+`demo.sh`). CI runs the same gates minus the install.
 
 Commit one logical change at a time (`feat:`/`fix:`/`refactor:`/`docs:`),
 subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
@@ -136,14 +129,10 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   non-1× clip because an EDL entry can't retime. The CLI/TUI take a
   **percentage** (100 = normal); convert at that boundary only — the model and
   `nle show` keep the rate (`@2×`).
-- **Transitions.** A blend is part of both neighbours, so trimming inside it
-  moves its edges and trimming a neighbour's visible span moves its near edge
-  (grow for `i`/`o`, ripple for `I`/`O`) — never a gap. A blend is opaque,
-  video-only, and its sides stay contiguous at the neighbour's rate. Extend
-  hops over it and a fade's black side can't be trimmed through. A **retime**
-  (`transition --frames/--dur/--percent`, the `x`/`X` frames form) scales each
-  side's span, never its rate; clip↔clip changes the timeline by `-delta`, a
-  black side leaves it. Full model and pitfalls: `docs/pitfalls/transitions.md`.
+- **Transitions.** Trimming beside or through a blend moves the blend, never a
+  gap; a retime scales each side's span, not its rate. A blend is opaque,
+  video-only and keeps its sides contiguous at the neighbour's rate. Full
+  model and every edge case: `docs/pitfalls/transitions.md`.
 - **A trim at an edge deletes the segment that edge would consume**
   (`trim_consume_target_on`): `i`/`I` the one **ending** at the playhead,
   `o`/`O` the one **starting** there — at a shared cut those are the two
@@ -191,20 +180,18 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - **Export stays byte-identical for the simple case:** one video track + no
   audio track keeps the classic concat path; otherwise every track is padded
   to the timeline length, video layers `overlay` bottom→top (upper gaps
-  `black@0.0`/`yuva420p`), audio `amix`es, and muted tracks drop out. One
-  video plus an audio track still takes the multi-track path — the fast path
-  needs *zero* audio tracks.
+  `black@0.0`/`yuva420p`), audio `amix`es, and muted tracks drop out. A video
+  track plus an audio one takes the multi-track path (fast = no audio).
 
 ## Editing and TUI conventions
 
 - **One action catalog, three front-ends.** Every timeline edit is an `Action`
-  (`nle-core/src/action.rs`) run by `run_action`; keybinds cover the frequent
-  ones, the `:cmd` line covers all of them, and the CLI has a matching
-  subcommand. The `:cmd` grammar *is* the CLI grammar (same flags; `--at`/
-  `--track`/`--clip` default to the playhead/active track/clip-under in the
-  TUI). A new action = an `Action` variant + a slot in `Action::slot` (the
-  match is exhaustive) + both parity tests. Session state (playhead, register)
-  is not an action.
+  (`nle-core/src/action.rs`) run by `run_action`; keys, the `:cmd` line and
+  the CLI all use it, and the `:cmd` grammar *is* the CLI grammar (same flags;
+  `--at`/`--track`/`--clip` default to the playhead/active track/clip-under in
+  the TUI). A new action = an `Action` variant + a slot in `Action::slot`
+  (exhaustive) + both parity tests. Session state (playhead, register) is not
+  an action.
 - **`--clip N` finds the clip's own track** (`resolve_track`); `--track`
   addresses position-based targets only. Tracks are 1-based — 0 is refused
   (`cli_index`), never silently "track 1".
@@ -220,9 +207,6 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - **The timeline panel sizes to show every track** (`panel_heights`): one row
   per track + marker row + borders; keys/message drop first on a short
   terminal. Keep hint lines ≲76 columns.
-- **The effects panel adds crop/scale/eq/offset only.** LUT is CLI-only for
-  now: `l` does nothing, and Enter on a LUT row refuses with a `:effect lut`
-  hint (the row still shows; `d`/`D` still remove it).
 
 ## Playhead
 
@@ -261,9 +245,6 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 
 ### TUI diagnostics
 
-`nle edit --dump [--dump-size WxH] [--dump-keys KEYS]` renders once (no mpv),
-feeds `KEYS` (`\n` = Enter, `\e` = Esc), and prints the model state plus the
-grid with a column ruler — answer a rendering, layout, or playhead question
-with one command instead of a screenshot. It is **read-only**: keys run
-through the real handlers on a scratch copy of the project, undo sidecar, and
-register, then the copy is deleted. The same path backs the render tests.
+`nle edit --dump` renders once (no mpv), feeds `--dump-keys`, and prints the
+model state + grid; it is read-only (a scratch copy) and backs the render
+tests. Usage: README.
