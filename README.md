@@ -140,9 +140,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 # slithers at transitions. It hisses refused actions and hard failures (bad
 # form values and preview/reload/save failures too), blinks with its eyes shut
 # when idle, and swims continuously while playing. Pausing returns to idle;
-# muting only closes its eyes. Spit moves a single dot/comma mark along its back, one body
-# section at a time, from back to front, then blinks and opens its jaw with a
-# star eye before shutting. While playing it swims continuously, replacing the body's two
+# muting only closes its eyes. Spit blinks, then opens its jaw in three stages
+# with a star eye before shutting; redo reverses it. While playing it swims
+# continuously, replacing the body's two
 # `;` with `:` so the body reads as `::::`.
 
 # Project workflow
