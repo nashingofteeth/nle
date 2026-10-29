@@ -21,12 +21,12 @@ const DASH2: &str = r#"=";::;>>>"#;
 const TAIL_UP: &str = r#"=";::;>!-"#;
 const HAPPY_TAIL: &str = r#"=^;::;>-~"#;
 const WIDE_ALERT: &str = r#")O;::;>!-"#;
-// Spit: a dot travels from the tail (back) toward the head (front); the
-// middle `:` cells become dots, and a comma trails at the back.
+// Spit: one body section changes at a time. A comma at the back gives way
+// to a single dot moving right-to-left through the middle to the front.
 const SPIT1: &str = r#")";::,>--"#;
-const SPIT2: &str = r#")";:.,>--"#;
-const SPIT3: &str = r#")";..,>--"#;
-const SPIT4: &str = r#")"...,>--"#;
+const SPIT2: &str = r#")";:.;>--"#;
+const SPIT3: &str = r#")";.:;>--"#;
+const SPIT4: &str = r#")".::;>--"#;
 
 /// A frame strip: (art, milliseconds). `None` is the idle state.
 type Strip = &'static [(&'static str, u64)];
@@ -267,14 +267,21 @@ mod tests {
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), SPIT2);
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), SPIT3);
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(400)), SPIT4);
-        // Body cells 2..6: the middle colons turn into dots, not commas.
+        // Only one body cell leaves the base at a time: the mark travels
+        // back-to-front instead of painting the whole back.
         for (frame, body) in [
             (SPIT1, ";::,"),
-            (SPIT2, ";:.,"),
-            (SPIT3, ";..,"),
-            (SPIT4, "...,"),
+            (SPIT2, ";:.;"),
+            (SPIT3, ";.:;"),
+            (SPIT4, ".::;"),
         ] {
             assert_eq!(&frame[2..6], body, "{frame}");
+            let changed = body
+                .chars()
+                .zip(";::;".chars())
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(changed, 1, "one body section at a time: {frame}");
         }
     }
 

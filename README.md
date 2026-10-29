@@ -139,7 +139,8 @@ $N edit                       # TUI + mpv monitor; vim keys:
 # slithers at transitions. It hisses refused actions and hard failures (bad
 # form values and preview/reload/save failures too), blinks with its eyes shut
 # when idle, and swims continuously while playing; pausing or muting only
-# closes its eyes. Spit runs a dot/comma wave along its back from back to front.
+# closes its eyes. Spit moves a single dot/comma mark along its back, one body
+# section at a time, from back to front.
 
 # Project workflow
 $N init
