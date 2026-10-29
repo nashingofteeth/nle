@@ -9,6 +9,9 @@
 use std::time::{Duration, Instant};
 
 pub(crate) const IDLE: &str = r#"=";::;>--"#;
+/// The status field is wide enough for the swimming legs; other frames are
+/// padded so the timecode never shifts when the legs appear/disappear.
+pub(crate) const CROC_WIDTH: usize = 13;
 const OPEN: &str = r#">";::;>--"#;
 const WIDE: &str = r#")";::;>--"#;
 /// Eyes shut: used by the fast idle blink and the pause/mute reaction.
@@ -16,17 +19,21 @@ const SLEEP: &str = r#"=-;::;>--"#;
 const HISS: &str = r#">O;::;>--"#;
 pub(crate) const SWIM1: &str = r#"=";::;>-~"#;
 pub(crate) const SWIM2: &str = r#"=";::;>~-"#;
+pub(crate) const SWIM1_LEGS: &str = r#"=";::;::::>-~"#;
+pub(crate) const SWIM2_LEGS: &str = r#"=";::;::::>~-"#;
 const DASH1: &str = r#"=";::;>>-"#;
 const DASH2: &str = r#"=";::;>>>"#;
 const TAIL_UP: &str = r#"=";::;>!-"#;
 const HAPPY_TAIL: &str = r#"=^;::;>-~"#;
 const WIDE_ALERT: &str = r#")O;::;>!-"#;
 // Spit: one body section changes at a time. A comma at the back gives way
-// to a single dot moving right-to-left through the middle to the front.
-const SPIT1: &str = r#")";::,>--"#;
-const SPIT2: &str = r#")";:.;>--"#;
-const SPIT3: &str = r#")";.:;>--"#;
-const SPIT4: &str = r#")".::;>--"#;
+// to a single dot moving right-to-left through the middle to the front; the
+// jaw opens only after the wave, then shuts again.
+const SPIT1: &str = r#"=";::,>--"#;
+const SPIT2: &str = r#"=";:.;>--"#;
+const SPIT3: &str = r#"=";.:;>--"#;
+const SPIT4: &str = r#"=".::;>--"#;
+const SPIT_OPEN: &str = r#")".::;>--"#;
 
 /// A frame strip: (art, milliseconds). `None` is the idle state.
 type Strip = &'static [(&'static str, u64)];
@@ -36,11 +43,11 @@ const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
 /// a happy eye and a tail flick, never an open jaw.
 const GULP: Strip = &[(HAPPY_TAIL, 200), (SWIM2, 200)];
 const SPIT: Strip = &[
-    (WIDE, 100),
     (SPIT1, 100),
     (SPIT2, 100),
     (SPIT3, 100),
     (SPIT4, 100),
+    (SPIT_OPEN, 100),
 ];
 const SNAP: Strip = &[(OPEN, 100), (SLEEP, 100), (OPEN, 100), (TAIL_UP, 100)];
 const NIBBLE: Strip = &[(OPEN, 100), (SLEEP, 200), (SWIM2, 100)];
@@ -182,9 +189,9 @@ fn frame_in(act: CrocAct, elapsed: Duration) -> Option<&'static str> {
 /// an idle frame.
 fn swim_frame(elapsed: Duration) -> &'static str {
     if (elapsed.as_millis() / SWIM_FRAME_MS).is_multiple_of(2) {
-        SWIM1
+        SWIM1_LEGS
     } else {
-        SWIM2
+        SWIM2_LEGS
     }
 }
 
@@ -212,10 +219,11 @@ mod tests {
     ];
 
     #[test]
-    fn every_frame_is_nine_ascii_cells() {
+    fn every_frame_fits_the_status_sprite() {
         for art in ALL_ART {
-            assert_eq!(art.chars().count(), 9, "{art:?}");
+            assert!(matches!(art.chars().count(), 9 | CROC_WIDTH), "{art:?}");
             assert!(art.is_ascii(), "{art:?}");
+            assert_eq!(format!("{art:<CROC_WIDTH$}").chars().count(), CROC_WIDTH);
         }
     }
 
@@ -262,11 +270,17 @@ mod tests {
 
     #[test]
     fn the_spit_wave_moves_from_back_to_front() {
-        assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), WIDE);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(100)), SPIT1);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), SPIT2);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), SPIT3);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(400)), SPIT4);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), SPIT1);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(100)), SPIT2);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), SPIT3);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), SPIT4);
+        assert_eq!(
+            frame_at(CrocAct::Spit, Duration::from_millis(400)),
+            SPIT_OPEN
+        );
+        // The jaw is shut while the mark travels, opens after the wave, then
+        // the fallback is closed again.
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(500)), IDLE);
         // Only one body cell leaves the base at a time: the mark travels
         // back-to-front instead of painting the whole back.
         for (frame, body) in [
@@ -274,6 +288,7 @@ mod tests {
             (SPIT2, ";:.;"),
             (SPIT3, ";.:;"),
             (SPIT4, ".::;"),
+            (SPIT_OPEN, ".::;"),
         ] {
             assert_eq!(&frame[2..6], body, "{frame}");
             let changed = body
@@ -283,6 +298,8 @@ mod tests {
                 .count();
             assert_eq!(changed, 1, "one body section at a time: {frame}");
         }
+        assert!(SPIT1.starts_with('='), "wave starts closed");
+        assert!(SPIT_OPEN.starts_with(')'), "jaw opens after the wave");
     }
 
     #[test]
@@ -300,7 +317,7 @@ mod tests {
         let now = Instant::now();
         for ms in (0..1_000).step_by(100) {
             let art = croc.art(now + Duration::from_millis(ms), true);
-            assert!(art == SWIM1 || art == SWIM2, "{ms} ms: {art}");
+            assert!(art == SWIM1_LEGS || art == SWIM2_LEGS, "{ms} ms: {art}");
         }
     }
 }

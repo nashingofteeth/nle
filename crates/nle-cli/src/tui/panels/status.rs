@@ -8,16 +8,19 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::super::croc::CROC_WIDTH;
 use super::super::keys::extend::projected_total;
 use super::super::{
     App, Mode, PREVIEW_NOTICE_DELAY, PreviewProgress, fmt_timecode, is_pool, pool_pos, pool_sel,
     secs,
 };
-pub(crate) fn logo(app: &App) -> &'static str {
+pub(crate) fn logo(app: &App) -> String {
     // Continuous swim while the monitor is actually playing; never idle,
-    // blink, or sleep in that state.
+    // blink, or sleep in that state. Padded to the field with the legs so
+    // the text after the croc does not move when it starts swimming.
     let playing = app.loaded && !app.paused && !app.eof && !app.dead;
-    app.croc.art(Instant::now(), playing)
+    let art = app.croc.art(Instant::now(), playing);
+    format!("{art:<CROC_WIDTH$}")
 }
 
 pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {
