@@ -1,0 +1,58 @@
+name: check
+
+# The same gates as scripts/check.sh, minus the parts that only make sense on
+# the developer's machine (`cargo install`, which just rewrites ~/.cargo/bin).
+# demo.sh is included: its pixel assertions are the end-to-end contract.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # .cargo/config.toml links through clang with `-fuse-ld=lld`, and
+      # targets the runner's CPU (-C target-cpu=native).
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends lld
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      # The headless variant is a supported build (AGENTS.md): its tests are
+      # the 55 CLI/unit ones that don't need ratatui.
+      - name: Test headless
+        run: cargo test --locked -p nle-cli --no-default-features
+
+      - name: Build release
+        run: cargo build --locked --release
+
+      - name: Demo (pixel checks)
+        run: ./demo.sh
