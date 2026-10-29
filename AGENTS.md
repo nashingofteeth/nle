@@ -106,9 +106,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   boundaries.
 - **Frames are 0-based everywhere** (`f0` = first frame). A timeline of `dur`
   spans `[0, dur)`; the last representable position is `dur - 1/fps`.
-- **Every write path clamps clips to their media.** A new import or write path
-  must call `clamp_project_to_media`, or the model reads past EOF and the
-  export silently truncates.
+- **Every write path clamps clips to their media.** `Document::save` clamps
+  before writing, `History::apply` after every batch; new saves go through
+  `Document`, or the model reads past EOF and the export silently truncates.
 - **Track-scoped edits.** Every track-resolving edit is
   `*_on(project, track, …)`; the plain name wraps the first video track. New
   ops take the index — don't add fresh `video_track()` calls. A stale index
