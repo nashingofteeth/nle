@@ -21,18 +21,22 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Pinned, not `-latest`: ubuntu-latest moves to 26.04 in November 2026,
+    # which changes ffmpeg and the linker under a pixel-asserting demo.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      # .cargo/config.toml links through clang with `-fuse-ld=lld`, and
-      # targets the runner's CPU (-C target-cpu=native). The behaviour
-      # tests and demo need ffmpeg/ffprobe, which the runner image omits.
-      - name: Install lld and ffmpeg
+      # lld: .cargo/config.toml links through clang with `-fuse-ld=lld`, and
+      #      targets the runner's CPU (-C target-cpu=native).
+      # ffmpeg/ffprobe: the behaviour tests and demo.sh shell out to them.
+      # xxd: demo.sh samples pixels with it.
+      # shellcheck: the two scripts below are part of the contract.
+      - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends lld ffmpeg
+          sudo apt-get install -y --no-install-recommends lld ffmpeg xxd shellcheck
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,8 +47,18 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      - name: Shell scripts
+        run: shellcheck scripts/check.sh demo.sh
+
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      # -D warnings makes a broken intra-doc link or an unescaped `<Type>` a
+      # failure; the codebase is doc-comment-heavy, so it is cheap insurance.
+      - name: Docs
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
       - name: Test
         run: cargo test --locked
