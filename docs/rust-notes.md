@@ -26,3 +26,10 @@ list, read when the compiler or clippy pushes back.
 - Struct-update syntax (`Foo { field, ..old.clone() }`) changes one field and
   keeps the rest — but it still moves/clones the whole struct, so it is not a
   cheap patch.
+- A `macro_rules!` is only visible to modules declared **after** it in the
+  file; declare `mod cmd;` below the macros (and `pub(crate) use` the ones
+  siblings call).
+- A `#[cfg(test)]` helper's imports must be `#[cfg(test)]` too, or the normal
+  build warns "unused import" and `-D warnings` fails it.
+- Two glob imports (`super::*` and `super::super::*`) make a same-named helper
+  ambiguous only at its use site; rename the fixture or import it explicitly.
