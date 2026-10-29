@@ -18,6 +18,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep CI builds portable. `.cargo/config.toml` targets the local CPU for
+  # speed, but the shared rust-cache can restore a proc-macro built for a
+  # different runner CPU; loading it makes clippy SIGILL. Setting RUSTFLAGS
+  # overrides the config flags, so ask only for the local lld link.
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   check:
