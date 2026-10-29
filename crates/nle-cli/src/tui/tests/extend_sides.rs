@@ -485,20 +485,14 @@ fn commit_at_opposite_end_deletes_armed_clip() {
 // end — the transition is part of the clip.
 #[test]
 fn extend_mode_hops_over_a_blend() {
-    let mut p = asset_project();
-    p.video = Some(nle_core::VideoSettings {
-        width: 320,
-        height: 240,
-    });
-    let mut app = App::new(p, temp_project_path("extend-blend"));
+    // Clip|clip blend, arming the left clip: its real tail is the blend's
+    // far end. Both sides are material, so no black preview/ffmpeg here (a
+    // unit test must not shell out — CI may have no binary on PATH).
+    let mut app = App::new(blend_pair(), temp_project_path("extend-blend"));
     app.loaded = true;
-    app.playhead = 3.0;
+    app.playhead = 2.0; // the blend's start
     let fake = FakeMpv::new();
-    handle_key(&mut app, &fake, key('X')); // blend [2, 3), playhead 2.5
-    // This test is about entering at the blend's edge; place it there.
-    app.playhead = 2.0;
-    assert_eq!(app.playhead, 2.0, "on the blend's start");
-    handle_key(&mut app, &fake, key('e'));
+    handle_key(&mut app, &fake, key(']')); // C1 tail: hop to 3.0
     assert!(
         matches!(&app.mode, Mode::Extend(st) if st.edge_pos == 3.0),
         "expected extend mode at the blend's far end; message = {:?}",
