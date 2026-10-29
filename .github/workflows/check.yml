@@ -30,13 +30,25 @@ jobs:
 
       # lld: .cargo/config.toml links through clang with `-fuse-ld=lld`, and
       #      targets the runner's CPU (-C target-cpu=native).
-      # ffmpeg/ffprobe: the behaviour tests and demo.sh shell out to them.
       # xxd: demo.sh samples pixels with it.
       # shellcheck: the two scripts below are part of the contract.
       - name: Install system tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends lld ffmpeg xxd shellcheck
+          sudo apt-get install -y --no-install-recommends lld xxd shellcheck
+
+      # Ubuntu 24.04 ships ffmpeg 6.1, which cannot spell the export's
+      # `-/filter_complex` (a 9.x option, so every export failed here). BtbN's
+      # 9.0 build tracks the 9.0.x release branch; the ~147 MB download is
+      # cheaper than building ffmpeg and keeps the tests' pixels stable.
+      - name: Install ffmpeg 9
+        run: |
+          curl -fsSL -o /tmp/ffmpeg.tar.xz \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
+          mkdir -p "$HOME/ffmpeg"
+          tar -xJf /tmp/ffmpeg.tar.xz -C "$HOME/ffmpeg" --strip-components=1
+          "$HOME/ffmpeg/bin/ffmpeg" -version | head -1
+          echo "$HOME/ffmpeg/bin" >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@stable
         with:

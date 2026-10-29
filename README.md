@@ -23,7 +23,9 @@ current status: `PLAN.md`.
 ## Usage
 
 Build needs Rust (edition 2024) plus `clang` and `lld`: the release profile
-links with lld (see `.cargo/config.toml`).
+links with lld (see `.cargo/config.toml`). Running needs **ffmpeg/ffprobe 9+**
+(the export passes its filter graph via `-/filter_complex`, which 6.x/Ubuntu
+24.04's ffmpeg lacks) and `mpv` for the monitor.
 
 ```sh
 cargo build --release
