@@ -337,7 +337,7 @@ for t in 1 4.5 6 9; do
   printf "    t=%-4s → %s\n" "$t" "$(xxd -p -l 3 pixel.raw)"
 done
 rm -f pixel.raw
-if output_has "at 2.5 s" $N --project agent.json show; then
+if output_has "at 2.5 s" "$N" --project agent.json show; then
   echo "  ✓ shared playhead stored (nle seek → nle show)"
 else
   echo "  ✗ playhead not stored"; exit 1
@@ -382,12 +382,12 @@ $N --project pool.json import red.mp4 blue.mp4 >/dev/null
 $N --project pool.json add red.mp4 --in 0 --out 1 >/dev/null
 $N --project pool.json media rm 2                                # blue is unused
 $N --project pool.json media ls
-if output_has "used by" $N --project pool.json media rm 1; then
+if output_has "used by" "$N" --project pool.json media rm 1; then
   echo "  ✓ media rm refuses an asset in use"
 else
   echo "  ✗ media rm removed an in-use asset"; exit 1
 fi
-if output_has "asset(s)" $N --project pool.json media ls; then
+if output_has "asset(s)" "$N" --project pool.json media ls; then
   echo "  ✓ pool down to the one asset still in use"
 else
   echo "  ✗ unexpected pool listing"; exit 1
