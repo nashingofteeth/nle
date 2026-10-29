@@ -102,9 +102,9 @@ impl CrocAct {
     }
 }
 
-/// What the crocodile is doing. `idle_since` is deliberately independent of
-/// `since`: action animations must not reset the slow idle-blink clock, and
-/// the continuous swim rides the same phase.
+/// What the crocodile is doing. `idle_since` is scheduled at the end of an
+/// action, so the blink timer starts after the reaction finishes. While
+/// playing, the continuous swim also rides this clock.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CrocState {
     act: CrocAct,
@@ -123,16 +123,21 @@ impl CrocState {
     }
 
     /// Start a reaction. The latest trigger wins; frames are never queued.
+    /// The idle-blink clock is set to when this reaction ends.
     pub(crate) fn play(&mut self, act: CrocAct) {
+        let now = Instant::now();
         self.act = act;
-        self.since = Instant::now();
+        self.since = now;
+        self.idle_since = now + strip_duration(act);
     }
 
     /// Drop any reaction now — the ambient state takes over (used when
     /// playback starts, so the croc swims immediately).
     pub(crate) fn clear(&mut self) {
+        let now = Instant::now();
         self.act = CrocAct::Idle;
-        self.since = Instant::now();
+        self.since = now;
+        self.idle_since = now;
     }
 
     /// `playing` is the transport state (loaded, playing, not at EOF). While
@@ -172,6 +177,14 @@ impl CrocState {
     pub(crate) fn set_idle_elapsed(&mut self, elapsed: Duration) {
         self.idle_since = Instant::now() - elapsed;
     }
+}
+
+fn strip_duration(act: CrocAct) -> Duration {
+    let ms = act
+        .strip()
+        .map(|strip| strip.iter().map(|(_, ms)| *ms).sum())
+        .unwrap_or(0);
+    Duration::from_millis(ms)
 }
 
 fn frame_in(act: CrocAct, elapsed: Duration) -> Option<&'static str> {
@@ -330,6 +343,18 @@ mod tests {
         assert_eq!(idle_frame(Duration::from_millis(6_800)), SLEEP);
         assert_eq!(idle_frame(Duration::from_millis(6_999)), SLEEP);
         assert_eq!(idle_frame(Duration::from_millis(7_000)), IDLE);
+    }
+
+    #[test]
+    fn an_action_restarts_the_blink_clock_after_it_ends() {
+        let mut croc = CrocState::new();
+        croc.set_idle_elapsed(Duration::from_millis(6_900));
+        assert_eq!(croc.art(Instant::now(), false), SLEEP);
+        croc.play(CrocAct::Chomp);
+        let end = croc.since + Duration::from_millis(300);
+        assert_eq!(croc.art(end, false), IDLE);
+        assert_eq!(croc.art(end + Duration::from_millis(6_799), false), IDLE);
+        assert_eq!(croc.art(end + Duration::from_millis(6_800), false), SLEEP);
     }
 
     #[test]
