@@ -50,11 +50,11 @@ const SPIT: Strip = &[
     (SLEEP, 100),
     (OPEN_STAR, 100),
     (WIDE_STAR, 100),
-    (OPEN_STAR, 100),
+    (OPEN, 100),
 ];
 /// Redo is the spit run backwards.
 const UNSPIT: Strip = &[
-    (OPEN_STAR, 100),
+    (OPEN, 100),
     (WIDE_STAR, 100),
     (OPEN_STAR, 100),
     (SLEEP, 100),
@@ -310,10 +310,7 @@ mod tests {
             frame_at(CrocAct::Spit, Duration::from_millis(400)),
             WIDE_STAR
         );
-        assert_eq!(
-            frame_at(CrocAct::Spit, Duration::from_millis(500)),
-            OPEN_STAR
-        );
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(500)), OPEN);
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(600)), IDLE);
         // Only one body cell leaves the base at a time, and the wave is shut.
         for (frame, body) in [
@@ -336,7 +333,7 @@ mod tests {
 
     #[test]
     fn redo_reverses_the_spit_sequence() {
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::ZERO), OPEN_STAR);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::ZERO), OPEN);
         assert_eq!(
             frame_at(CrocAct::Unspit, Duration::from_millis(100)),
             WIDE_STAR
