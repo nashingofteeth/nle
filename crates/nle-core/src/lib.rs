@@ -7,6 +7,7 @@
 
 pub mod action;
 pub mod detect;
+pub mod document;
 pub mod edit;
 pub mod edl;
 pub mod extend;
@@ -21,6 +22,7 @@ pub use action::{
     load_register, register_path, run_action, save_register, track_label,
 };
 pub use detect::{Span, reconstruct};
+pub use document::Document;
 pub use edit::{
     Atom, Batch, Change, EditError, EditOp, History, absorb_outward, add_effect, add_effect_on,
     add_transition, clamp_project, clamp_to_media, delete_clip_by_id, delete_ripple, delete_under,
