@@ -716,11 +716,31 @@ fn run_export(
         eprintln!("$ ffmpeg {}", args.join(" "));
     }
     if let Some(cb) = progress.as_mut() {
-        run_ffmpeg_progress(&args, echo, &mut **cb)?;
+        run_ffmpeg_progress(&args, echo, &mut **cb).map_err(explain_old_ffmpeg)?;
     } else {
-        run_ffmpeg_opt(&args, echo)?;
+        run_ffmpeg_opt(&args, echo).map_err(explain_old_ffmpeg)?;
     }
     Ok(plan) // script deleted on drop, after ffmpeg is done
+}
+
+/// ffmpeg before 9 does not know `-/filter_complex`, and its own error is
+/// just "Unrecognized option" — which says nothing about what to upgrade.
+/// Ubuntu 24.04's ffmpeg 6.1 is exactly this case.
+fn explain_old_ffmpeg(e: FfmpegError) -> FfmpegError {
+    match e {
+        FfmpegError::Failed { status, tail }
+            if tail.contains("Unrecognized option '/filter_complex'") =>
+        {
+            FfmpegError::Failed {
+                status,
+                tail: format!(
+                    "{tail}\nnote: nle needs ffmpeg 9 or newer \
+                     (the filter graph is passed with -/filter_complex)"
+                ),
+            }
+        }
+        other => other,
+    }
 }
 
 fn secs_f64(t: &Seconds) -> f64 {
@@ -730,6 +750,17 @@ fn secs_f64(t: &Seconds) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_ffmpeg_failure_names_the_requirement() {
+        let status = std::process::Command::new("false").status().unwrap();
+        let e = FfmpegError::Failed {
+            status,
+            tail: "Unrecognized option '/filter_complex'.".into(),
+        };
+        let msg = explain_old_ffmpeg(e).to_string();
+        assert!(msg.contains("ffmpeg 9"), "{msg}");
+    }
     use nle_core::VideoSettings;
     use nle_core::media::{RawFormat, RawProbe, RawStream};
     use nle_core::timeline::{Clip, Effect, Gap, Transition, TransitionKind, TransitionSource};
