@@ -472,8 +472,11 @@ pub(crate) fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<
                 }
                 None
             }
-            // The verb is an edit, the arguments are not.
-            Err(ParseError::Invalid(msg)) => Some(msg),
+            // The verb is an edit, the arguments are not: a refusal.
+            Err(ParseError::Invalid(msg)) => {
+                app.fail(&msg);
+                Some(msg)
+            }
             // Not an edit action: the front-end's own (query/IO) commands.
             Err(ParseError::Unknown(_)) => io_command(app, player, cmd),
         },

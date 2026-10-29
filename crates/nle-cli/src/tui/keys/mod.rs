@@ -15,6 +15,7 @@ use self::fx::{
 };
 use self::pool::{open_pool, pool_key};
 use super::actions::{edit_delete, edit_yank, run_action, seek_clip_end};
+use super::croc::CrocAct;
 use super::motion::{
     cut_points, half_frame, next_clip_start, next_cut, next_gap_start, prev_clip_start, prev_cut,
     prev_gap_start,
@@ -120,8 +121,15 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                     // At the end: play restarts from the beginning.
                     player.seek_absolute(0.0);
                     player.set_pause(false);
+                    app.croc.play(CrocAct::Swim);
                 } else {
+                    let was_paused = app.paused;
                     player.toggle_pause();
+                    app.croc.play(if was_paused {
+                        CrocAct::Swim
+                    } else {
+                        CrocAct::Yawn
+                    });
                 }
             }
         }

@@ -25,8 +25,10 @@ use motion::{fmt_timecode, gap_under, secs, snap_to_cut, snap_to_frame};
 
 // ------------------------------------------------------------ cut motions
 
+mod croc;
 mod jobs;
 
+use croc::{CrocAct, CrocState};
 use jobs::{Job, PreviewJob, PreviewProgress, poll_job, poll_preview, start_preview};
 
 // ------------------------------------------------------------ app state
@@ -257,9 +259,8 @@ pub struct App {
     preview_enabled: bool,
     /// Progress for the status row while `preview` runs.
     pub preview_progress: Option<PreviewProgress>,
-    /// When the status-bar crocodile's mouth is open — a delete just removed
-    /// material from the timeline. `None`/past means closed.
-    chomp_until: Option<Instant>,
+    /// The status-bar crocodile's current reaction (or idle/blink).
+    pub(crate) croc: CrocState,
     /// Session files as we last read/wrote them (see [`Seen`]).
     seen: Seen,
     /// A foreign change arrived while a mode held state; reload when back
@@ -300,7 +301,7 @@ impl App {
             preview_dirty: false,
             preview_enabled: false,
             preview_progress: None,
-            chomp_until: None,
+            croc: CrocState::new(),
             seen: Seen::default(),
             reload_pending: false,
         };
@@ -323,6 +324,13 @@ impl App {
     pub fn set_message(&mut self, msg: &str) {
         crate::log::line(msg);
         self.message = msg.to_string();
+    }
+
+    /// An error — a refused edit, a bad form value, or an infrastructure
+    /// failure (preview/reload/save/worker): the croc hisses.
+    pub(crate) fn fail(&mut self, msg: &str) {
+        self.croc.play(CrocAct::Hiss);
+        self.set_message(msg);
     }
 
     /// Remember the on-disk times of the session files — after a load, or
@@ -673,7 +681,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         if watch_foreign(&mut app) {
             match reload_project(&mut app, &player, true) {
                 Ok(()) => app.set_message("adopted changes from the shell"),
-                Err(e) => app.set_message(&format!("reload failed: {e}")),
+                Err(e) => app.fail(&format!("reload failed: {e}")),
             }
         }
 
@@ -681,7 +689,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
             app.reload_requested = false;
             match reload_project(&mut app, &player, false) {
                 Ok(()) => app.set_message("timeline reloaded"),
-                Err(e) => app.set_message(&format!("reload failed: {e}")),
+                Err(e) => app.fail(&format!("reload failed: {e}")),
             }
         }
 
@@ -704,7 +712,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
                 Ok(true) => {}
                 // A shell write landed mid-flight: adopt it next tick.
                 Ok(false) => app.reload_pending = true,
-                Err(e) => app.set_message(&format!("save failed: {e}")),
+                Err(e) => app.fail(&format!("save failed: {e}")),
             }
         }
 
@@ -979,11 +987,6 @@ use actions::clip_under;
 
 // ------------------------------------------------------------ rendering
 
-/// The status-bar mark: a crocodile. `=` is the closed mouth; a delete opens
-/// it to `>` for a moment (`CHOMP_MS`), then it closes again.
-const CROC: &str = r#"=";::;>--"#;
-const CHOMP: &str = r#">";::;>--"#;
-const CHOMP_MS: u64 = 250;
 /// How long a preview build runs before the status row announces it. A warm
 /// cache (or a no-proxy timeline) finishes in milliseconds; without this every
 /// edit flashed `building preview…` for a frame.

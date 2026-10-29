@@ -1,3 +1,4 @@
+use super::super::croc::CrocAct;
 use super::super::keys::fx::form_for_effect;
 use super::super::keys::{completes_gg, handle_key};
 use super::*;
@@ -111,6 +112,21 @@ fn a_huge_count_in_the_pool_does_not_panic() {
     }
     handle_key(&mut app, &fake, key('l'));
     assert_eq!(app.count, None);
+}
+
+#[test]
+fn play_swims_and_pause_yawns() {
+    let mut app = App::new(asset_project(), temp_project_path("transport-croc"));
+    app.loaded = true;
+    let fake = FakeMpv::new();
+
+    app.paused = true;
+    handle_key(&mut app, &fake, key(' '));
+    assert_eq!(app.croc.act(), CrocAct::Swim, "play starts a swim");
+
+    app.paused = false;
+    handle_key(&mut app, &fake, key(' '));
+    assert_eq!(app.croc.act(), CrocAct::Yawn, "pause yawns");
 }
 
 // The pool's `gg` needs both keys: a lone `g` only arms the sequence.

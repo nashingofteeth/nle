@@ -1,3 +1,4 @@
+use super::super::croc::CrocAct;
 use super::super::jobs::PreviewMsg;
 use super::super::keys::{handle_key, set_active_track};
 use super::super::motion::{fmt_timecode, secs};
@@ -433,6 +434,7 @@ fn a_preview_failure_keeps_the_edit_notice() {
     tx.send(PreviewMsg::Done(Err("boom".into()))).unwrap();
     poll_preview(&mut app, &fake);
     assert_eq!(app.message, "effect on clip #1 — preview failed: boom");
+    assert_eq!(app.croc.act(), CrocAct::Hiss, "a hard failure hisses");
     assert!(app.preview.is_none());
 }
 
@@ -519,4 +521,5 @@ fn a_failed_handoff_gives_the_hand_off_up() {
         app.message,
         "timeline — preview failed: ffmpeg: no such file"
     );
+    assert_eq!(app.croc.act(), CrocAct::Hiss, "a hard failure hisses");
 }

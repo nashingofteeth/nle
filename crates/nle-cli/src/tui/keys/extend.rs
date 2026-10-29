@@ -16,6 +16,7 @@ use crate::mpv::Mpv;
 use crate::preview;
 
 use super::super::actions::run_action;
+use super::super::croc::CrocAct;
 use super::super::jobs::start_preview;
 use super::super::motion::{
     cut_points, half_frame, next_clip_start, next_cut, next_gap_start, prev_clip_start, prev_cut,
@@ -245,7 +246,7 @@ pub(crate) fn armed_desc(armed: &Armed) -> String {
 pub(crate) fn enter_extend(app: &mut App, player: &dyn Mpv, ripple: bool) {
     let plan = match plan_extend(&app.project, app.playhead, ripple, app.active()) {
         Err(msg) => {
-            app.set_message(&msg);
+            app.fail(&msg);
             return;
         }
         Ok(p) => p,
@@ -286,7 +287,7 @@ pub(crate) fn apply_extend_plan(app: &mut App, player: &dyn Mpv, plan: ExtendPla
             };
             match preview::build_black_preview(&app.project, *origin, length) {
                 Err(e) => {
-                    app.set_message(&format!("preview failed: {e}"));
+                    app.fail(&format!("preview failed: {e}"));
                     return;
                 }
                 Ok(pv) => (pv.url, pv.origin),
@@ -529,7 +530,7 @@ pub(crate) fn enter_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
                 app.message.push_str(&format!(" — {note}"));
             }
         }
-        Err(m) => app.set_message(&m),
+        Err(m) => app.fail(&m),
     }
 }
 
@@ -554,7 +555,7 @@ pub(crate) fn set_extend_side(app: &mut App, player: &dyn Mpv, side: Side) {
             app.playhead = edge;
             apply_extend_plan(app, player, plan, st.ripple);
         }
-        Err(m) => app.set_message(&m),
+        Err(m) => app.fail(&m),
     }
 }
 
@@ -587,7 +588,7 @@ pub(crate) fn flip_target(
 pub(crate) fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
     let Some(st) = extend_state(app) else { return };
     let Some((armed, edge)) = flip_target(&app.project, st.armed, head, st.track) else {
-        app.set_message("segment is gone");
+        app.fail("segment is gone");
         return;
     };
     if st.armed == armed {
@@ -600,7 +601,7 @@ pub(crate) fn flip_extend_edge(app: &mut App, player: &dyn Mpv, head: bool) {
             app.playhead = edge;
             apply_extend_plan(app, player, plan, st.ripple);
         }
-        Err(m) => app.set_message(&m),
+        Err(m) => app.fail(&m),
     }
 }
 
@@ -692,7 +693,7 @@ pub(crate) fn commit_extend(app: &mut App, player: &dyn Mpv) {
     let Some(st) = extend_state(app) else { return };
     let kind = match plan_commit(&app.project, &st.armed, st.edge_pos, app.playhead, st.track) {
         Err(msg) => {
-            app.set_message(&msg);
+            app.fail(&msg);
             return;
         }
         Ok(k) => k,
@@ -822,7 +823,13 @@ pub(crate) fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     match code {
         KeyCode::Char(' ') => {
             if app.guard_loaded() {
+                let was_paused = app.paused;
                 player.toggle_pause();
+                app.croc.play(if was_paused {
+                    CrocAct::Swim
+                } else {
+                    CrocAct::Yawn
+                });
             }
         }
         KeyCode::Char('h') => seek_rel_mode(app, player, &st, -(mult as f64)),

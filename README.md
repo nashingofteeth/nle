@@ -133,8 +133,12 @@ $N edit                       # TUI + mpv monitor; vim keys:
 # While the monitor rebuilds after an edit, the status row shows a spinner and
 # "proxies 2/5 · 43%" — proxy renders run in the background, so the TUI stays
 # responsive (the monitor keeps the previous frame until the new one is ready).
-# The crocodile at the left of the status row opens its mouth when an edit
-# removes material from the timeline, then closes again.
+# The crocodile at the left of the status row reacts to edits: it chomps
+# removals, gulps inserts, spits undo, snaps splits, nibbles trims, dashes
+# speed changes (tail arrows up / a slow wag back), winks at effects and
+# slithers at transitions. It hisses refused actions and hard failures (bad
+# form values and preview/reload/save failures too), blinks when idle, and
+# swims once when playback starts.
 
 # Project workflow
 $N init

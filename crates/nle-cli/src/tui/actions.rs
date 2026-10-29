@@ -3,7 +3,6 @@
 //! and the delete/yank keys' shared plumbing.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
 
 use nle_core::action::Action;
 use nle_core::time::frame_to_secs;
@@ -14,10 +13,11 @@ use nle_core::{Clip, History, Project, Seconds, Target, clip_span, save_register
 
 use crate::mpv::Mpv;
 
+use super::croc::CrocAct;
 use super::jobs::start_preview;
 use super::{
-    App, CHOMP_MS, Mode, is_pool, load_pool_preview_at, persist_playhead, pool_pos, pool_sel,
-    reload_project, secs, set_pool_sel,
+    App, Mode, is_pool, load_pool_preview_at, persist_playhead, pool_pos, pool_sel, reload_project,
+    secs, set_pool_sel,
 };
 /// The clip the playhead sits inside, if any.
 pub(crate) fn clip_under(project: &Project, t: f64, ti: usize) -> Option<&Clip> {
@@ -287,10 +287,73 @@ pub(crate) fn removed_material(before: &TimelineStamp, after: &TimelineStamp) ->
     after.segments < before.segments || before.ids.iter().any(|id| !after.ids.contains(id))
 }
 
+/// Which crocodile reaction an accepted edit earns. `removed` is the
+/// before/after stamp; `old_speed` is only needed to tell a speed-up
+/// (`DashFast`) from a slow-down (`DashSlow`).
+pub(crate) fn reaction_for(
+    action: &Action,
+    removed: bool,
+    old_speed: Option<Seconds>,
+) -> Option<CrocAct> {
+    // Undo always gives the previous state back — a spit, even when what it
+    // removes is a freshly-pasted clip.
+    if matches!(action, Action::Undo) {
+        return Some(CrocAct::Spit);
+    }
+    if removed {
+        return Some(CrocAct::Chomp);
+    }
+    match action {
+        Action::Redo => Some(CrocAct::Gulp),
+        Action::TrimIn { .. } | Action::TrimOut { .. } => Some(CrocAct::Nibble),
+        Action::Split { .. } => Some(CrocAct::Snap),
+        Action::InsertGap { .. }
+        | Action::Paste { .. }
+        | Action::Extend { .. }
+        | Action::TrackAdd { .. } => Some(CrocAct::Gulp),
+        Action::SetSpeed { rate, .. } => {
+            let old = old_speed?;
+            let (new, old) = (secs(rate), secs(&old));
+            if new > old {
+                Some(CrocAct::DashFast)
+            } else if new < old {
+                Some(CrocAct::DashSlow)
+            } else {
+                None
+            }
+        }
+        Action::Transition { .. } => Some(CrocAct::Slither),
+        Action::AddEffect { .. } | Action::RemoveEffect { .. } | Action::ClearEffects { .. } => {
+            Some(CrocAct::Wink)
+        }
+        Action::TrackMute { .. } => Some(CrocAct::Yawn),
+        Action::AssetRm { .. } => Some(CrocAct::Chomp),
+        Action::PurgeStumps { .. } => Some(CrocAct::Nibble),
+        Action::Delete { .. } | Action::TrackRm { .. } | Action::Yank { .. } => None,
+        Action::Undo => unreachable!("handled above"),
+    }
+}
+
+fn speed_of(project: &Project, id: u32) -> Option<Seconds> {
+    project
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.segments)
+        .find_map(|seg| match seg {
+            TimelineSegment::Clip(c) if c.id == id => Some(c.speed),
+            _ => None,
+        })
+}
+
 pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bool {
     // What the timeline holds before the edit — a removal opens the crocodile's
     // mouth in the status row (the chomp is transient, not a message).
     let stamp = timeline_stamp(&app.project);
+    let speed_before = match action {
+        Action::SetSpeed { clip, .. } => speed_of(&app.project, *clip),
+        _ => None,
+    };
     // Keep the playhead on the frame it was showing, not the same
     // timecode (a trim can move material under it). Undo/redo carry their
     // own restore position; an extend commit is made from the armed edge,
@@ -326,8 +389,11 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
                 }
                 None => {}
             }
-            if outcome.changed && removed_material(&stamp, &timeline_stamp(&app.project)) {
-                app.chomp_until = Some(Instant::now() + Duration::from_millis(CHOMP_MS));
+            if outcome.changed {
+                let removed = removed_material(&stamp, &timeline_stamp(&app.project));
+                if let Some(act) = reaction_for(action, removed, speed_before) {
+                    app.croc.play(act);
+                }
             }
             app.set_message(&outcome.desc);
             // The register is shared with the CLI (`nle yank`/`nle paste`).
@@ -340,7 +406,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
             true
         }
         Err(e) => {
-            app.set_message(&crate::edit_message(&e));
+            app.fail(&crate::edit_message(&e));
             false
         }
     }
@@ -360,22 +426,22 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
             // A shell wrote the project first: adopt theirs rather than
             // clobber it, and say so — this edit was not saved.
             if let Err(e) = reload_project(app, player, true) {
-                app.set_message(&format!("reload failed: {e}"));
+                app.fail(&format!("reload failed: {e}"));
                 return;
             }
             let prev = app.message.clone();
-            app.set_message(&format!(
+            app.fail(&format!(
                 "{prev} — not saved: nle.json changed on disk (reloaded)"
             ));
             return;
         }
         Err(e) => {
-            app.set_message(&format!("save failed: {e}"));
+            app.fail(&format!("save failed: {e}"));
             return;
         }
     }
     if let Err(e) = app.project.save_history(&History::sidecar_path(&app.path)) {
-        app.set_message(&format!("history save failed: {e}"));
+        app.fail(&format!("history save failed: {e}"));
     } else {
         app.note_history();
     }

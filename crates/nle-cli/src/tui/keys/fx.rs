@@ -110,13 +110,13 @@ pub(crate) fn apply_transition_form(app: &mut App, player: &dyn Mpv) {
         match text.parse::<i64>() {
             Ok(n) => n,
             Err(_) => {
-                app.set_message("frames must be a whole number");
+                app.fail("frames must be a whole number");
                 return;
             }
         }
     };
     if frames < 1 {
-        app.set_message("frames must be at least 1");
+        app.fail("frames must be at least 1");
         return;
     }
     if frames == form.current {
@@ -395,7 +395,7 @@ pub(crate) fn apply_fx_form(app: &mut App, player: &dyn Mpv) {
     let effect = match form_effect(&form) {
         Ok(effect) => effect,
         Err(msg) => {
-            app.set_message(&msg);
+            app.fail(&msg);
             return;
         }
     };

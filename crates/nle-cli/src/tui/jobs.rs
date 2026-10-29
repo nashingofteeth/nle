@@ -74,17 +74,18 @@ pub(crate) fn poll_job(app: &mut App, player: &dyn Mpv) {
         Ok(Ok(msg)) => {
             app.job = None;
             if reload && let Err(e) = reload_project(app, player, true) {
-                app.set_message(&format!("reload failed: {e}"));
+                app.fail(&format!("{msg} — reload failed: {e}"));
+            } else {
+                app.set_message(&msg);
             }
-            app.set_message(&msg);
         }
         Ok(Err(e)) => {
             app.job = None;
-            app.set_message(&format!("{label} failed: {e}"));
+            app.fail(&format!("{label} failed: {e}"));
         }
         Err(TryRecvError::Disconnected) => {
             app.job = None;
-            app.set_message(&format!("{label} failed: worker died"));
+            app.fail(&format!("{label} failed: worker died"));
         }
         Err(TryRecvError::Empty) => {}
     }
@@ -198,5 +199,5 @@ pub(crate) fn preview_failed(app: &mut App, why: &str) {
     } else {
         format!("{} — preview failed: {why}", app.message)
     };
-    app.set_message(&msg);
+    app.fail(&msg);
 }
