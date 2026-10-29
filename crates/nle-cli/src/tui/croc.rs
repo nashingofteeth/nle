@@ -23,30 +23,20 @@ const TAIL1: &str = r#"=";::;>-~"#;
 const TAIL2: &str = r#"=";::;>~-"#;
 const DASH1: &str = r#"=";::;>>-"#;
 const DASH2: &str = r#"=";::;>>>"#;
-const TAIL_UP: &str = r#"=";::;>!-"#;
 const HAPPY_TAIL: &str = r#"=^;::;>-~"#;
 const WIDE_ALERT: &str = r#")O;::;>!-"#;
-// Spit/vomit: the body wave runs closed, then the eyes shut, then the jaw
-// opens in three stages with a star eye.
-const SPIT1: &str = r#"=";::,>--"#;
-const SPIT2: &str = r#"=";:.;>--"#;
-const SPIT3: &str = r#"=";.:;>--"#;
-const SPIT4: &str = r#"=",::;>--"#;
+// Spit/vomit: eyes shut, then the jaw opens in three stages with a star eye.
 const OPEN_STAR: &str = r#">*;::;>--"#;
 const WIDE_STAR: &str = r#")*;::;>--"#;
 
 /// A frame strip: (art, milliseconds). `None` is the idle state.
 type Strip = &'static [(&'static str, u64)];
 
-const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
+const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100)];
 /// Adds (paste/insert/track add/extend) swallow with the mouth closed:
 /// a happy eye and a tail flick, never an open jaw.
 const GULP: Strip = &[(HAPPY_TAIL, 200), (TAIL2, 200)];
 const SPIT: Strip = &[
-    (SPIT1, 50),
-    (SPIT2, 50),
-    (SPIT3, 50),
-    (SPIT4, 50),
     (SLEEP, 100),
     (OPEN_STAR, 100),
     (WIDE_STAR, 100),
@@ -58,12 +48,8 @@ const UNSPIT: Strip = &[
     (WIDE_STAR, 100),
     (OPEN_STAR, 100),
     (SLEEP, 100),
-    (SPIT4, 50),
-    (SPIT3, 50),
-    (SPIT2, 50),
-    (SPIT1, 50),
 ];
-const SNAP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (WIDE, 100)];
+const SNAP: Strip = &[(OPEN, 50), (WIDE, 50), (OPEN, 50), (WIDE, 50)];
 const NIBBLE: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100)];
 const DASH_FAST: Strip = &[(TAIL1, 100), (DASH1, 100), (DASH2, 200)];
 const DASH_SLOW: Strip = &[(TAIL2, 300), (TAIL1, 300)];
@@ -230,8 +216,8 @@ mod tests {
     use super::*;
 
     const ALL_ART: &[&str] = &[
-        IDLE, OPEN, WIDE, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, TAIL_UP, HAPPY_TAIL, WIDE_ALERT,
-        SPIT1, SPIT2, SPIT3, SPIT4, OPEN_STAR, WIDE_STAR,
+        IDLE, OPEN, WIDE, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, HAPPY_TAIL, WIDE_ALERT,
+        OPEN_STAR, WIDE_STAR,
     ];
 
     #[test]
@@ -270,11 +256,7 @@ mod tests {
         assert_eq!(frame_at(CrocAct::Chomp, Duration::ZERO), OPEN);
         assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(100)), WIDE);
         assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(200)), OPEN);
-        assert_eq!(
-            frame_at(CrocAct::Chomp, Duration::from_millis(300)),
-            TAIL_UP
-        );
-        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(400)), IDLE);
+        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(300)), IDLE);
     }
 
     #[test]
@@ -285,8 +267,8 @@ mod tests {
     }
 
     #[test]
-    fn trim_and_split_keep_their_eyes_open_and_tail_still() {
-        for act in [CrocAct::Nibble, CrocAct::Snap] {
+    fn trim_split_and_delete_keep_their_tails_still() {
+        for act in [CrocAct::Chomp, CrocAct::Nibble, CrocAct::Snap] {
             for (art, _) in act.strip().expect("finite act") {
                 assert_ne!(*art, SLEEP, "{act:?} must not blink: {art}");
                 assert_ne!(art.chars().nth(1), Some('-'), "{act:?}: {art}");
@@ -296,39 +278,18 @@ mod tests {
     }
 
     #[test]
-    fn the_spit_sequence_waves_blinks_then_opens() {
-        assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), SPIT1);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(50)), SPIT2);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(100)), SPIT3);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(150)), SPIT4);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), SLEEP);
+    fn the_spit_sequence_blinks_then_opens() {
+        assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), SLEEP);
         assert_eq!(
-            frame_at(CrocAct::Spit, Duration::from_millis(300)),
+            frame_at(CrocAct::Spit, Duration::from_millis(100)),
             OPEN_STAR
         );
         assert_eq!(
-            frame_at(CrocAct::Spit, Duration::from_millis(400)),
+            frame_at(CrocAct::Spit, Duration::from_millis(200)),
             WIDE_STAR
         );
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(500)), OPEN);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(600)), IDLE);
-        // Only one body cell leaves the base at a time, and the wave is shut.
-        for (frame, body) in [
-            (SPIT1, ";::,"),
-            (SPIT2, ";:.;"),
-            (SPIT3, ";.:;"),
-            (SPIT4, ",::;"),
-        ] {
-            assert!(frame.starts_with('='), "wave stays shut: {frame}");
-            assert_eq!(&frame[2..6], body, "{frame}");
-            let changed = body
-                .chars()
-                .zip(";::;".chars())
-                .filter(|(a, b)| a != b)
-                .count();
-            assert_eq!(changed, 1, "one body section at a time: {frame}");
-        }
-        assert_eq!(SLEEP, frame_at(CrocAct::Spit, Duration::from_millis(200)));
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), OPEN);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(400)), IDLE);
     }
 
     #[test]
@@ -343,11 +304,7 @@ mod tests {
             OPEN_STAR
         );
         assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(300)), SLEEP);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(400)), SPIT4);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(450)), SPIT3);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(500)), SPIT2);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(550)), SPIT1);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(600)), IDLE);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(400)), IDLE);
     }
 
     #[test]
