@@ -45,8 +45,8 @@ const SPIT: Strip = &[(SPIT1, 50), (SPIT2, 50), (SPIT3, 50), (SPIT4, 50)];
 /// Redo is the spit run backwards: the same four short frames, body moving
 /// front-to-back, jaw open throughout.
 const UNSPIT: Strip = &[(SPIT4, 50), (SPIT3, 50), (SPIT2, 50), (SPIT1, 50)];
-const SNAP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
-const NIBBLE: Strip = &[(OPEN, 100), (WIDE, 100), (TAIL2, 200)];
+const SNAP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (WIDE, 100)];
+const NIBBLE: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100)];
 const DASH_FAST: Strip = &[(TAIL1, 100), (DASH1, 100), (DASH2, 200)];
 const DASH_SLOW: Strip = &[(TAIL2, 300), (TAIL1, 300)];
 const SLITHER: Strip = &[(TAIL1, 200), (TAIL2, 200), (TAIL1, 200)];
@@ -267,11 +267,12 @@ mod tests {
     }
 
     #[test]
-    fn trim_and_split_keep_their_eyes_open() {
+    fn trim_and_split_keep_their_eyes_open_and_tail_still() {
         for act in [CrocAct::Nibble, CrocAct::Snap] {
             for (art, _) in act.strip().expect("finite act") {
                 assert_ne!(*art, SLEEP, "{act:?} must not blink: {art}");
                 assert_ne!(art.chars().nth(1), Some('-'), "{act:?}: {art}");
+                assert_eq!(&art[6..], ">--", "{act:?} must not move the tail: {art}");
             }
         }
     }
