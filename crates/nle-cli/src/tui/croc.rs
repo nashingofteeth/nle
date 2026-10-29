@@ -37,19 +37,19 @@ const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100)];
 /// a happy eye and a tail flick, never an open jaw.
 const GULP: Strip = &[(HAPPY_TAIL, 200), (TAIL2, 200)];
 const SPIT: Strip = &[
-    (SLEEP, 100),
-    (OPEN_STAR, 100),
-    (WIDE_STAR, 100),
-    (OPEN, 100),
+    (SLEEP, 150),
+    (OPEN_STAR, 150),
+    (WIDE_STAR, 150),
+    (OPEN, 150),
 ];
 /// Redo is the spit run backwards.
 const UNSPIT: Strip = &[
-    (OPEN, 100),
-    (WIDE_STAR, 100),
-    (OPEN_STAR, 100),
-    (SLEEP, 100),
+    (OPEN, 150),
+    (WIDE_STAR, 150),
+    (OPEN_STAR, 150),
+    (SLEEP, 150),
 ];
-const SNAP: Strip = &[(OPEN, 50), (WIDE, 50), (OPEN, 50), (WIDE, 50)];
+const SNAP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (WIDE, 100)];
 const NIBBLE: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100)];
 const DASH_FAST: Strip = &[(TAIL1, 100), (DASH1, 100), (DASH2, 200)];
 const DASH_SLOW: Strip = &[(TAIL2, 300), (TAIL1, 300)];
@@ -274,6 +274,15 @@ mod tests {
     }
 
     #[test]
+    fn a_split_bites_at_a_gentler_pace() {
+        assert_eq!(frame_at(CrocAct::Snap, Duration::ZERO), OPEN);
+        assert_eq!(frame_at(CrocAct::Snap, Duration::from_millis(100)), WIDE);
+        assert_eq!(frame_at(CrocAct::Snap, Duration::from_millis(200)), OPEN);
+        assert_eq!(frame_at(CrocAct::Snap, Duration::from_millis(300)), WIDE);
+        assert_eq!(frame_at(CrocAct::Snap, Duration::from_millis(400)), IDLE);
+    }
+
+    #[test]
     fn trim_split_and_delete_keep_their_tails_still() {
         for act in [CrocAct::Chomp, CrocAct::Nibble, CrocAct::Snap] {
             for (art, _) in act.strip().expect("finite act") {
@@ -288,30 +297,30 @@ mod tests {
     fn the_spit_sequence_blinks_then_opens() {
         assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), SLEEP);
         assert_eq!(
-            frame_at(CrocAct::Spit, Duration::from_millis(100)),
+            frame_at(CrocAct::Spit, Duration::from_millis(150)),
             OPEN_STAR
         );
         assert_eq!(
-            frame_at(CrocAct::Spit, Duration::from_millis(200)),
+            frame_at(CrocAct::Spit, Duration::from_millis(300)),
             WIDE_STAR
         );
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), OPEN);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(400)), IDLE);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(450)), OPEN);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(600)), IDLE);
     }
 
     #[test]
     fn redo_reverses_the_spit_sequence() {
         assert_eq!(frame_at(CrocAct::Unspit, Duration::ZERO), OPEN);
         assert_eq!(
-            frame_at(CrocAct::Unspit, Duration::from_millis(100)),
+            frame_at(CrocAct::Unspit, Duration::from_millis(150)),
             WIDE_STAR
         );
         assert_eq!(
-            frame_at(CrocAct::Unspit, Duration::from_millis(200)),
+            frame_at(CrocAct::Unspit, Duration::from_millis(300)),
             OPEN_STAR
         );
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(300)), SLEEP);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(400)), IDLE);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(450)), SLEEP);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(600)), IDLE);
     }
 
     #[test]
