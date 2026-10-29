@@ -283,14 +283,14 @@ fn frame_steps_move_one_frame_and_clamp() {
     let mut p = project();
     p.fps = Some(Seconds::new(30, 1));
     let mut app = App::new(p, PathBuf::from("t.json"));
-    app.step_playhead(1);
+    app.step_playhead_by(1, 1);
     assert_eq!(app.playhead, 1.0 / 30.0);
-    app.step_playhead(-1);
+    app.step_playhead_by(-1, 1);
     assert_eq!(app.playhead, 0.0);
-    app.step_playhead(-1);
+    app.step_playhead_by(-1, 1);
     assert_eq!(app.playhead, 0.0, "clamped at the start");
     app.playhead = 1000.0;
-    app.step_playhead(1);
+    app.step_playhead_by(1, 1);
     assert_eq!(app.playhead, 209.0 / 30.0, "clamped at the last frame");
 }
 

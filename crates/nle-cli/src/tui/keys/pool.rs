@@ -13,6 +13,7 @@ use crate::mpv::Mpv;
 use super::super::actions::run_action;
 use super::super::jobs::start_preview;
 use super::super::keys::completes_gg;
+use super::super::keys::count_digit;
 use super::super::keys::do_redo;
 use super::super::keys::do_undo;
 use super::super::keys::select_active_track;
@@ -30,7 +31,7 @@ pub(crate) fn pool_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             return;
         }
         let d = c.to_digit(10).unwrap_or(0);
-        app.count = Some(app.count.unwrap_or(0) * 10 + d);
+        count_digit(app, d);
         return;
     }
     let had_count = app.count.is_some();

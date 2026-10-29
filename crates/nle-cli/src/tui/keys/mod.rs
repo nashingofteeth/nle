@@ -69,6 +69,13 @@ pub(crate) fn do_redo(app: &mut App, player: &dyn Mpv) {
     run_action(app, player, &Action::Redo);
 }
 
+/// Add a digit to the pending vim count. Saturating is deliberate: an
+/// overflow panicked in debug and wrapped to a different count in release
+/// (`999999999999f` used to crash the TUI).
+pub(crate) fn count_digit(app: &mut App, d: u32) {
+    app.count = Some(app.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
+}
+
 pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     let code = key.code;
 
@@ -79,7 +86,7 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             return;
         }
         let d = c.to_digit(10).unwrap_or(0);
-        app.count = Some(app.count.unwrap_or(0) * 10 + d);
+        count_digit(app, d);
         return;
     }
     let had_count = app.count.is_some();
@@ -124,9 +131,7 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         KeyCode::Char('L') => app.seek_rel(player, 5.0 * mult as f64),
         KeyCode::Char('f') => {
             if app.guard_loaded() {
-                for _ in 0..mult {
-                    app.step_playhead(1);
-                }
+                app.step_playhead_by(1, mult);
                 // Model-authoritative: move the monitor to the frame we
                 // display, on the PROJECT grid. mpv's own `frame_step` walks
                 // the source's grid instead, so a 24/59.94 clip would drift
@@ -137,9 +142,7 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
         }
         KeyCode::Char('F') => {
             if app.guard_loaded() {
-                for _ in 0..mult {
-                    app.step_playhead(-1);
-                }
+                app.step_playhead_by(-1, mult);
                 app.seek_to(player, app.playhead);
             }
         }

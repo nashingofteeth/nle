@@ -22,6 +22,7 @@ use super::super::motion::{
     prev_gap_start,
 };
 use super::super::{App, ExtendState, Mode, Pending, secs};
+use super::count_digit;
 /// Plan an extend-mode session: armed boundary, committable range,
 /// material span for display, and preview parameters. Pure — the caller
 /// realizes it with mpv IPC. Positions below are timeline seconds;
@@ -802,7 +803,7 @@ pub(crate) fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             return;
         }
         let d = c.to_digit(10).unwrap_or(0);
-        app.count = Some(app.count.unwrap_or(0) * 10 + d);
+        count_digit(app, d);
         return;
     }
     let mult = app.count.take().unwrap_or(1);

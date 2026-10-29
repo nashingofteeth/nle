@@ -500,16 +500,18 @@ impl App {
         }
     }
 
-    /// Move the playhead by one frame (f/F): model-authoritative, clamped
-    /// to the sequence. mpv steps its own (drifted) neighbor — close
-    /// enough that the next step lands on the frame we display.
-    fn step_playhead(&mut self, dir: i64) {
+    /// Move the playhead by `n` frames, model-authoritative and clamped to
+    /// the sequence. A vim count can be huge (saturated u32); one arithmetic
+    /// move avoids a per-frame loop. f/F seek the monitor here afterward.
+    fn step_playhead_by(&mut self, dir: i64, n: u32) {
         let Some(fps) = self.project.fps.as_ref() else {
             return;
         };
         let f = secs(fps);
         let last = ((self.total() * f).ceil() as i64 - 1).max(0);
-        let idx = ((self.playhead * f).round() as i64 + dir).clamp(0, last);
+        let idx = ((self.playhead * f).round() as i64)
+            .saturating_add(dir.saturating_mul(n as i64))
+            .clamp(0, last);
         self.playhead = idx as f64 / f;
     }
 }

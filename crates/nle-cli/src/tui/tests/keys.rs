@@ -80,6 +80,40 @@ fn ctrl_c_quits_from_every_panel() {
     }
 }
 
+// A pasted count must not overflow the multiplier (debug panic) or step the
+// playhead once per frame (a hang). It saturates and the move is one clamp.
+#[test]
+fn a_huge_count_saturates_and_lands_on_the_last_frame() {
+    let mut app = App::new(asset_project(), temp_project_path("huge-count"));
+    app.loaded = true;
+    let fake = FakeMpv::new();
+    for c in "999999999999999999999999".chars() {
+        handle_key(&mut app, &fake, key(c));
+    }
+    assert_eq!(app.count, Some(u32::MAX));
+    handle_key(&mut app, &fake, key('f'));
+    assert_eq!(app.count, None);
+    assert_eq!(
+        app.playhead,
+        app.last_frame(),
+        "huge count seeks to the end"
+    );
+}
+
+// The same digit rule is shared by the pool and extend modes.
+#[test]
+fn a_huge_count_in_the_pool_does_not_panic() {
+    let mut app = App::new(asset_project(), temp_project_path("huge-count-pool"));
+    app.loaded = true;
+    open_pool_mode(&mut app, 0);
+    let fake = FakeMpv::new();
+    for c in "999999999999999999999999".chars() {
+        handle_key(&mut app, &fake, key(c));
+    }
+    handle_key(&mut app, &fake, key('l'));
+    assert_eq!(app.count, None);
+}
+
 // The pool's `gg` needs both keys: a lone `g` only arms the sequence.
 #[test]
 fn completes_gg_needs_both_keys() {
