@@ -21,18 +21,20 @@ const DASH2: &str = r#"=";::;>>>"#;
 const TAIL_UP: &str = r#"=";::;>!-"#;
 const HAPPY_TAIL: &str = r#"=^;::;>-~"#;
 const WIDE_ALERT: &str = r#")O;::;>!-"#;
-// Spit: the body `;::;` turns into a dot leading a comma wave from the tail
-// (back) toward the head (front).
+// Spit: a dot travels from the tail (back) toward the head (front); the
+// middle `:` cells become dots, and a comma trails at the back.
 const SPIT1: &str = r#")";::,>--"#;
 const SPIT2: &str = r#")";:.,>--"#;
-const SPIT3: &str = r#")";.,,>--"#;
-const SPIT4: &str = r#")".,,,>--"#;
+const SPIT3: &str = r#")";..,>--"#;
+const SPIT4: &str = r#")"...,>--"#;
 
 /// A frame strip: (art, milliseconds). `None` is the idle state.
 type Strip = &'static [(&'static str, u64)];
 
 const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
-const GULP: Strip = &[(OPEN, 100), (WIDE, 100), (HAPPY_TAIL, 200)];
+/// Adds (paste/insert/track add/extend) swallow with the mouth closed:
+/// a happy eye and a tail flick, never an open jaw.
+const GULP: Strip = &[(HAPPY_TAIL, 200), (SWIM2, 200)];
 const SPIT: Strip = &[
     (WIDE, 100),
     (SPIT1, 100),
@@ -252,12 +254,28 @@ mod tests {
     }
 
     #[test]
+    fn the_gulp_never_opens_the_mouth() {
+        for (art, _) in GULP {
+            assert!(art.starts_with('='), "adds must keep the mouth shut: {art}");
+        }
+    }
+
+    #[test]
     fn the_spit_wave_moves_from_back_to_front() {
         assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), WIDE);
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(100)), SPIT1);
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), SPIT2);
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), SPIT3);
         assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(400)), SPIT4);
+        // Body cells 2..6: the middle colons turn into dots, not commas.
+        for (frame, body) in [
+            (SPIT1, ";::,"),
+            (SPIT2, ";:.,"),
+            (SPIT3, ";..,"),
+            (SPIT4, "...,"),
+        ] {
+            assert_eq!(&frame[2..6], body, "{frame}");
+        }
     }
 
     #[test]
