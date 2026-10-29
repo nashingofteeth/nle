@@ -1,5 +1,4 @@
 use super::super::keys::handle_key;
-use super::super::*;
 use super::*;
 use nle_core::time::Seconds;
 
