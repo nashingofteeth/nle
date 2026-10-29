@@ -3,7 +3,6 @@ use super::super::actions::{
     trim_key,
 };
 use super::super::keys::handle_key;
-use super::super::*;
 use super::*;
 use nle_core::edit;
 use nle_core::frame_of;
@@ -188,7 +187,7 @@ fn trim_key_ripples_on_gaps() {
 // yy grabs whichever segment is under the playhead — gap included.
 #[test]
 fn yank_grabs_gaps_too() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 4.0; // inside the [3..5) gap
     edit_yank(&mut app, &FakeMpv::new());
     assert!(
@@ -215,7 +214,7 @@ fn yank_follows_the_active_track() {
         speed: Seconds::from_integer(1),
         effects: Vec::new(),
     })];
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.active_track = ti;
     app.playhead = 1.0; // over clip #42 on track 1 and clip #1 on track 0
     edit_yank(&mut app, &FakeMpv::new());
@@ -249,7 +248,7 @@ fn trim_key_deletes_at_segment_edges() {
 fn playhead_reanchors_to_the_media_frame() {
     // Ripple head trim: the frame under the playhead moves back, so
     // the playhead follows it.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 1.0; // C1 [0..3) src 1..4 → source 2
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     assert_eq!(
@@ -268,7 +267,7 @@ fn playhead_reanchors_to_the_media_frame() {
 
     // Gap-left head trim: the clip's head moves to the playhead and a
     // gap takes the trimmed material — the frame is unchanged.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 1.0;
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     let batch = edit::trim_in(&app.project, app.playhead).unwrap();
@@ -277,7 +276,7 @@ fn playhead_reanchors_to_the_media_frame() {
     assert_eq!(app.playhead, 1.0, "frame unchanged");
 
     // Tail trim: material after the playhead is removed — unchanged.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 1.0;
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     let batch = edit::trim_out(&app.project, app.playhead).unwrap();
@@ -287,7 +286,7 @@ fn playhead_reanchors_to_the_media_frame() {
 
     // Delete of the clip under the playhead: a plain delete leaves a
     // gap of the same length, so the playhead keeps its offset in it.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 1.0;
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     let batch = edit::delete_under(&app.project, app.playhead).unwrap();
@@ -324,7 +323,7 @@ fn playhead_reanchors_to_the_media_frame() {
             effects: Vec::new(),
         }),
     ];
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 3.0; // inside clip #2 [2..4)
     let anchor = clip_anchor(&app.project, app.playhead).unwrap();
     assert_eq!(anchor.start, 2.0);
@@ -335,7 +334,7 @@ fn playhead_reanchors_to_the_media_frame() {
 
     // Deleting a gap always ripples, so the playhead lands on the cut
     // its neighbours now share (its start).
-    let mut app = App::new(asset_project(), PathBuf::from("t.json")); // [C1][gap 3..5][C2]
+    let mut app = App::new(asset_project(), temp_project_path("t")); // [C1][gap 3..5][C2]
     app.playhead = 4.0; // inside the gap
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     assert_eq!(
@@ -351,7 +350,7 @@ fn playhead_reanchors_to_the_media_frame() {
     assert_eq!(app.playhead, 3.0, "cut between the clips");
 
     // Over a gap clip_anchor is None, but edit_anchor is not.
-    let app = App::new(asset_project(), PathBuf::from("t.json"));
+    let app = App::new(asset_project(), temp_project_path("t"));
     assert_eq!(clip_anchor(&app.project, 4.0), None);
     assert!(matches!(
         edit_anchor(&app.project, 4.0, 0),
@@ -384,7 +383,7 @@ fn playhead_lands_on_the_seam_a_deleted_transition_leaves() {
             effects: Vec::new(),
         }),
     ];
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     let batch = edit::add_transition(
         &app.project,
         0,
@@ -425,7 +424,7 @@ fn playhead_lands_on_the_seam_a_deleted_transition_leaves() {
 // the gap's start for every edit).
 #[test]
 fn an_edit_over_a_gap_keeps_the_playhead() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json")); // [C1][gap 3..5][C2]
+    let mut app = App::new(asset_project(), temp_project_path("t")); // [C1][gap 3..5][C2]
     app.playhead = 4.0; // inside the gap
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     // An insert over the gap grows it — a non-removing edit.
@@ -450,7 +449,7 @@ fn playhead_reanchors_on_speed_clips() {
         speed: Seconds::from_integer(2),
         effects: Vec::new(),
     })];
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 1.0;
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     assert_eq!(
@@ -493,7 +492,7 @@ fn playhead_reanchors_on_speed_clips() {
             effects: Vec::new(),
         }),
     ];
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 3.0; // inside clip #2 [1..5): source 0 + (3-1)×0.5 = 1
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     assert_eq!(
@@ -514,7 +513,7 @@ fn playhead_reanchors_on_speed_clips() {
 // Undo restores the playhead to the frame the edit was made from.
 #[test]
 fn undo_restores_the_playhead() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     let fps = app.project.fps;
     app.playhead = 1.0;
     let at_frame = frame_of(fps.as_ref(), app.playhead);
@@ -533,7 +532,7 @@ fn undo_restores_the_playhead() {
 #[test]
 fn insert_gap_key_uses_the_count() {
     // Over the [3..5) gap: 5 frames grows it by 5/30 s.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 4.0;
     let batch = edit::insert_gap(&app.project, app.playhead, 5).unwrap();
     app.history.apply(&mut app.project, batch, 0).unwrap();

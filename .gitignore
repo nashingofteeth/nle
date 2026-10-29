@@ -1,6 +1,2 @@
 /target/
 /demo-sandbox/
-
-# Test artifacts: a bare "t.json" project writes its sidecars beside it.
-t.clipboard.json
-t.history.json

@@ -1,6 +1,5 @@
 use super::super::keys::fx::form_for_effect;
 use super::super::keys::{completes_gg, handle_key};
-use super::super::*;
 use super::*;
 use nle_core::Armed;
 use nle_core::timeline::Effect;
@@ -12,14 +11,14 @@ fn ctrl_c_quits_from_every_panel() {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     let modes: Vec<(&str, App)> = vec![
-        ("normal", App::new(asset_project(), PathBuf::from("t.json"))),
+        ("normal", App::new(asset_project(), temp_project_path("t"))),
         ("command", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Command("import ".into());
             a
         }),
         ("extend", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Extend(ExtendState {
                 track: 0,
                 armed: Armed::Clip { id: 1, head: false },
@@ -33,12 +32,12 @@ fn ctrl_c_quits_from_every_panel() {
             a
         }),
         ("pool", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             open_pool_mode(&mut a, 0);
             a
         }),
         ("transition", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Transition(TransitionForm {
                 id: 1,
                 start: 2.0,
@@ -49,7 +48,7 @@ fn ctrl_c_quits_from_every_panel() {
             a
         }),
         ("fx list", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Fx(FxState {
                 clip: 1,
                 sel: 0,
@@ -58,7 +57,7 @@ fn ctrl_c_quits_from_every_panel() {
             a
         }),
         ("fx form", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             let effect = Effect::Crop {
                 left: 0.0,
                 right: 0.0,

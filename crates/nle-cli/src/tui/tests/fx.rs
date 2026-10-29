@@ -1,7 +1,6 @@
 use super::super::keys::fx::{form_for, form_for_effect};
 use super::super::keys::handle_key;
 use super::super::panels::fx::render_fx;
-use super::super::*;
 use super::*;
 use nle_core::timeline::Effect;
 
@@ -530,7 +529,7 @@ fn lut_is_cli_only_in_the_panel_for_now() {
 fn the_edit_form_shows_the_old_value_beside_a_blank_input() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     let effect = Effect::Crop {
         left: 30.0,
         right: 0.0,
@@ -639,7 +638,7 @@ fn an_existing_duplicate_edits_the_selected_row() {
 fn the_effects_panel_shows_rows_or_an_empty_hint() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     set_effects(
         &mut app,
         1,
@@ -695,7 +694,7 @@ fn effect_forms_hint_their_expected_input() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     let render = |kind: &'static str| -> String {
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let mut app = App::new(asset_project(), temp_project_path("t"));
         app.mode = Mode::Fx(FxState {
             clip: 1,
             sel: 0,

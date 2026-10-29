@@ -186,9 +186,13 @@ fn key(c: char) -> KeyEvent {
 }
 
 /// A project path under the system temp dir, so undo/redo's save doesn't
-/// write into the repo.
+/// write into the repo. The counter keeps two calls with the same tag apart
+/// (tests run in parallel in one process).
 fn temp_project_path(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("nle-tui-test-{}-{tag}", std::process::id()));
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("nle-tui-test-{}-{tag}-{n}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("t.json")
 }

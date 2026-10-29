@@ -1,7 +1,6 @@
 use super::super::jobs::PreviewMsg;
 use super::super::keys::{handle_key, set_active_track};
 use super::super::motion::{fmt_timecode, secs};
-use super::super::*;
 use super::*;
 use nle_core::time::Seconds;
 use nle_core::{Armed, Project};
@@ -206,7 +205,7 @@ fn seek_moves_the_playhead_and_persists_it() {
 fn sync_applies_grid_and_cut_snapping_while_playing() {
     let mut p = project();
     p.fps = Some(Seconds::new(30, 1));
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.sync(&PlaybackState {
         time_pos: Some(5.0 + 1.0 / 30.0),
         paused: false,
@@ -227,7 +226,7 @@ fn sync_applies_grid_and_cut_snapping_while_playing() {
 fn sync_ignores_mpv_positions_while_paused() {
     let mut p = project();
     p.fps = Some(Seconds::new(30, 1));
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 2.0;
     app.sync(&PlaybackState {
         time_pos: Some(5.0 + 1.0 / 30.0),
@@ -251,7 +250,7 @@ fn sync_ignores_mpv_positions_while_paused() {
 fn sync_clamps_to_the_extend_range_while_playing() {
     let mut p = project();
     p.fps = Some(Seconds::new(30, 1));
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.mode = Mode::Extend(ExtendState {
         track: 0,
         armed: Armed::Clip { id: 1, head: true },
@@ -282,7 +281,7 @@ fn sync_clamps_to_the_extend_range_while_playing() {
 fn frame_steps_move_one_frame_and_clamp() {
     let mut p = project();
     p.fps = Some(Seconds::new(30, 1));
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.step_playhead_by(1, 1);
     assert_eq!(app.playhead, 1.0 / 30.0);
     app.step_playhead_by(-1, 1);
@@ -316,7 +315,7 @@ fn switching_track_keeps_the_composite_monitor() {
 // project cursor is restored when the pool closes.
 #[test]
 fn the_pool_status_shows_the_asset_clock() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 1.5;
     open_pool_mode(&mut app, 0);
     set_pool_pos(&mut app, 4.0);
@@ -332,7 +331,7 @@ fn the_pool_status_shows_the_asset_clock() {
 
 #[test]
 fn transport_records_monitor_calls() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true;
     let fake = FakeMpv::new();
 
@@ -362,7 +361,7 @@ fn transport_records_monitor_calls() {
 #[test]
 fn poll_preview_loads_the_built_edl() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     let (tx, rx) = std::sync::mpsc::channel();
     app.preview = Some(PreviewJob {
         rx,
@@ -424,7 +423,7 @@ fn an_obsolete_preview_is_not_loaded() {
 #[test]
 fn a_preview_failure_keeps_the_edit_notice() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.set_message("effect on clip #1");
     let (tx, rx) = std::sync::mpsc::channel();
     app.preview = Some(PreviewJob {
@@ -445,7 +444,7 @@ fn a_preview_failure_keeps_the_edit_notice() {
 #[test]
 fn a_preview_finishing_in_extend_mode_does_not_steal_the_monitor() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.mode = Mode::Extend(ExtendState {
         track: 0,
         armed: Armed::Clip { id: 1, head: false },
@@ -476,7 +475,7 @@ fn a_preview_finishing_in_extend_mode_does_not_steal_the_monitor() {
 #[test]
 fn a_seek_during_a_handoff_moves_the_landing() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true; // a file is on the monitor (the pooled one)
     app.pool_on_monitor = true;
     app.pool_handoff = Some(1.0);
@@ -502,7 +501,7 @@ fn a_seek_during_a_handoff_moves_the_landing() {
 #[test]
 fn a_failed_handoff_gives_the_hand_off_up() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.set_message("timeline");
     app.pool_on_monitor = true;
     app.pool_handoff = Some(2.0);

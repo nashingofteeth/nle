@@ -6,7 +6,6 @@ use super::super::panels::fx::render_transition_form;
 use super::super::panels::pool::{asset_metadata, render_pool};
 use super::super::panels::timeline::{render_timeline, track_parts, track_window};
 use super::super::panels::{hints_for, panel_heights, render};
-use super::super::*;
 use super::*;
 use nle_core::edit;
 use nle_core::time::Seconds;
@@ -22,7 +21,7 @@ use ratatui::style::Color;
 fn a_blend_boundary_has_no_bar() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     let batch = edit::add_transition(
         &app.project,
         0,
@@ -66,12 +65,12 @@ fn a_blend_boundary_has_no_bar() {
 // The dump prints the model state and the grid — the diagnostic path.
 #[test]
 fn the_dump_prints_state_and_grid() {
-    let out = dump(asset_project(), PathBuf::from("t.json"), (40, 8), "");
+    let out = dump(asset_project(), temp_project_path("t"), (40, 8), "");
     assert!(out.contains("mode: Normal"), "{out}");
     assert!(out.contains("=== grid 40x8 ==="), "{out}");
     assert!(out.contains("clip #1"), "the model summary:\n{out}");
     // Keys reach a state first.
-    let out = dump(asset_project(), PathBuf::from("t.json"), (40, 8), "ll");
+    let out = dump(asset_project(), temp_project_path("t"), (40, 8), "ll");
     assert!(out.contains("playhead: 2 s"), "{out}");
 }
 
@@ -126,7 +125,7 @@ fn multi_track_timeline_draws_a_row_per_track() {
     use ratatui::backend::TestBackend;
     let mut p = asset_project();
     p.timeline.add_track(TrackKind::Audio); // index 1, empty
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.active_track = 1;
     let mut term = Terminal::new(TestBackend::new(60, 6)).unwrap();
     term.draw(|f| {
@@ -240,7 +239,7 @@ fn all_tracks_are_visible_in_the_timeline_panel() {
     let mut p = asset_project();
     p.timeline.add_track(TrackKind::Video); // v2
     p.timeline.add_track(TrackKind::Audio); // a1
-    let app = App::new(p, PathBuf::from("t.json"));
+    let app = App::new(p, temp_project_path("t"));
     let mut term = Terminal::new(TestBackend::new(60, 24)).unwrap();
     term.draw(|f| render(f, &app)).unwrap();
     let buf = term.backend().buffer().clone();
@@ -267,7 +266,7 @@ fn pool_list_scrolls_to_keep_the_selection_visible() {
     for i in 2..=20 {
         p.add_asset(format!("/media/a{i}.mp4").into(), probe.clone());
     }
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     open_pool_mode(&mut app, 19); // the last asset, far past a short pane
     let mut term = Terminal::new(TestBackend::new(60, 8)).unwrap();
     term.draw(|f| render_pool(f, f.area(), &app)).unwrap();
@@ -295,14 +294,14 @@ fn pool_list_scrolls_to_keep_the_selection_visible() {
 #[test]
 fn every_mode_hints_fit_the_keys_panel() {
     let cases: Vec<(&str, App)> = vec![
-        ("normal", App::new(asset_project(), PathBuf::from("t.json"))),
+        ("normal", App::new(asset_project(), temp_project_path("t"))),
         ("command", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Command("x".into());
             a
         }),
         ("extend", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Extend(ExtendState {
                 track: 0,
                 armed: Armed::Clip { id: 1, head: false },
@@ -316,12 +315,12 @@ fn every_mode_hints_fit_the_keys_panel() {
             a
         }),
         ("pool", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             open_pool_mode(&mut a, 0);
             a
         }),
         ("transition", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Transition(TransitionForm {
                 id: 1,
                 start: 2.0,
@@ -332,7 +331,7 @@ fn every_mode_hints_fit_the_keys_panel() {
             a
         }),
         ("fx list", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             a.mode = Mode::Fx(FxState {
                 clip: 1,
                 sel: 0,
@@ -341,7 +340,7 @@ fn every_mode_hints_fit_the_keys_panel() {
             a
         }),
         ("fx form", {
-            let mut a = App::new(asset_project(), PathBuf::from("t.json"));
+            let mut a = App::new(asset_project(), temp_project_path("t"));
             let effect = Effect::Crop {
                 left: 0.0,
                 right: 0.0,
@@ -379,7 +378,7 @@ fn pool_strip_replaces_the_timeline_while_the_pool_is_open() {
     let mut p = asset_project();
     let probe = p.asset(1).unwrap().probe.clone(); // 10 s, 30 fps
     p.add_asset("/media/pooled.mp4".into(), probe);
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     open_pool_mode(&mut app, 1); // index 1, id 2 (not the first asset)
     set_pool_pos(&mut app, 5.0); // halfway through the 10 s asset
     app.paused = true;
@@ -453,7 +452,7 @@ fn media_pool_renders() {
     let mut p = asset_project();
     // A second asset so list index (1) differs from asset id (2).
     p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     open_pool_mode(&mut app, 1); // second row
 
     let mut term = Terminal::new(TestBackend::new(60, 20)).unwrap();
@@ -510,7 +509,7 @@ fn hints_and_notice_panels_render() {
     };
 
     // Normal mode: the cheat-sheet and a separate notice panel.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.set_message("extend tail of clip #1 (absorbed gap)");
     let text = render_text(&app);
     assert!(text.contains("keys"), "keys panel title: {text}");
@@ -539,7 +538,7 @@ fn extend_overlays_the_timeline() {
     assert_eq!((plan.lo, plan.hi), (0.0, Some(9.0)));
     assert_eq!(plan.mat, Some((-1.0, 9.0)));
 
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 1.0; // roamed off the armed edge (3.0)
     app.mode = Mode::Extend(ExtendState {
         track: 0,
@@ -640,7 +639,7 @@ fn x_opens_the_effects_panel_on_the_clip_under_the_playhead() {
 fn the_transition_form_renders_current_frames() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.mode = Mode::Transition(TransitionForm {
         id: 4,
         start: 2.0,

@@ -5,7 +5,6 @@ use super::super::keys::pool::{
     pool_strip_active,
 };
 use super::super::motion::secs;
-use super::super::*;
 use super::*;
 use nle_core::edit;
 use nle_core::time::Seconds;
@@ -66,7 +65,7 @@ fn media_pool_guarded_removal() {
 // Inserting an asset from the pool is recorded in history and undoes.
 #[test]
 fn media_pool_insert_is_undoable() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 0.0;
     open_pool_mode(&mut app, 0); // first asset
     let end_before = app.project.timeline.end();
@@ -120,7 +119,7 @@ fn pool_insert_exits_pool_mode() {
 // An explicit landing position wins over the pool's remembered resume.
 #[test]
 fn close_pool_at_keeps_the_landing_position() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 5.0;
     open_pool_mode(&mut app, 0);
     close_pool_at(&mut app, &FakeMpv::new(), 5.0);
@@ -133,7 +132,7 @@ fn close_pool_at_keeps_the_landing_position() {
 // That clock must not move the timeline playhead.
 #[test]
 fn sync_ignores_the_pooled_clock_after_leaving_the_pool() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     open_pool_mode(&mut app, 0);
     load_pool_preview(&mut app, &FakeMpv::new());
     assert!(app.pool_on_monitor);
@@ -192,7 +191,7 @@ fn sync_ignores_the_pooled_clock_after_leaving_the_pool() {
 // pool's remembered resume) stay put.
 #[test]
 fn pool_eof_keeps_the_timeline_playhead() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json")); // 30 fps
+    let mut app = App::new(asset_project(), temp_project_path("t")); // 30 fps
     app.playhead = 1.5;
     open_pool_mode(&mut app, 0); // resume = the pre-pool position
     let before = app.playhead;
@@ -242,7 +241,7 @@ fn pool_insert_uses_whole_frames() {
             },
         },
     );
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     // Mirror insert_from_pool's whole-frame math.
     let d = app.project.media[0].duration().unwrap();
     let fps = app.project.fps.unwrap();
@@ -272,7 +271,7 @@ fn pool_insert_uses_whole_frames() {
 // Frame steps advance on the asset's grid and clamp to its last frame.
 #[test]
 fn pool_step_moves_one_frame_and_clamps() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     open_pool_mode(&mut app, 0);
     let fps = app.project.media[0].fps().unwrap();
     let f = secs(&fps);
@@ -300,7 +299,7 @@ fn pool_step_moves_one_frame_and_clamps() {
 // The pool clock's last frame is one frame before the asset duration.
 #[test]
 fn pool_last_frame_is_one_before_duration() {
-    let app = App::new(asset_project(), PathBuf::from("t.json"));
+    let app = App::new(asset_project(), temp_project_path("t"));
     // 30 fps, 10 s asset → last frame at 10 - 1/30.
     assert!((pool_last_frame(&app, 10.0) - (10.0 - 1.0 / 30.0)).abs() < 1e-9);
 }
@@ -308,7 +307,7 @@ fn pool_last_frame_is_one_before_duration() {
 // The pool's `gg`: a lone `g` only arms the sequence; the second seeks.
 #[test]
 fn pool_gg_waits_for_the_second_key() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true;
     open_pool_mode(&mut app, 0);
     let fake = FakeMpv::new();
@@ -322,7 +321,7 @@ fn pool_gg_waits_for_the_second_key() {
 // Pool space: restart at EOF, otherwise toggle.
 #[test]
 fn pool_space_restarts_at_eof_else_toggles() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true;
     open_pool_mode(&mut app, 0);
 
@@ -394,7 +393,7 @@ fn pool_remove_is_undoable() {
 #[test]
 fn a_pool_close_pauses_at_the_landing() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.paused = false; // even a playing timeline is paused on hand-back
     open_pool_mode(&mut app, 0);
     close_pool_at(&mut app, &fake, 1.0);
@@ -432,7 +431,7 @@ fn a_pool_close_pauses_at_the_landing() {
 #[test]
 fn poll_preview_records_the_pool_landing() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 2.0;
     app.pool_on_monitor = true;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -456,7 +455,7 @@ fn poll_preview_records_the_pool_landing() {
 #[test]
 fn a_preview_finishing_in_the_pool_does_not_steal_the_monitor() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     open_pool_mode(&mut app, 0);
     let (tx, rx) = std::sync::mpsc::channel();
     app.preview = Some(PreviewJob {
@@ -476,7 +475,7 @@ fn a_preview_finishing_in_the_pool_does_not_steal_the_monitor() {
 #[test]
 fn a_failed_handoff_in_the_pool_keeps_the_flags() {
     let fake = FakeMpv::new();
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     open_pool_mode(&mut app, 0);
     app.set_message("media");
     let (tx, rx) = std::sync::mpsc::channel();
@@ -497,7 +496,7 @@ fn a_failed_handoff_in_the_pool_keeps_the_flags() {
 fn pool_t_switches_the_insert_track() {
     let mut p = asset_project();
     p.timeline.add_track(TrackKind::Audio); // track 1
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.loaded = true;
     open_pool_mode(&mut app, 0);
     let fake = FakeMpv::new();
@@ -528,7 +527,7 @@ fn pool_reopen_returns_to_the_last_row() {
     p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
     // Drop the gap so close_pool's composite EDL needs no black file (ffmpeg).
     p.timeline.video_track_mut().unwrap().segments.remove(1);
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.loaded = true;
     let fake = FakeMpv::new();
 
@@ -551,7 +550,7 @@ fn pool_command_preserves_the_pool_state() {
     let mut p = asset_project();
     p.add_asset("/media/blue.mp4".into(), p.asset(1).unwrap().probe.clone());
     p.timeline.video_track_mut().unwrap().segments.remove(1); // no black file
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.loaded = true;
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('m'));
@@ -574,7 +573,7 @@ fn pool_command_preserves_the_pool_state() {
 // `i` in the pool opens the import path prompt (command line pre-filled).
 #[test]
 fn pool_i_opens_the_import_prompt() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true;
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('m')); // open the pool

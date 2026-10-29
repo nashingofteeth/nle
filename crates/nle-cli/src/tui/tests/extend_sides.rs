@@ -3,7 +3,6 @@ use super::super::keys::extend::{
     ExtendPreviewSpec, Side, armed_on_side, flip_target, plan_for_armed, run_commit_action,
 };
 use super::super::keys::handle_key;
-use super::super::*;
 use super::*;
 use nle_core::time::Seconds;
 use nle_core::{Armed, CommitKind, clip_span, plan_commit, resolve_armed};
@@ -67,7 +66,7 @@ fn arm_and_extend_middle_gap() {
         "gap head walked to its end"
     );
     // Committing that delete ripples the gap shut.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 3.0;
     let batch = run_commit_action(
         &app,
@@ -89,7 +88,7 @@ fn arm_and_extend_middle_gap() {
     );
 
     // Head grow to 1.0: clip #1's tail is trimmed, the gap grows left.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 1.0;
     let batch = run_commit_action(
         &app,
@@ -115,7 +114,7 @@ fn arm_and_extend_middle_gap() {
     );
 
     // Head grow to 0.0 consumes clip #1 entirely.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 0.0;
     let batch = run_commit_action(
         &app,
@@ -132,7 +131,7 @@ fn arm_and_extend_middle_gap() {
 
     // E (ripple): grow the gap tail to 7 — clip #2 slides right.
     let armed = Armed::GapTail { index: 1 };
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 7.0;
     let batch = run_commit_action(&app, &armed, CommitKind::GapTail, true).unwrap();
     let mut h = History::default();
@@ -146,7 +145,7 @@ fn arm_and_extend_middle_gap() {
     );
 
     // e (replace): grow to 7 overwrites clip #2 entirely; length held.
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 7.0;
     let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
     assert!(batch.desc.contains("absorbed"), "{}", batch.desc);
@@ -162,7 +161,7 @@ fn arm_and_extend_middle_gap() {
     assert_eq!(segs.len(), 2, "clip #2 replaced by gap");
 
     // Shrink it to 4: clip #2 slides left (either flag).
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 4.0;
     let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
     let mut h = History::default();
@@ -192,7 +191,7 @@ fn commit_tail_to_gap_far_edge_absorbs() {
         Ok(CommitKind::AbsorbTail),
         "the gap's far edge is not 'inside' the gap"
     );
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 5.0;
     let batch = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, false).unwrap();
     let mut h = History::default();
@@ -232,7 +231,7 @@ fn commit_head_to_gap_near_edge_absorbs() {
         plan_commit(&p, &head2, edge, 3.0, 0),
         Ok(CommitKind::AbsorbHead)
     );
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 3.0;
     let batch = run_commit_action(&app, &head2, CommitKind::AbsorbHead, false).unwrap();
     let mut h = History::default();
@@ -446,7 +445,7 @@ fn commit_at_opposite_end_deletes_armed_clip() {
             speed: Seconds::from_integer(1),
             effects: Vec::new(),
         }));
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     let head2 = Armed::Clip { id: 2, head: true };
     assert_eq!(
         plan_commit(&app.project, &head2, 5.0, 7.0, 0),
@@ -472,7 +471,7 @@ fn commit_at_opposite_end_deletes_armed_clip() {
     assert_eq!(app.project.timeline.end(), Seconds::from_integer(9));
 
     // Ripple flag closes the removed clip instead of leaving a gap.
-    let mut app2 = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app2 = App::new(asset_project(), temp_project_path("t"));
     app2.playhead = 7.0;
     let batch = run_commit_action(&app2, &head2, CommitKind::Delete, true).unwrap();
     let mut h2 = History::default();

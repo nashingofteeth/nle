@@ -1,6 +1,5 @@
 use super::super::actions::{TimelineStamp, removed_material};
 use super::super::keys::handle_key;
-use super::super::*;
 use super::*;
 
 // The status row carries the preview job's progress: finished/total, the
@@ -8,7 +7,7 @@ use super::*;
 // edit is waiting.
 #[test]
 fn the_status_row_shows_preview_progress() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     let before = status_row(&app);
     assert!(!before.contains("proxies"), "{before}");
 
@@ -82,7 +81,7 @@ fn the_crocodile_chomps_when_material_is_removed() {
 // the transport toggles (the emoji ⏸ was wide, ▶ narrow).
 #[test]
 fn the_transport_icons_line_up() {
-    let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+    let mut app = App::new(asset_project(), temp_project_path("t"));
     app.loaded = true;
     app.paused = true;
     let paused = status_row(&app);

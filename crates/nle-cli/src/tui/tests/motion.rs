@@ -3,7 +3,6 @@ use super::super::motion::{
     prev_clip_start, prev_cut, prev_gap_start, snap_to_cut, truncate_label,
 };
 use super::super::panels::timeline::render_timeline;
-use super::super::*;
 use nle_core::time::Seconds;
 
 use super::super::keys::handle_key;
@@ -31,7 +30,7 @@ fn clip_edges_align_with_cut_positions() {
             })
         })
         .collect();
-    let app = App::new(p, PathBuf::from("t.json"));
+    let app = App::new(p, temp_project_path("t"));
     let width = 80u16;
     let mut term = Terminal::new(TestBackend::new(width, 4)).unwrap();
     term.draw(|f| {
@@ -126,7 +125,7 @@ fn gap_navigation_skips_clip_boundaries() {
 
 #[test]
 fn n_and_shift_n_jump_to_gaps() {
-    let mut app = App::new(project(), PathBuf::from("t.json"));
+    let mut app = App::new(project(), temp_project_path("t"));
     app.loaded = true;
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('n'));
@@ -154,7 +153,7 @@ fn on_boundary_detects_cuts_and_edges() {
 #[test]
 fn total_includes_the_sequence_tail() {
     // no tail concept in the segment model: total == sum of segments
-    let app = App::new(project(), PathBuf::from("t.json"));
+    let app = App::new(project(), temp_project_path("t"));
     assert_eq!(app.total(), 7.0);
 }
 

@@ -4,7 +4,6 @@ use super::super::keys::extend::{
 };
 use super::super::motion::{on_boundary, secs};
 use super::super::panels::timeline::render_timeline;
-use super::super::*;
 use super::*;
 use nle_core::time::Seconds;
 use nle_core::time::frame_to_secs;
@@ -152,7 +151,7 @@ fn first_clip_head_extends_past_timeline_start() {
     );
 
     for ripple in [false, true] {
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let mut app = App::new(asset_project(), temp_project_path("t"));
         app.playhead = -1.0;
         let batch = run_commit_action(&app, &head1, CommitKind::AbsorbHead, ripple).unwrap();
         let mut h = History::default();
@@ -175,7 +174,7 @@ fn extend_head_below_zero_renders() {
     use ratatui::backend::TestBackend;
     let p = asset_project();
     let plan = plan_for_armed(&p, Armed::Clip { id: 1, head: true }, 0.0, 0).unwrap();
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = -1.0;
     app.mode = Mode::Extend(ExtendState {
         track: 0,
@@ -225,7 +224,7 @@ fn gap_head_extends_past_zero() {
     );
 
     for ripple in [false, true] {
-        let mut app = App::new(p.clone(), PathBuf::from("t.json"));
+        let mut app = App::new(p.clone(), temp_project_path("t"));
         app.playhead = -1.0;
         let batch = run_commit_action(&app, &head0, CommitKind::GapHead, ripple).unwrap();
         let mut h = History::default();
@@ -255,7 +254,7 @@ fn gap_head_below_zero_renders() {
         }),
     );
     let plan = plan_for_armed(&p, Armed::GapHead { index: 0 }, 0.0, 0).unwrap();
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = -1.0;
     app.mode = Mode::Extend(ExtendState {
         track: 0,
@@ -454,7 +453,7 @@ fn extend_to_material_end_lands_on_grid() {
     assert!(target <= hi + 1e-9);
 
     // Commit there: the new cut is exactly at the snapped playhead.
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = target;
     let kind = plan_commit(&app.project, &armed, edge, target, 0).unwrap();
     let batch = run_commit_action(&app, &armed, kind, false).unwrap();
@@ -557,7 +556,7 @@ fn plan_commit_routing_table() {
 #[test]
 fn run_commit_maps_kinds_to_ops() {
     let p = asset_project();
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 4.0; // inside the [3..5) gap
     let tail1 = Armed::Clip { id: 1, head: false };
     let b = run_commit_action(&app, &tail1, CommitKind::GrowTailIntoGap, false).unwrap();
@@ -583,7 +582,7 @@ fn run_commit_maps_kinds_to_ops() {
 #[test]
 fn extend_commit_undo_returns_to_entry() {
     let p = asset_project(); // C1 tail armed at 3.0
-    let mut app = App::new(p, PathBuf::from("t.json"));
+    let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 3.0; // entered here
     app.mode = Mode::Extend(ExtendState {
         track: 0,
@@ -627,7 +626,7 @@ fn tail_extend_commit_lands_on_the_new_end() {
         (CommitKind::AbsorbTail, false),
         (CommitKind::AbsorbTail, true),
     ] {
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let mut app = App::new(asset_project(), temp_project_path("t"));
         app.playhead = 6.0; // extend C1's tail [0..3) out to 6.0
         app.mode = Mode::Extend(ExtendState {
             track: 0,
@@ -661,7 +660,7 @@ fn tail_extend_commit_lands_on_the_new_end() {
 #[test]
 fn projected_total_reflects_pending_commit() {
     let make = |ripple: bool, armed: Armed, edge: f64, ph: f64| {
-        let mut app = App::new(asset_project(), PathBuf::from("t.json"));
+        let mut app = App::new(asset_project(), temp_project_path("t"));
         app.playhead = ph;
         let st = ExtendState {
             track: 0,
