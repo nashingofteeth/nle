@@ -326,7 +326,7 @@ pub(crate) fn reaction_for(
         Action::AddEffect { .. } | Action::RemoveEffect { .. } | Action::ClearEffects { .. } => {
             Some(CrocAct::Wink)
         }
-        Action::TrackMute { .. } => Some(CrocAct::Yawn),
+        Action::TrackMute { .. } => Some(CrocAct::Sleep),
         Action::AssetRm { .. } => Some(CrocAct::Chomp),
         Action::PurgeStumps { .. } => Some(CrocAct::Nibble),
         Action::Delete { .. } | Action::TrackRm { .. } | Action::Yank { .. } => None,

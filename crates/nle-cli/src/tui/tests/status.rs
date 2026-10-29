@@ -89,11 +89,11 @@ fn the_crocodile_blinks_when_idle() {
     assert_eq!(app.croc.act(), CrocAct::Idle);
     app.croc.set_idle_elapsed(Duration::from_millis(6_850));
     let blinking = status_row(&app);
-    assert!(blinking.contains(r#"=';::;>--"#), "{blinking}");
+    assert!(blinking.contains(r#"=-;::;>--"#), "{blinking}");
     app.croc.set_idle_elapsed(Duration::ZERO);
     let resting = status_row(&app);
     assert!(resting.contains(r#"=";::;>--"#), "{resting}");
-    assert!(!resting.contains(r#"=';::;>--"#), "{resting}");
+    assert!(!resting.contains(r#"=-;::;>--"#), "{resting}");
 }
 
 // Pause/play use the same number of cells, so `· MODE` doesn't shift when
@@ -163,6 +163,21 @@ fn a_refused_edit_hisses() {
     );
     assert!(!ok);
     assert_eq!(app.croc.act(), CrocAct::Hiss);
+}
+
+#[test]
+fn playing_never_idles_in_the_status_row() {
+    use super::super::croc::{SWIM1, SWIM2};
+    let mut app = App::new(asset_project(), temp_project_path("swim"));
+    app.loaded = true;
+    app.paused = false;
+    for _ in 0..8 {
+        let row = status_row(&app);
+        assert!(
+            row.contains(SWIM1) || row.contains(SWIM2),
+            "playing must swim, not idle: {row}"
+        );
+    }
 }
 
 #[test]
@@ -284,7 +299,7 @@ fn the_action_vocabulary_maps_to_reactions() {
     );
     assert_eq!(
         reaction_for(&Action::TrackMute { track: 0 }, false, None),
-        Some(Yawn)
+        Some(Sleep)
     );
     assert_eq!(
         reaction_for(&Action::AssetRm { id: 1 }, false, None),

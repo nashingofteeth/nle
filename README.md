@@ -137,8 +137,9 @@ $N edit                       # TUI + mpv monitor; vim keys:
 # removals, gulps inserts, spits undo, snaps splits, nibbles trims, dashes
 # speed changes (tail arrows up / a slow wag back), winks at effects and
 # slithers at transitions. It hisses refused actions and hard failures (bad
-# form values and preview/reload/save failures too), blinks when idle, and
-# swims once when playback starts.
+# form values and preview/reload/save failures too), blinks with its eyes shut
+# when idle, and swims continuously while playing; pausing or muting only
+# closes its eyes. Spit runs a dot/comma wave along its back from back to front.
 
 # Project workflow
 $N init

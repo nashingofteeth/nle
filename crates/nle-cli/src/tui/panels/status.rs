@@ -14,7 +14,10 @@ use super::super::{
     secs,
 };
 pub(crate) fn logo(app: &App) -> &'static str {
-    app.croc.art(Instant::now())
+    // Continuous swim while the monitor is actually playing; never idle,
+    // blink, or sleep in that state.
+    let playing = app.loaded && !app.paused && !app.eof && !app.dead;
+    app.croc.art(Instant::now(), playing)
 }
 
 pub(crate) fn render_status(f: &mut Frame, area: Rect, app: &App) {

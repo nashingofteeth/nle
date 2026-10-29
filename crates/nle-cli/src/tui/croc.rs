@@ -3,51 +3,59 @@
 //!
 //! Every frame is exactly nine ASCII cells. The status row renders the art
 //! between two spaces, so a shorter/longer frame would shift the timecode
-//! and mode text. Durations are multiples of the 50 ms draw tick.
+//! and mode text. Action strips are deliberately slow (100–300 ms frames);
+//! the idle blink stays fast. Durations are multiples of the 50 ms draw tick.
 
 use std::time::{Duration, Instant};
 
 pub(crate) const IDLE: &str = r#"=";::;>--"#;
 const OPEN: &str = r#">";::;>--"#;
 const WIDE: &str = r#")";::;>--"#;
-const BLINK: &str = r#"=';::;>--"#;
+/// Eyes shut: used by the fast idle blink and the pause/mute reaction.
 const SLEEP: &str = r#"=-;::;>--"#;
 const HISS: &str = r#">O;::;>--"#;
-const SWIM1: &str = r#"=";::;>-~"#;
-const SWIM2: &str = r#"=";::;>~-"#;
+pub(crate) const SWIM1: &str = r#"=";::;>-~"#;
+pub(crate) const SWIM2: &str = r#"=";::;>~-"#;
 const DASH1: &str = r#"=";::;>>-"#;
 const DASH2: &str = r#"=";::;>>>"#;
 const TAIL_UP: &str = r#"=";::;>!-"#;
 const HAPPY_TAIL: &str = r#"=^;::;>-~"#;
 const WIDE_ALERT: &str = r#")O;::;>!-"#;
-const YAWN_OPEN: &str = r#")-;::;>--"#;
+// Spit: the body `;::;` turns into a dot leading a comma wave from the tail
+// (back) toward the head (front).
+const SPIT1: &str = r#")";::,>--"#;
+const SPIT2: &str = r#")";:.,>--"#;
+const SPIT3: &str = r#")";.,,>--"#;
+const SPIT4: &str = r#")".,,,>--"#;
 
 /// A frame strip: (art, milliseconds). `None` is the idle state.
 type Strip = &'static [(&'static str, u64)];
 
-const CHOMP: Strip = &[
-    (OPEN, 50),
-    (WIDE, 50),
-    (OPEN, 50),
-    (TAIL_UP, 50),
-    (IDLE, 50),
+const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
+const GULP: Strip = &[(OPEN, 100), (WIDE, 100), (HAPPY_TAIL, 200)];
+const SPIT: Strip = &[
+    (WIDE, 100),
+    (SPIT1, 100),
+    (SPIT2, 100),
+    (SPIT3, 100),
+    (SPIT4, 100),
 ];
-const GULP: Strip = &[(OPEN, 50), (WIDE, 50), (HAPPY_TAIL, 100), (IDLE, 50)];
-const SPIT: Strip = &[(WIDE, 100), (SWIM2, 100), (IDLE, 100)];
-const SNAP: Strip = &[(OPEN, 50), (BLINK, 50), (OPEN, 50), (TAIL_UP, 50)];
-const NIBBLE: Strip = &[(OPEN, 50), (BLINK, 50), (SWIM2, 50), (IDLE, 50)];
-const DASH_FAST: Strip = &[(SWIM1, 50), (DASH1, 50), (DASH2, 100), (IDLE, 50)];
-const DASH_SLOW: Strip = &[(SWIM2, 100), (SWIM1, 100), (IDLE, 150)];
-const SLITHER: Strip = &[(SWIM1, 100), (SWIM2, 100), (SWIM1, 100), (IDLE, 50)];
-const WINK: Strip = &[(BLINK, 100), (HAPPY_TAIL, 100), (IDLE, 50)];
-const YAWN: Strip = &[(YAWN_OPEN, 100), (SLEEP, 200), (IDLE, 100)];
-const HISSED: Strip = &[(HISS, 100), (WIDE_ALERT, 150), (HISS, 100), (IDLE, 100)];
-const SWIM: Strip = &[(SWIM1, 100), (SWIM2, 100), (SWIM1, 100), (IDLE, 100)];
+const SNAP: Strip = &[(OPEN, 100), (SLEEP, 100), (OPEN, 100), (TAIL_UP, 100)];
+const NIBBLE: Strip = &[(OPEN, 100), (SLEEP, 200), (SWIM2, 100)];
+const DASH_FAST: Strip = &[(SWIM1, 100), (DASH1, 100), (DASH2, 200)];
+const DASH_SLOW: Strip = &[(SWIM2, 300), (SWIM1, 300)];
+const SLITHER: Strip = &[(SWIM1, 200), (SWIM2, 200), (SWIM1, 200)];
+const WINK: Strip = &[(SLEEP, 200), (HAPPY_TAIL, 200)];
+/// Pause/mute: only the eyes close — no open mouth, no yawn.
+const SLEEPY: Strip = &[(SLEEP, 400)];
+const HISSED: Strip = &[(HISS, 200), (WIDE_ALERT, 300), (HISS, 200)];
 
 const BLINK_AT_MS: u128 = 6_800;
 const IDLE_PERIOD_MS: u128 = 7_000;
+const SWIM_FRAME_MS: u128 = 200;
 
-/// One reaction the status crocodile can play.
+/// One reaction the status crocodile can play. Playing is an ambient swim,
+/// not an entry here, so it can loop without a state transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CrocAct {
     Idle,
@@ -60,9 +68,8 @@ pub(crate) enum CrocAct {
     DashSlow,
     Slither,
     Wink,
-    Yawn,
+    Sleep,
     Hiss,
-    Swim,
 }
 
 impl CrocAct {
@@ -78,15 +85,15 @@ impl CrocAct {
             CrocAct::DashSlow => Some(DASH_SLOW),
             CrocAct::Slither => Some(SLITHER),
             CrocAct::Wink => Some(WINK),
-            CrocAct::Yawn => Some(YAWN),
+            CrocAct::Sleep => Some(SLEEPY),
             CrocAct::Hiss => Some(HISSED),
-            CrocAct::Swim => Some(SWIM),
         }
     }
 }
 
 /// What the crocodile is doing. `idle_since` is deliberately independent of
-/// `since`: action animations must not reset the slow idle-blink clock.
+/// `since`: action animations must not reset the slow idle-blink clock, and
+/// the continuous swim rides the same phase.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CrocState {
     act: CrocAct,
@@ -110,11 +117,25 @@ impl CrocState {
         self.since = Instant::now();
     }
 
-    pub(crate) fn art(&self, now: Instant) -> &'static str {
+    /// Drop any reaction now — the ambient state takes over (used when
+    /// playback starts, so the croc swims immediately).
+    pub(crate) fn clear(&mut self) {
+        self.act = CrocAct::Idle;
+        self.since = Instant::now();
+    }
+
+    /// `playing` is the transport state (loaded, playing, not at EOF). While
+    /// playing there is no idle or blink: the tail loops continuously.
+    pub(crate) fn art(&self, now: Instant, playing: bool) -> &'static str {
         if let Some(art) = frame_in(self.act, now.saturating_duration_since(self.since)) {
             return art;
         }
-        idle_frame(now.saturating_duration_since(self.idle_since))
+        let elapsed = now.saturating_duration_since(self.idle_since);
+        if playing {
+            swim_frame(elapsed)
+        } else {
+            idle_frame(elapsed)
+        }
     }
 
     #[cfg(test)]
@@ -135,7 +156,7 @@ impl CrocState {
         self.since = Instant::now() + Duration::from_secs(3_600);
     }
 
-    /// Test-only: move the idle blink clock.
+    /// Test-only: move the idle blink/swim clock.
     #[cfg(test)]
     pub(crate) fn set_idle_elapsed(&mut self, elapsed: Duration) {
         self.idle_since = Instant::now() - elapsed;
@@ -155,10 +176,20 @@ fn frame_in(act: CrocAct, elapsed: Duration) -> Option<&'static str> {
     None
 }
 
-/// Blink for the last 200 ms of every 7 s. A visible, low-key sign of life.
+/// Continuous tail motion while the monitor plays. Alternating frames, never
+/// an idle frame.
+fn swim_frame(elapsed: Duration) -> &'static str {
+    if (elapsed.as_millis() / SWIM_FRAME_MS).is_multiple_of(2) {
+        SWIM1
+    } else {
+        SWIM2
+    }
+}
+
+/// Blink for the last 200 ms of every 7 s — fast, and eyes shut to `-`.
 fn idle_frame(elapsed: Duration) -> &'static str {
     if elapsed.as_millis() % IDLE_PERIOD_MS >= BLINK_AT_MS {
-        BLINK
+        SLEEP
     } else {
         IDLE
     }
@@ -174,8 +205,8 @@ mod tests {
     use super::*;
 
     const ALL_ART: &[&str] = &[
-        IDLE, OPEN, WIDE, BLINK, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, TAIL_UP, HAPPY_TAIL,
-        WIDE_ALERT, YAWN_OPEN,
+        IDLE, OPEN, WIDE, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, TAIL_UP, HAPPY_TAIL, WIDE_ALERT,
+        SPIT1, SPIT2, SPIT3, SPIT4,
     ];
 
     #[test]
@@ -198,9 +229,8 @@ mod tests {
             CrocAct::DashSlow,
             CrocAct::Slither,
             CrocAct::Wink,
-            CrocAct::Yawn,
+            CrocAct::Sleep,
             CrocAct::Hiss,
-            CrocAct::Swim,
         ] {
             let strip = act.strip().expect("finite act");
             assert!(strip.iter().all(|(_, ms)| *ms % 50 == 0), "{act:?}");
@@ -210,23 +240,42 @@ mod tests {
     }
 
     #[test]
-    fn a_chomp_opens_then_closes() {
+    fn a_chomp_opens_then_closes_slowly() {
         assert_eq!(frame_at(CrocAct::Chomp, Duration::ZERO), OPEN);
-        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(60)), WIDE);
-        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(120)), OPEN);
+        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(100)), WIDE);
+        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(200)), OPEN);
         assert_eq!(
-            frame_at(CrocAct::Chomp, Duration::from_millis(180)),
+            frame_at(CrocAct::Chomp, Duration::from_millis(300)),
             TAIL_UP
         );
-        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(250)), IDLE);
+        assert_eq!(frame_at(CrocAct::Chomp, Duration::from_millis(400)), IDLE);
     }
 
     #[test]
-    fn idle_blinks_at_the_end_of_its_period() {
+    fn the_spit_wave_moves_from_back_to_front() {
+        assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), WIDE);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(100)), SPIT1);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), SPIT2);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), SPIT3);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(400)), SPIT4);
+    }
+
+    #[test]
+    fn idle_blinks_fast_with_eyes_shut() {
         assert_eq!(idle_frame(Duration::ZERO), IDLE);
         assert_eq!(idle_frame(Duration::from_millis(6_799)), IDLE);
-        assert_eq!(idle_frame(Duration::from_millis(6_800)), BLINK);
-        assert_eq!(idle_frame(Duration::from_millis(6_999)), BLINK);
+        assert_eq!(idle_frame(Duration::from_millis(6_800)), SLEEP);
+        assert_eq!(idle_frame(Duration::from_millis(6_999)), SLEEP);
         assert_eq!(idle_frame(Duration::from_millis(7_000)), IDLE);
+    }
+
+    #[test]
+    fn playing_never_idles() {
+        let croc = CrocState::new();
+        let now = Instant::now();
+        for ms in (0..1_000).step_by(100) {
+            let art = croc.art(now + Duration::from_millis(ms), true);
+            assert!(art == SWIM1 || art == SWIM2, "{ms} ms: {art}");
+        }
     }
 }

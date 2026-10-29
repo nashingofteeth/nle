@@ -825,11 +825,11 @@ pub(crate) fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
             if app.guard_loaded() {
                 let was_paused = app.paused;
                 player.toggle_pause();
-                app.croc.play(if was_paused {
-                    CrocAct::Swim
+                if was_paused {
+                    app.croc.clear();
                 } else {
-                    CrocAct::Yawn
-                });
+                    app.croc.play(CrocAct::Sleep);
+                }
             }
         }
         KeyCode::Char('h') => seek_rel_mode(app, player, &st, -(mult as f64)),

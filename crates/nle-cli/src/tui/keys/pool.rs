@@ -129,15 +129,15 @@ pub(crate) fn pool_toggle_play(app: &mut App, player: &dyn Mpv) {
         set_pool_pos(app, 0.0);
         player.seek_absolute(0.0);
         player.set_pause(false);
-        app.croc.play(CrocAct::Swim);
+        app.croc.clear();
     } else {
         let was_paused = app.paused;
         player.toggle_pause();
-        app.croc.play(if was_paused {
-            CrocAct::Swim
+        if was_paused {
+            app.croc.clear();
         } else {
-            CrocAct::Yawn
-        });
+            app.croc.play(CrocAct::Sleep);
+        }
     }
 }
 

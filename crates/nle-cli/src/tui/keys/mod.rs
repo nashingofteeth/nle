@@ -121,15 +121,15 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                     // At the end: play restarts from the beginning.
                     player.seek_absolute(0.0);
                     player.set_pause(false);
-                    app.croc.play(CrocAct::Swim);
+                    app.croc.clear();
                 } else {
                     let was_paused = app.paused;
                     player.toggle_pause();
-                    app.croc.play(if was_paused {
-                        CrocAct::Swim
+                    if was_paused {
+                        app.croc.clear();
                     } else {
-                        CrocAct::Yawn
-                    });
+                        app.croc.play(CrocAct::Sleep);
+                    }
                 }
             }
         }
