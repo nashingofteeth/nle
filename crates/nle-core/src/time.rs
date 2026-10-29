@@ -263,7 +263,7 @@ pub mod rational_ser {
         parse_rate(&s).ok_or_else(|| de::Error::custom(format!("invalid rational time {s:?}")))
     }
 
-    /// Option<Seconds> variant for fields that may be absent.
+    /// `Option<Seconds>` variant for fields that may be absent.
     pub mod opt {
         use serde::{Deserialize, Deserializer, Serializer, de};
 
