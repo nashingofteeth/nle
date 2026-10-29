@@ -24,7 +24,7 @@ const TAIL2: &str = r#"=";::;>~-"#;
 const DASH1: &str = r#"=";::;>>-"#;
 const DASH2: &str = r#"=";::;>>>"#;
 const HAPPY_TAIL: &str = r#"=^;::;>-~"#;
-const WIDE_ALERT: &str = r#")O;::;>!-"#;
+const WIDE_HISS: &str = r#")O;::;>--"#;
 // Spit/vomit: eyes shut, then the jaw opens in three stages with a star eye.
 const OPEN_STAR: &str = r#">*;::;>--"#;
 const WIDE_STAR: &str = r#")*;::;>--"#;
@@ -57,7 +57,7 @@ const SLITHER: Strip = &[(TAIL1, 200), (TAIL2, 200), (TAIL1, 200)];
 const WINK: Strip = &[(SLEEP, 200), (HAPPY_TAIL, 200)];
 /// Pause/mute: only the eyes close — no open mouth, no yawn.
 const SLEEPY: Strip = &[(SLEEP, 400)];
-const HISSED: Strip = &[(HISS, 200), (WIDE_ALERT, 300), (HISS, 200)];
+const HISSED: Strip = &[(HISS, 200), (WIDE_HISS, 300), (HISS, 200)];
 
 const BLINK_AT_MS: u128 = 6_800;
 const IDLE_PERIOD_MS: u128 = 7_000;
@@ -216,7 +216,7 @@ mod tests {
     use super::*;
 
     const ALL_ART: &[&str] = &[
-        IDLE, OPEN, WIDE, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, HAPPY_TAIL, WIDE_ALERT,
+        IDLE, OPEN, WIDE, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, HAPPY_TAIL, WIDE_HISS,
         OPEN_STAR, WIDE_STAR,
     ];
 
@@ -263,6 +263,13 @@ mod tests {
     fn the_gulp_never_opens_the_mouth() {
         for (art, _) in GULP {
             assert!(art.starts_with('='), "adds must keep the mouth shut: {art}");
+        }
+    }
+
+    #[test]
+    fn hiss_keeps_its_tail_still() {
+        for (art, _) in HISSED {
+            assert_eq!(&art[6..], ">--", "hiss must not move the tail: {art}");
         }
     }
 
