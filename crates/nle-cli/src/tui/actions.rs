@@ -300,11 +300,14 @@ pub(crate) fn reaction_for(
     if matches!(action, Action::Undo) {
         return Some(CrocAct::Spit);
     }
+    // Redo is the spit played backwards, regardless of what the change was.
+    if matches!(action, Action::Redo) {
+        return Some(CrocAct::Unspit);
+    }
     if removed {
         return Some(CrocAct::Chomp);
     }
     match action {
-        Action::Redo => Some(CrocAct::Gulp),
         Action::TrimIn { .. } | Action::TrimOut { .. } => Some(CrocAct::Nibble),
         Action::Split { .. } => Some(CrocAct::Snap),
         Action::InsertGap { .. }
@@ -330,7 +333,7 @@ pub(crate) fn reaction_for(
         Action::AssetRm { .. } => Some(CrocAct::Chomp),
         Action::PurgeStumps { .. } => Some(CrocAct::Nibble),
         Action::Delete { .. } | Action::TrackRm { .. } | Action::Yank { .. } => None,
-        Action::Undo => unreachable!("handled above"),
+        Action::Undo | Action::Redo => unreachable!("handled above"),
     }
 }
 

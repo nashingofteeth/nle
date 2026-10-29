@@ -145,6 +145,8 @@ fn undo_spits_the_material_back() {
     assert_eq!(app.croc.act(), CrocAct::Chomp);
     handle_key(&mut app, &fake, key('u'));
     assert_eq!(app.croc.act(), CrocAct::Spit, "{}", app.message);
+    run_action(&mut app, &fake, &Action::Redo);
+    assert_eq!(app.croc.act(), CrocAct::Unspit, "redo reverses the spit");
 }
 
 #[test]
@@ -305,8 +307,8 @@ fn the_action_vocabulary_maps_to_reactions() {
         reaction_for(&Action::AssetRm { id: 1 }, false, None),
         Some(Chomp)
     );
-    assert_eq!(reaction_for(&Action::Redo, false, None), Some(Gulp));
-    assert_eq!(reaction_for(&Action::Redo, true, None), Some(Chomp));
+    assert_eq!(reaction_for(&Action::Redo, false, None), Some(Unspit));
+    assert_eq!(reaction_for(&Action::Redo, true, None), Some(Unspit));
     assert_eq!(
         reaction_for(
             &Action::Yank {

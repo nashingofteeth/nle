@@ -47,7 +47,16 @@ const SPIT: Strip = &[
     (SPIT2, 100),
     (SPIT3, 100),
     (SPIT4, 100),
-    (SPIT_OPEN, 100),
+    (SPIT_OPEN, 300),
+];
+/// Redo is the spit run backwards: the jaw holds open, then the dot travels
+/// front-to-back while the mouth closes.
+const UNSPIT: Strip = &[
+    (SPIT_OPEN, 300),
+    (SPIT4, 100),
+    (SPIT3, 100),
+    (SPIT2, 100),
+    (SPIT1, 100),
 ];
 const SNAP: Strip = &[(OPEN, 100), (SLEEP, 100), (OPEN, 100), (TAIL_UP, 100)];
 const NIBBLE: Strip = &[(OPEN, 100), (SLEEP, 200), (TAIL2, 100)];
@@ -71,6 +80,7 @@ pub(crate) enum CrocAct {
     Chomp,
     Gulp,
     Spit,
+    Unspit,
     Snap,
     Nibble,
     DashFast,
@@ -88,6 +98,7 @@ impl CrocAct {
             CrocAct::Chomp => Some(CHOMP),
             CrocAct::Gulp => Some(GULP),
             CrocAct::Spit => Some(SPIT),
+            CrocAct::Unspit => Some(UNSPIT),
             CrocAct::Snap => Some(SNAP),
             CrocAct::Nibble => Some(NIBBLE),
             CrocAct::DashFast => Some(DASH_FAST),
@@ -215,7 +226,7 @@ mod tests {
 
     const ALL_ART: &[&str] = &[
         IDLE, OPEN, WIDE, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, TAIL_UP, HAPPY_TAIL, WIDE_ALERT,
-        SPIT1, SPIT2, SPIT3, SPIT4,
+        SPIT1, SPIT2, SPIT3, SPIT4, SPIT_OPEN,
     ];
 
     #[test]
@@ -232,6 +243,7 @@ mod tests {
             CrocAct::Chomp,
             CrocAct::Gulp,
             CrocAct::Spit,
+            CrocAct::Unspit,
             CrocAct::Snap,
             CrocAct::Nibble,
             CrocAct::DashFast,
@@ -277,9 +289,12 @@ mod tests {
             frame_at(CrocAct::Spit, Duration::from_millis(400)),
             SPIT_OPEN
         );
-        // The jaw is shut while the mark travels, opens after the wave, then
-        // the fallback is closed again.
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(500)), IDLE);
+        // The jaw holds open for 300 ms, then the fallback closes it.
+        assert_eq!(
+            frame_at(CrocAct::Spit, Duration::from_millis(699)),
+            SPIT_OPEN
+        );
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(700)), IDLE);
         // Only one body cell leaves the base at a time: the mark travels
         // back-to-front instead of painting the whole back.
         for (frame, body) in [
@@ -299,6 +314,20 @@ mod tests {
         }
         assert!(SPIT1.starts_with('='), "wave starts closed");
         assert!(SPIT_OPEN.starts_with(')'), "jaw opens after the wave");
+    }
+
+    #[test]
+    fn redo_reverses_the_spit_wave() {
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::ZERO), SPIT_OPEN);
+        assert_eq!(
+            frame_at(CrocAct::Unspit, Duration::from_millis(299)),
+            SPIT_OPEN
+        );
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(300)), SPIT4);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(400)), SPIT3);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(500)), SPIT2);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(600)), SPIT1);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(700)), IDLE);
     }
 
     #[test]

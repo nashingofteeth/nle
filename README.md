@@ -134,14 +134,15 @@ $N edit                       # TUI + mpv monitor; vim keys:
 # "proxies 2/5 · 43%" — proxy renders run in the background, so the TUI stays
 # responsive (the monitor keeps the previous frame until the new one is ready).
 # The crocodile at the left of the status row reacts to edits: it chomps
-# removals, gulps inserts with a closed mouth, spits undo, snaps splits, nibbles trims, dashes
+# removals, gulps inserts with a closed mouth, spits undo (redo reverses the
+# spit), snaps splits, nibbles trims, dashes
 # speed changes (tail arrows up / a slow wag back), winks at effects and
 # slithers at transitions. It hisses refused actions and hard failures (bad
 # form values and preview/reload/save failures too), blinks with its eyes shut
 # when idle, and swims continuously while playing. Pausing returns to idle;
 # muting only closes its eyes. Spit moves a single dot/comma mark along its back, one body
-# section at a time, from back to front; the jaw opens after the wave and shuts
-# shortly after. While playing it swims continuously, replacing the body's two
+# section at a time, from back to front; the jaw opens after the wave, holds,
+# then shuts. While playing it swims continuously, replacing the body's two
 # `;` with `:` so the body reads as `::::`.
 
 # Project workflow
