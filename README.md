@@ -138,10 +138,11 @@ $N edit                       # TUI + mpv monitor; vim keys:
 # speed changes (tail arrows up / a slow wag back), winks at effects and
 # slithers at transitions. It hisses refused actions and hard failures (bad
 # form values and preview/reload/save failures too), blinks with its eyes shut
-# when idle, and swims continuously while playing; pausing or muting only
-# closes its eyes. Spit moves a single dot/comma mark along its back, one body
+# when idle, and swims continuously while playing. Pausing returns to idle;
+# muting only closes its eyes. Spit moves a single dot/comma mark along its back, one body
 # section at a time, from back to front; the jaw opens after the wave and shuts
-# shortly after. While playing it swims continuously with its legs (`::::`).
+# shortly after. While playing it swims continuously, replacing the body's two
+# `;` with `:` so the body reads as `::::`.
 
 # Project workflow
 $N init

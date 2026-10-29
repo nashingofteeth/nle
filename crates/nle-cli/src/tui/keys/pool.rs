@@ -11,7 +11,6 @@ use nle_core::timeline::{Clip, Segment as TimelineSegment};
 use crate::mpv::Mpv;
 
 use super::super::actions::run_action;
-use super::super::croc::CrocAct;
 use super::super::jobs::start_preview;
 use super::super::keys::completes_gg;
 use super::super::keys::count_digit;
@@ -131,13 +130,8 @@ pub(crate) fn pool_toggle_play(app: &mut App, player: &dyn Mpv) {
         player.set_pause(false);
         app.croc.clear();
     } else {
-        let was_paused = app.paused;
         player.toggle_pause();
-        if was_paused {
-            app.croc.clear();
-        } else {
-            app.croc.play(CrocAct::Sleep);
-        }
+        app.croc.clear();
     }
 }
 

@@ -9,18 +9,18 @@
 use std::time::{Duration, Instant};
 
 pub(crate) const IDLE: &str = r#"=";::;>--"#;
-/// The status field is wide enough for the swimming legs; other frames are
-/// padded so the timecode never shifts when the legs appear/disappear.
-pub(crate) const CROC_WIDTH: usize = 13;
 const OPEN: &str = r#">";::;>--"#;
 const WIDE: &str = r#")";::;>--"#;
 /// Eyes shut: used by the fast idle blink and the pause/mute reaction.
 const SLEEP: &str = r#"=-;::;>--"#;
 const HISS: &str = r#">O;::;>--"#;
-pub(crate) const SWIM1: &str = r#"=";::;>-~"#;
-pub(crate) const SWIM2: &str = r#"=";::;>~-"#;
-pub(crate) const SWIM1_LEGS: &str = r#"=";::;::::>-~"#;
-pub(crate) const SWIM2_LEGS: &str = r#"=";::;::::>~-"#;
+// Ambient swim: the body's `;` become `:`, so the croc shows its legs
+// without making the sprite any wider.
+pub(crate) const SWIM1: &str = r#"="::::>-~"#;
+pub(crate) const SWIM2: &str = r#"="::::>~-"#;
+// Tail-only frames for actions (no legs: the croc is not ambient-swimming).
+const TAIL1: &str = r#"=";::;>-~"#;
+const TAIL2: &str = r#"=";::;>~-"#;
 const DASH1: &str = r#"=";::;>>-"#;
 const DASH2: &str = r#"=";::;>>>"#;
 const TAIL_UP: &str = r#"=";::;>!-"#;
@@ -41,7 +41,7 @@ type Strip = &'static [(&'static str, u64)];
 const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
 /// Adds (paste/insert/track add/extend) swallow with the mouth closed:
 /// a happy eye and a tail flick, never an open jaw.
-const GULP: Strip = &[(HAPPY_TAIL, 200), (SWIM2, 200)];
+const GULP: Strip = &[(HAPPY_TAIL, 200), (TAIL2, 200)];
 const SPIT: Strip = &[
     (SPIT1, 100),
     (SPIT2, 100),
@@ -50,10 +50,10 @@ const SPIT: Strip = &[
     (SPIT_OPEN, 100),
 ];
 const SNAP: Strip = &[(OPEN, 100), (SLEEP, 100), (OPEN, 100), (TAIL_UP, 100)];
-const NIBBLE: Strip = &[(OPEN, 100), (SLEEP, 200), (SWIM2, 100)];
-const DASH_FAST: Strip = &[(SWIM1, 100), (DASH1, 100), (DASH2, 200)];
-const DASH_SLOW: Strip = &[(SWIM2, 300), (SWIM1, 300)];
-const SLITHER: Strip = &[(SWIM1, 200), (SWIM2, 200), (SWIM1, 200)];
+const NIBBLE: Strip = &[(OPEN, 100), (SLEEP, 200), (TAIL2, 100)];
+const DASH_FAST: Strip = &[(TAIL1, 100), (DASH1, 100), (DASH2, 200)];
+const DASH_SLOW: Strip = &[(TAIL2, 300), (TAIL1, 300)];
+const SLITHER: Strip = &[(TAIL1, 200), (TAIL2, 200), (TAIL1, 200)];
 const WINK: Strip = &[(SLEEP, 200), (HAPPY_TAIL, 200)];
 /// Pause/mute: only the eyes close — no open mouth, no yawn.
 const SLEEPY: Strip = &[(SLEEP, 400)];
@@ -189,9 +189,9 @@ fn frame_in(act: CrocAct, elapsed: Duration) -> Option<&'static str> {
 /// an idle frame.
 fn swim_frame(elapsed: Duration) -> &'static str {
     if (elapsed.as_millis() / SWIM_FRAME_MS).is_multiple_of(2) {
-        SWIM1_LEGS
+        SWIM1
     } else {
-        SWIM2_LEGS
+        SWIM2
     }
 }
 
@@ -219,11 +219,10 @@ mod tests {
     ];
 
     #[test]
-    fn every_frame_fits_the_status_sprite() {
+    fn every_frame_is_nine_ascii_cells() {
         for art in ALL_ART {
-            assert!(matches!(art.chars().count(), 9 | CROC_WIDTH), "{art:?}");
+            assert_eq!(art.chars().count(), 9, "{art:?}");
             assert!(art.is_ascii(), "{art:?}");
-            assert_eq!(format!("{art:<CROC_WIDTH$}").chars().count(), CROC_WIDTH);
         }
     }
 
@@ -317,7 +316,7 @@ mod tests {
         let now = Instant::now();
         for ms in (0..1_000).step_by(100) {
             let art = croc.art(now + Duration::from_millis(ms), true);
-            assert!(art == SWIM1_LEGS || art == SWIM2_LEGS, "{ms} ms: {art}");
+            assert!(art == SWIM1 || art == SWIM2, "{ms} ms: {art}");
         }
     }
 }

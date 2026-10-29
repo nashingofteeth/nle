@@ -15,7 +15,6 @@ use self::fx::{
 };
 use self::pool::{open_pool, pool_key};
 use super::actions::{edit_delete, edit_yank, run_action, seek_clip_end};
-use super::croc::CrocAct;
 use super::motion::{
     cut_points, half_frame, next_clip_start, next_cut, next_gap_start, prev_clip_start, prev_cut,
     prev_gap_start,
@@ -123,13 +122,11 @@ pub(crate) fn normal_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
                     player.set_pause(false);
                     app.croc.clear();
                 } else {
-                    let was_paused = app.paused;
                     player.toggle_pause();
-                    if was_paused {
-                        app.croc.clear();
-                    } else {
-                        app.croc.play(CrocAct::Sleep);
-                    }
+                    // Both directions return to the ambient state; pausing
+                    // must not blink. Muting still closes the eyes via the
+                    // action map.
+                    app.croc.clear();
                 }
             }
         }

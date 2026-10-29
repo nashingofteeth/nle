@@ -16,7 +16,6 @@ use crate::mpv::Mpv;
 use crate::preview;
 
 use super::super::actions::run_action;
-use super::super::croc::CrocAct;
 use super::super::jobs::start_preview;
 use super::super::motion::{
     cut_points, half_frame, next_clip_start, next_cut, next_gap_start, prev_clip_start, prev_cut,
@@ -823,13 +822,8 @@ pub(crate) fn extend_key(app: &mut App, player: &dyn Mpv, key: KeyEvent) {
     match code {
         KeyCode::Char(' ') => {
             if app.guard_loaded() {
-                let was_paused = app.paused;
                 player.toggle_pause();
-                if was_paused {
-                    app.croc.clear();
-                } else {
-                    app.croc.play(CrocAct::Sleep);
-                }
+                app.croc.clear();
             }
         }
         KeyCode::Char('h') => seek_rel_mode(app, player, &st, -(mult as f64)),

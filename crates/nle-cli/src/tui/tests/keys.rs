@@ -115,7 +115,7 @@ fn a_huge_count_in_the_pool_does_not_panic() {
 }
 
 #[test]
-fn play_clears_to_the_ambient_swim_and_pause_sleeps() {
+fn play_and_pause_return_to_ambient_art() {
     let mut app = App::new(asset_project(), temp_project_path("transport-croc"));
     app.loaded = true;
     let fake = FakeMpv::new();
@@ -126,7 +126,7 @@ fn play_clears_to_the_ambient_swim_and_pause_sleeps() {
 
     app.paused = false;
     handle_key(&mut app, &fake, key(' '));
-    assert_eq!(app.croc.act(), CrocAct::Sleep, "pause only closes the eyes");
+    assert_eq!(app.croc.act(), CrocAct::Idle, "pause must not blink");
 }
 
 // The pool's `gg` needs both keys: a lone `g` only arms the sequence.

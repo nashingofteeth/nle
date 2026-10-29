@@ -167,14 +167,14 @@ fn a_refused_edit_hisses() {
 
 #[test]
 fn playing_never_idles_in_the_status_row() {
-    use super::super::croc::{SWIM1_LEGS, SWIM2_LEGS};
+    use super::super::croc::{SWIM1, SWIM2};
     let mut app = App::new(asset_project(), temp_project_path("swim"));
     app.loaded = true;
     app.paused = false;
     for _ in 0..8 {
         let row = status_row(&app);
         assert!(
-            row.contains(SWIM1_LEGS) || row.contains(SWIM2_LEGS),
+            row.contains(SWIM1) || row.contains(SWIM2),
             "playing must swim, not idle: {row}"
         );
     }
