@@ -121,7 +121,7 @@ fn cache_prune_reports_usage_and_refuses_bad_arguments() {
     assert!(cmd(&mut app, "cache prune --days 0").contains("1 or more"));
     assert!(cmd(&mut app, "cache prune --days soon").contains("1 or more"));
     assert!(cmd(&mut app, "cache prune --week").contains("--week"));
-    assert!(!app.history.can_undo(), "pruning is not an edit");
+    assert!(!app.project.can_undo(), "pruning is not an edit");
 }
 
 // `:track rm N` takes the track's clips with it (no "empty it first").
@@ -180,13 +180,13 @@ fn speed_command_retimes_and_ripples() {
 
 #[test]
 fn purge_command_snaps_a_drifted_clip() {
-    let mut app = App::new(asset_project(), temp_project_path("purge"));
-    // Give clip #1 a fractional (drifted) duration: 60.4 frames at 30fps.
-    if let TimelineSegment::Clip(c) =
-        &mut app.project.timeline.video_track_mut().unwrap().segments[0]
-    {
+    // Give clip #1 a fractional (drifted) duration before it becomes a
+    // Document: 60.4 frames at 30fps.
+    let mut p = asset_project();
+    if let TimelineSegment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
         c.asset_out = c.asset_in + Seconds::new(604, 300);
     }
+    let mut app = App::new(p, temp_project_path("purge"));
     let msg = cmd(&mut app, "purge");
     assert!(msg.contains("purged"), "{msg}");
     let TimelineSegment::Clip(c) = &app.project.timeline.video_track().unwrap().segments[0] else {

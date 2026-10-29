@@ -12,7 +12,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 
 use nle_core::action;
 use nle_core::timeline::{Segment as TimelineSegment, Track, TransitionKind};
-use nle_core::{Armed, Clip, History, Project, frame_of, load_register, track_label};
+use nle_core::{Armed, Clip, Document, History, Project, frame_of, load_register, track_label};
 
 use crate::mpv::{Mpv, PlaybackState};
 
@@ -192,7 +192,7 @@ struct Seen {
 }
 
 pub struct App {
-    pub project: Project,
+    pub project: Document,
     pub path: PathBuf,
     pub mode: Mode,
     /// Playhead in seconds (from mpv; EDL time == timeline time).
@@ -207,7 +207,6 @@ pub struct App {
     /// instead of pasting the wrong media.
     pub register: Option<nle_core::Register>,
     /// Undo/redo stack of edit batches (session-only).
-    pub history: History,
     pub reload_requested: bool,
     pub quit: bool,
     pub message: String,
@@ -271,14 +270,13 @@ pub struct App {
 impl App {
     pub fn new(project: Project, path: PathBuf) -> Self {
         let mut app = Self {
-            project,
+            project: Document::new(project),
             path,
             mode: Mode::Normal,
             playhead: 0.0,
             count: None,
             pending: Pending::None,
             register: None,
-            history: History::default(),
             reload_requested: false,
             quit: false,
             message: String::new(),
@@ -650,7 +648,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
     let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
-    app.history = history;
+    app.project.set_history(history);
     // The shared register: what `nle yank` (or an earlier session) left.
     app.register = load_register(&app.path);
     // Open where `nle seek` (or the last session) left the playhead.
@@ -808,11 +806,11 @@ fn watch_foreign(app: &mut App) -> bool {
 /// file's playhead.
 fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
-    app.project = project;
+    let history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
+    app.project = Document::with_history(project, history);
     app.active_track = app
         .active_track
         .min(app.project.timeline.tracks.len().saturating_sub(1));
-    app.history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
     // The register is shared too: a shell may have yanked since we read it.
     app.register = load_register(&app.path);
     if adopt_playhead {

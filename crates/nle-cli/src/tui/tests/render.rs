@@ -30,7 +30,7 @@ fn a_blend_boundary_has_no_bar() {
         Seconds::from_integer(1),
     )
     .unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     app.playhead = 5.0; // the gap|clip cut, after the blend
     let mut term = Terminal::new(TestBackend::new(60, 6)).unwrap();
     term.draw(|f| {
@@ -166,7 +166,7 @@ fn a_blend_boundary_is_permeable() {
         Seconds::from_integer(1),
     )
     .unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     // [C1 0..2][blend 2..3)[gap 3..5)[C2 5..7)
     let parts = track_parts(&app.project, &app.project.timeline.tracks[0], 7.0);
     assert_eq!(parts.len(), 4, "{parts:?}");

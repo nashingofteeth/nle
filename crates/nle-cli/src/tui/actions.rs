@@ -304,13 +304,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
         Mode::Extend(st) => st.edge_pos,
         _ => app.playhead,
     };
-    match nle_core::run_action(
-        &mut app.project,
-        &mut app.history,
-        &mut app.register,
-        action,
-        from,
-    ) {
+    match app.project.edit(action, from, &mut app.register) {
         Ok(outcome) => {
             match outcome.playhead {
                 Some(frame) => {
@@ -380,7 +374,7 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
             return;
         }
     }
-    if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
+    if let Err(e) = app.project.save_history(&History::sidecar_path(&app.path)) {
         app.set_message(&format!("history save failed: {e}"));
     } else {
         app.note_history();

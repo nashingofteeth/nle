@@ -81,13 +81,13 @@ fn media_pool_insert_is_undoable() {
     });
     let batch = edit::paste_ripple(&app.project, &snapshot, app.playhead).unwrap();
     let frame = frame_of(app.project.fps.as_ref(), 0.0);
-    app.history.apply(&mut app.project, batch, frame).unwrap();
+    app.project.apply(batch, frame).unwrap();
     assert!(
         app.project.timeline.end() > end_before,
         "insert grew the timeline"
     );
 
-    let outcome = app.history.undo(&mut app.project).unwrap();
+    let outcome = app.project.undo().unwrap();
     assert_eq!(
         app.project.timeline.end(),
         end_before,
@@ -261,7 +261,7 @@ fn pool_insert_uses_whole_frames() {
         effects: Vec::new(),
     });
     let batch = edit::paste_ripple(&app.project, &snapshot, 0.0).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     // No zero-length or sub-frame segment created.
     for s in &app.project.timeline.video_track().unwrap().segments {
         assert!(s.duration() > Seconds::from_integer(0));
@@ -348,13 +348,13 @@ fn pool_undo_keeps_the_pool_preview() {
     app.playhead = 1.0;
     let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
     let frame = frame_of(app.project.fps.as_ref(), app.playhead);
-    app.history.apply(&mut app.project, batch, frame).unwrap();
+    app.project.apply(batch, frame).unwrap();
     app.loaded = true;
     open_pool_mode(&mut app, 0);
 
     let fake = FakeMpv::new();
     handle_key(&mut app, &fake, key('u'));
-    assert!(!app.history.can_undo(), "the trim was undone");
+    assert!(!app.project.can_undo(), "the trim was undone");
     assert!(is_pool(&app), "still in the pool");
     match fake.calls().last() {
         Some(Call::Load(url, _)) => assert!(url.ends_with("red.mp4"), "{url}"),
@@ -375,7 +375,7 @@ fn pool_remove_is_undoable() {
 
     handle_key(&mut app, &fake, key('d'));
     assert_eq!(app.project.media.len(), 1, "spare removed");
-    assert!(app.history.can_undo());
+    assert!(app.project.can_undo());
     assert!(is_pool(&app), "still in the pool");
     assert!(
         matches!(fake.calls().last(), Some(Call::Load(url, _)) if url.ends_with("red.mp4")),

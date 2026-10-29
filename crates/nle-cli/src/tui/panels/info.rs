@@ -137,7 +137,7 @@ pub(crate) fn render_info(f: &mut Frame, area: Rect, app: &App) {
             .as_ref()
             .map(|f| format!("{}/{}", f.numer(), f.denom()))
             .unwrap_or_else(|| "?".into()),
-        app.history.depth()
+        app.project.depth()
     );
 
     let mut lines = vec![

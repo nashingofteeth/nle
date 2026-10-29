@@ -10,8 +10,8 @@ use nle_core::action::{EffectArgs, effect_from_args};
 use nle_core::edit;
 use nle_core::timeline::TrackKind;
 use nle_core::{
-    Action, Asset, Edge, GapLen, Project, Target, TransitionKind, TransitionLen, format_seconds,
-    load_register, parse_signed_time, run_action, save_register,
+    Action, Asset, Document, Edge, GapLen, Project, Target, TransitionKind, TransitionLen,
+    format_seconds, load_register, parse_signed_time, save_register,
 };
 
 use crate::{
@@ -311,9 +311,10 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
 /// undoable (`nle undo`) exactly like a TUI edit — same executor, same
 /// history.
 pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()> {
-    let mut project = Project::load(project_path)?;
-    let mut history =
+    let project = Project::load(project_path)?;
+    let history =
         edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
+    let mut doc = Document::with_history(project, history);
     let mut register = load_register(project_path);
     // The edit is "made from" its own position, so undoing it returns
     // there (the TUI passes the playhead instead — its session state).
@@ -329,10 +330,11 @@ pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()>
         },
         _ => 0.0,
     };
-    let outcome = run_action(&mut project, &mut history, &mut register, action, from)
+    let outcome = doc
+        .edit(action, from, &mut register)
         .map_err(|e| anyhow::Error::msg(edit_message(&e)))?;
-    project.save(project_path)?;
-    history.save(&edit::History::sidecar_path(project_path))?;
+    doc.save(project_path)?;
+    doc.save_history(&edit::History::sidecar_path(project_path))?;
     save_register(project_path, register.as_ref())?;
     log::line(&format!("action {}", outcome.desc));
     match outcome.playhead {

@@ -27,7 +27,7 @@ fn effects_panel_drops_the_selected_row_and_undo_restores_it() {
     handle_key(&mut app, &fake, key('d'));
     assert_eq!(fx_clip(&app).unwrap().effects, vec![scale.clone()]);
     assert_eq!(fx_state(&app).unwrap().sel, 0, "the cursor clamps");
-    assert!(app.history.can_undo());
+    assert!(app.project.can_undo());
 
     handle_key(&mut app, &fake, key('u'));
     assert_eq!(fx_clip(&app).unwrap().effects, vec![scale, crop]);
@@ -487,7 +487,7 @@ fn a_blank_edit_form_keeps_the_effect() {
 
     assert_eq!(clip_of(&app.project, 1).effects, vec![old]);
     assert!(app.message.contains("unchanged"), "{}", app.message);
-    assert!(!app.history.can_undo(), "a no-op is not an undo step");
+    assert!(!app.project.can_undo(), "a no-op is not an undo step");
     assert!(matches!(app.mode, Mode::Normal));
 }
 

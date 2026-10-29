@@ -154,8 +154,7 @@ fn first_clip_head_extends_past_timeline_start() {
         let mut app = App::new(asset_project(), temp_project_path("t"));
         app.playhead = -1.0;
         let batch = run_commit_action(&app, &head1, CommitKind::AbsorbHead, ripple).unwrap();
-        let mut h = History::default();
-        h.apply(&mut app.project, batch, 0).unwrap();
+        app.project.apply(batch, 0).unwrap();
         let c1 = clip_of(&app.project, 1);
         assert_eq!(c1.asset_in, Seconds::from_integer(0), "head material used");
         assert_eq!(c1.duration(), Seconds::from_integer(4));
@@ -227,8 +226,7 @@ fn gap_head_extends_past_zero() {
         let mut app = App::new(p.clone(), temp_project_path("t"));
         app.playhead = -1.0;
         let batch = run_commit_action(&app, &head0, CommitKind::GapHead, ripple).unwrap();
-        let mut h = History::default();
-        h.apply(&mut app.project, batch, 0).unwrap();
+        app.project.apply(batch, 0).unwrap();
         let segs = app.project.timeline.video_track().unwrap().segments.clone();
         assert!(
             matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(3))
@@ -457,8 +455,7 @@ fn extend_to_material_end_lands_on_grid() {
     app.playhead = target;
     let kind = plan_commit(&app.project, &armed, edge, target, 0).unwrap();
     let batch = run_commit_action(&app, &armed, kind, false).unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     assert!(
         on_boundary(&app.project, target, 0),
         "cut recognised on-grid"
@@ -610,10 +607,10 @@ fn extend_commit_undo_returns_to_entry() {
     };
     assert_eq!(from, 3.0);
     let frame = frame_of(app.project.fps.as_ref(), from);
-    app.history.apply(&mut app.project, batch, frame).unwrap();
+    app.project.apply(batch, frame).unwrap();
     // Move away, then undo.
     app.playhead = 1.0;
-    let outcome = app.history.undo(&mut app.project).unwrap();
+    let outcome = app.project.undo().unwrap();
     app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
     assert_eq!(app.playhead, 3.0, "back to where extend mode was entered");
 }
@@ -643,7 +640,7 @@ fn tail_extend_commit_lands_on_the_new_end() {
             run_commit_action(&app, &Armed::Clip { id: 1, head: false }, kind, ripple).unwrap();
         // Mirror run_edit's extend attribution (the armed edge).
         let frame = frame_of(app.project.fps.as_ref(), 3.0);
-        app.history.apply(&mut app.project, batch, frame).unwrap();
+        app.project.apply(batch, frame).unwrap();
         let end = {
             let track = app.project.timeline.video_track().unwrap();
             let si = track.clip_index(1).unwrap();

@@ -210,15 +210,23 @@ fn status_row(app: &App) -> String {
 /// Give one clip an explicit effect list (the panel tests don't need the
 /// edit path; `d`/`D`/undo are what they exercise).
 fn set_effects(app: &mut App, clip: u32, effects: Vec<nle_core::timeline::Effect>) {
-    for track in &mut app.project.timeline.tracks {
-        for seg in &mut track.segments {
-            if let TimelineSegment::Clip(c) = seg
-                && c.id == clip
-            {
-                c.effects = effects.clone();
+    // Through the public write path, then forget the entry: this is fixture
+    // setup, not an edit under test.
+    app.project
+        .edit_tracks(0, |p| {
+            for track in &mut p.timeline.tracks {
+                for seg in &mut track.segments {
+                    if let TimelineSegment::Clip(c) = seg
+                        && c.id == clip
+                    {
+                        c.effects = effects.clone();
+                    }
+                }
             }
-        }
-    }
+            Ok(format!("fixture: effects on clip #{clip}"))
+        })
+        .unwrap();
+    app.project.reset_history(&app.path);
 }
 
 // ---- input routing, against a fake monitor (no mpv process) ----

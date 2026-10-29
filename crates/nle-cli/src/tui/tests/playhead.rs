@@ -261,7 +261,7 @@ fn playhead_reanchors_to_the_media_frame() {
         }))
     );
     let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 0.0, "moved back by the trimmed second");
 
@@ -271,7 +271,7 @@ fn playhead_reanchors_to_the_media_frame() {
     app.playhead = 1.0;
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     let batch = edit::trim_in(&app.project, app.playhead).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 1.0, "frame unchanged");
 
@@ -280,7 +280,7 @@ fn playhead_reanchors_to_the_media_frame() {
     app.playhead = 1.0;
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     let batch = edit::trim_out(&app.project, app.playhead).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 1.0, "frame unchanged");
 
@@ -290,7 +290,7 @@ fn playhead_reanchors_to_the_media_frame() {
     app.playhead = 1.0;
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     let batch = edit::delete_under(&app.project, app.playhead).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 1.0, "same position in the resulting gap");
 
@@ -328,7 +328,7 @@ fn playhead_reanchors_to_the_media_frame() {
     let anchor = clip_anchor(&app.project, app.playhead).unwrap();
     assert_eq!(anchor.start, 2.0);
     let batch = edit::delete_ripple(&app.project, app.playhead).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, Some(Anchor::Media(anchor)));
     assert_eq!(app.playhead, 2.0, "cut between the neighbours");
 
@@ -345,7 +345,7 @@ fn playhead_reanchors_to_the_media_frame() {
         }))
     );
     let batch = edit::delete_under(&app.project, app.playhead).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 3.0, "cut between the clips");
 
@@ -392,7 +392,7 @@ fn playhead_lands_on_the_seam_a_deleted_transition_leaves() {
         Seconds::from_integer(1),
     )
     .unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     // [C1' 0..2][transition 2..3][C2' 3..4]; the playhead sits in the blend.
     app.playhead = 2.5;
 
@@ -406,7 +406,7 @@ fn playhead_lands_on_the_seam_a_deleted_transition_leaves() {
         "the transition's end"
     );
     let batch = edit::delete_under(&app.project, app.playhead).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 3.0, "the cut the restore leaves");
     // …and the neighbours are whole again.
@@ -429,7 +429,7 @@ fn an_edit_over_a_gap_keeps_the_playhead() {
     let anchor = edit_anchor(&app.project, app.playhead, 0);
     // An insert over the gap grows it — a non-removing edit.
     let batch = edit::insert_gap(&app.project, app.playhead, 15).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 4.0, "the playhead stays put");
 }
@@ -467,7 +467,7 @@ fn playhead_reanchors_on_speed_clips() {
     // media frame at the same playhead. A 1× mapping records source 1
     // and resolves to 0.5, off the frame.
     let batch = edit::trim_in(&app.project, 0.5).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 1.0, "media frame kept at the scaled offset");
 
@@ -505,7 +505,7 @@ fn playhead_reanchors_on_speed_clips() {
         }))
     );
     let batch = edit::delete_ripple(&app.project, 0.5).unwrap(); // drop #1
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     reanchor_playhead(&mut app, anchor);
     assert_eq!(app.playhead, 2.0, "still 2s into clip #2 after the shift");
 }
@@ -518,12 +518,10 @@ fn undo_restores_the_playhead() {
     app.playhead = 1.0;
     let at_frame = frame_of(fps.as_ref(), app.playhead);
     let batch = edit::trim_in_ripple(&app.project, app.playhead).unwrap();
-    app.history
-        .apply(&mut app.project, batch, at_frame)
-        .unwrap();
+    app.project.apply(batch, at_frame).unwrap();
     // move away, as the user would after editing
     app.playhead = 6.0;
-    let outcome = app.history.undo(&mut app.project).unwrap();
+    let outcome = app.project.undo().unwrap();
     app.playhead = frame_to_secs(app.project.fps.as_ref(), outcome.playhead);
     assert_eq!(app.playhead, 1.0, "playhead returns to where the edit was");
 }
@@ -535,7 +533,7 @@ fn insert_gap_key_uses_the_count() {
     let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 4.0;
     let batch = edit::insert_gap(&app.project, app.playhead, 5).unwrap();
-    app.history.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     assert!(
         matches!(&app.project.timeline.video_track().unwrap().segments[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(2) + Seconds::new(5, 30))
     );

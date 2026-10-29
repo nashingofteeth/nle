@@ -12,31 +12,32 @@ use nle_core::otio;
 use nle_core::otio::OtioItem;
 use nle_core::time::{parse_timecode, timecode_to_frames};
 use nle_core::timeline::{Segment, TrackKind};
-use nle_core::{Project, VideoSettings, frame_of};
+use nle_core::{Document, Project, VideoSettings, frame_of};
 use nle_ffmpeg::probe;
 
 use super::project::{save_and_reset_history, secs_f64};
 use super::{CommandReport, asset_summary};
 use crate::{parse_fps_arg, say};
 pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
-    let mut project = Project::load(project_path)?;
-    let mut history =
-        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
-    let playhead = frame_of(project.fps.as_ref(), secs_f64(&project.playhead));
+    let mut doc = Document::with_history(
+        Project::load(project_path)?,
+        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default(),
+    );
+    let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
     let mut added = 0usize;
     for file in files {
         let report = probe(file).with_context(|| format!("importing {}", file.display()))?;
         let canonical = file
             .canonicalize()
             .with_context(|| format!("resolving {}", file.display()))?;
-        if let Some(a) = project.asset_by_path(&canonical) {
+        if let Some(a) = doc.asset_by_path(&canonical) {
             say!("· {} already imported (asset #{})", file.display(), a.id);
             continue;
         }
         // Recorded: `nle undo` removes the asset again.
-        let (id, _) = history.add_asset(&mut project, canonical, report, playhead);
+        let (id, _) = doc.add_asset(canonical, report, playhead);
         added += 1;
-        let asset = project.asset(id).context("asset vanished")?;
+        let asset = doc.asset(id).context("asset vanished")?;
         say!(
             "✓ asset #{id}  {}  {}",
             file.display(),
@@ -44,8 +45,8 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
         );
     }
     if added > 0 {
-        project.save(project_path)?;
-        history.save(&edit::History::sidecar_path(project_path))?;
+        doc.save(project_path)?;
+        doc.save_history(&edit::History::sidecar_path(project_path))?;
     }
     let clip_count = |p: &Project| {
         p.timeline
@@ -58,8 +59,8 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
     say!(
         "· {} — {} assets, {} clip(s)",
         project_path.display(),
-        project.media.len(),
-        clip_count(&project)
+        doc.media.len(),
+        clip_count(&doc)
     );
     Ok(())
 }

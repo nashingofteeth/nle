@@ -9,7 +9,9 @@ use nle_core::edit;
 use nle_core::project::wrong_kind;
 use nle_core::time::{parse_signed_time, parse_time};
 use nle_core::timeline::{Clip, Segment, TrackKind};
-use nle_core::{Action, Project, Seconds, VideoSettings, format_seconds, frame_of, track_label};
+use nle_core::{
+    Action, Document, Project, Seconds, VideoSettings, format_seconds, frame_of, track_label,
+};
 use nle_ffmpeg::probe;
 
 use super::asset_summary;
@@ -107,8 +109,11 @@ pub(crate) fn cmd_init(path: &Path, force: bool) -> Result<()> {
 /// matches it (the next TUI session starts fresh rather than refusing every
 /// undo). See AGENTS.md "Compatibility: none, by design".
 pub(crate) fn save_and_reset_history(project: &Project, path: &Path) -> Result<()> {
-    project.save(path)?;
-    let _ = std::fs::remove_file(edit::History::sidecar_path(path));
+    // Through Document so the clamp-before-save rule holds on this path too;
+    // callers that print clamp notes have already done the same clamp.
+    let (mut doc, _) = Document::rebuild(project.clone());
+    doc.save(path)?;
+    doc.reset_history(path);
     log::line(&format!("saved {} (undo history reset)", path.display()));
     Ok(())
 }
@@ -121,30 +126,23 @@ pub(crate) fn cmd_add(
     in_point: Option<&str>,
     out_point: Option<&str>,
 ) -> Result<()> {
-    let mut project = Project::load(project_path)?;
+    let mut doc = Document::with_history(
+        Project::load(project_path)?,
+        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default(),
+    );
     // `--track` is 1-based (matching the `v1`/`a1` labels); 0 internally.
     // 0 is not a track number — it used to silently mean "track 1".
     let ti = cli_index(track, "--track").map_err(anyhow::Error::msg)?;
-    if ti >= project.timeline.tracks.len() {
+    if ti >= doc.timeline.tracks.len() {
         bail!("no track #{track}");
     }
-    let mut history =
-        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
-    let playhead = frame_of(project.fps.as_ref(), secs_f64(&project.playhead));
-    let kind = project
+    let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
+    let kind = doc
         .timeline
         .track(ti)
         .map(|t| t.kind)
         .with_context(|| format!("no track #{track}"))?;
-    let (scratch, imported) = stage_clip(
-        &mut project,
-        &mut history,
-        file,
-        in_point,
-        out_point,
-        playhead,
-        kind,
-    )?;
+    let (scratch, imported) = stage_clip(&mut doc, file, in_point, out_point, playhead, kind)?;
     if imported && let Segment::Clip(c) = &scratch {
         say!("· auto-imported as asset #{}", c.asset);
     }
@@ -152,7 +150,7 @@ pub(crate) fn cmd_add(
     // Ripple paste: inserts at --at (splits clips/gaps) or appends.
     let append_at = match at {
         Some(s) => parse_time(s).with_context(|| format!("invalid --at time: {s:?}"))?,
-        None => project
+        None => doc
             .timeline
             .track(ti)
             .map(|t| t.end())
@@ -162,9 +160,9 @@ pub(crate) fn cmd_add(
     // pool addition (undo removes the asset again) plus the first-clip
     // settings. The insert itself goes through the catalog below — the
     // same `Paste` the TUI's pool insert runs.
-    project.save(project_path)?;
+    doc.save(project_path)?;
     if imported {
-        history.save(&edit::History::sidecar_path(project_path))?;
+        doc.save_history(&edit::History::sidecar_path(project_path))?;
     }
     run_cli_action(
         project_path,
@@ -183,8 +181,7 @@ pub(crate) fn cmd_add(
 /// pool addition, so it is undoable). The first clip defines the sequence
 /// settings, like a real NLE.
 pub(crate) fn stage_clip(
-    project: &mut Project,
-    history: &mut edit::History,
+    doc: &mut Document,
     file: &Path,
     in_point: Option<&str>,
     out_point: Option<&str>,
@@ -195,12 +192,12 @@ pub(crate) fn stage_clip(
         .canonicalize()
         .with_context(|| format!("{} not found", file.display()))?;
 
-    let existing = project.asset_by_path(&canonical).map(|a| a.id);
+    let existing = doc.asset_by_path(&canonical).map(|a| a.id);
     let (asset_id, imported) = match existing {
         Some(id) => {
             // Refuse a kind mismatch *before* touching the pool, so the
             // error isn't preceded by a successful import.
-            if let Some(asset) = project.asset(id)
+            if let Some(asset) = doc.asset(id)
                 && let Some(reason) = asset.wrong_kind(kind)
             {
                 bail!("{reason}");
@@ -212,7 +209,7 @@ pub(crate) fn stage_clip(
             if let Some(reason) = wrong_kind(&canonical, &report, kind) {
                 bail!("{reason}");
             }
-            let (id, _) = history.add_asset(project, canonical, report, playhead);
+            let (id, _) = doc.add_asset(canonical, report, playhead);
             (id, true)
         }
     };
@@ -223,15 +220,13 @@ pub(crate) fn stage_clip(
     };
     let out_t = match out_point {
         Some(s) => parse_time(s).with_context(|| format!("invalid --out time: {s:?}"))?,
-        None => project
+        None => doc
             .asset(asset_id)
             .and_then(|a| a.duration())
             .ok_or_else(|| anyhow::anyhow!("asset has unknown duration — pass --out"))?,
     };
 
-    let asset = project
-        .asset(asset_id)
-        .context("asset vanished after import")?;
+    let asset = doc.asset(asset_id).context("asset vanished after import")?;
     if in_t >= out_t {
         bail!("--in must be before --out");
     }
@@ -243,15 +238,13 @@ pub(crate) fn stage_clip(
     // The first clip defines the sequence settings (like a real NLE).
     let asset_fps = asset.fps();
     let asset_size = asset.video_size();
-    if project.fps.is_none() {
-        project.fps = asset_fps;
-    }
-    if project.video.is_none() {
-        project.video = asset_size.map(|(w, h)| VideoSettings {
+    doc.set_sequence(
+        asset_fps,
+        asset_size.map(|(w, h)| VideoSettings {
             width: w,
             height: h,
-        });
-    }
+        }),
+    );
 
     let scratch = Segment::Clip(Clip {
         id: 0,
@@ -292,15 +285,16 @@ pub(crate) fn cmd_seek(project_path: &Path, at: Option<&str>) -> Result<()> {
     };
     let t = parse_signed_time(s).with_context(|| format!("invalid time {s:?}"))?;
     let landed = project.set_playhead(secs_f64(&t));
-    project.save(project_path)?;
+    let mut doc = Document::new(project);
+    doc.save(project_path)?;
     log::line(&format!("seek -> {landed} s"));
-    let frame = frame_of(project.fps.as_ref(), landed);
-    match project.fps {
+    let frame = frame_of(doc.fps.as_ref(), landed);
+    match doc.fps {
         Some(_) => say!(
             "✓ playhead → {} s (f{frame})",
-            format_seconds(&project.playhead)
+            format_seconds(&doc.playhead)
         ),
-        None => say!("✓ playhead → {} s", format_seconds(&project.playhead)),
+        None => say!("✓ playhead → {} s", format_seconds(&doc.playhead)),
     }
     Ok(())
 }

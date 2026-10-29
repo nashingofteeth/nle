@@ -75,8 +75,7 @@ fn arm_and_extend_middle_gap() {
         false,
     )
     .unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     assert_eq!(
         app.project.timeline.end(),
         Seconds::from_integer(5),
@@ -98,8 +97,7 @@ fn arm_and_extend_middle_gap() {
     )
     .unwrap();
     assert!(batch.desc.contains("trimmed clip #1"), "{}", batch.desc);
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     let segs = app.project.timeline.video_track().unwrap().segments.clone();
     assert!(matches!(&segs[0], TimelineSegment::Clip(c) if c.id == 1));
     assert_eq!(
@@ -123,8 +121,7 @@ fn arm_and_extend_middle_gap() {
         false,
     )
     .unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     let segs = app.project.timeline.video_track().unwrap().segments.clone();
     assert!(matches!(&segs[0], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(5)));
     assert_eq!(app.project.timeline.end(), Seconds::from_integer(7));
@@ -134,8 +131,7 @@ fn arm_and_extend_middle_gap() {
     let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 7.0;
     let batch = run_commit_action(&app, &armed, CommitKind::GapTail, true).unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     let segs = app.project.timeline.video_track().unwrap().segments.clone();
     assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
     assert_eq!(app.project.timeline.end(), Seconds::from_integer(9));
@@ -149,8 +145,7 @@ fn arm_and_extend_middle_gap() {
     app.playhead = 7.0;
     let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
     assert!(batch.desc.contains("absorbed"), "{}", batch.desc);
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     let segs = app.project.timeline.video_track().unwrap().segments.clone();
     assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(4)));
     assert_eq!(
@@ -164,8 +159,7 @@ fn arm_and_extend_middle_gap() {
     let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 4.0;
     let batch = run_commit_action(&app, &armed, CommitKind::GapTail, false).unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     let segs = app.project.timeline.video_track().unwrap().segments.clone();
     assert!(matches!(&segs[1], TimelineSegment::Gap(g) if g.duration == Seconds::from_integer(1)));
     assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
@@ -194,8 +188,7 @@ fn commit_tail_to_gap_far_edge_absorbs() {
     let mut app = App::new(asset_project(), temp_project_path("t"));
     app.playhead = 5.0;
     let batch = run_commit_action(&app, &tail1, CommitKind::AbsorbTail, false).unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     assert_eq!(clip_of(&app.project, 1).asset_out, Seconds::from_integer(6));
     assert_eq!(app.project.timeline.end(), Seconds::from_integer(7));
     assert_eq!(
@@ -234,8 +227,7 @@ fn commit_head_to_gap_near_edge_absorbs() {
     let mut app = App::new(p, temp_project_path("t"));
     app.playhead = 3.0;
     let batch = run_commit_action(&app, &head2, CommitKind::AbsorbHead, false).unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     assert_eq!(clip_of(&app.project, 2).asset_in, Seconds::from_integer(0));
     assert_eq!(app.project.timeline.end(), Seconds::from_integer(6));
     assert_eq!(
@@ -453,8 +445,7 @@ fn commit_at_opposite_end_deletes_armed_clip() {
     );
     app.playhead = 7.0;
     let batch = run_commit_action(&app, &head2, CommitKind::Delete, false).unwrap();
-    let mut h = History::default();
-    h.apply(&mut app.project, batch, 0).unwrap();
+    app.project.apply(batch, 0).unwrap();
     let ids: Vec<u32> = app
         .project
         .timeline
@@ -474,8 +465,7 @@ fn commit_at_opposite_end_deletes_armed_clip() {
     let mut app2 = App::new(asset_project(), temp_project_path("t"));
     app2.playhead = 7.0;
     let batch = run_commit_action(&app2, &head2, CommitKind::Delete, true).unwrap();
-    let mut h2 = History::default();
-    h2.apply(&mut app2.project, batch, 0).unwrap();
+    app2.project.apply(batch, 0).unwrap();
     let end = app2.project.timeline.end();
     assert!(end < Seconds::from_integer(7), "shrank: {end}");
 }

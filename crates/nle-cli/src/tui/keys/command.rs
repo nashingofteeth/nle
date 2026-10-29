@@ -43,8 +43,7 @@ pub(crate) fn import_command(app: &mut App, cmd: &str) -> String {
                 }
                 match nle_ffmpeg::probe(&path) {
                     Ok(report) => {
-                        app.history
-                            .add_asset(&mut app.project, path, report, playhead);
+                        app.project.add_asset(path, report, playhead);
                         new += 1;
                     }
                     Err(e) => failed.push(format!("{arg}: {e}")),
@@ -59,7 +58,7 @@ pub(crate) fn import_command(app: &mut App, cmd: &str) -> String {
         if let Err(e) = app.project.save(&app.path) {
             return format!("imported {new} — save failed: {e}");
         }
-        if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
+        if let Err(e) = app.project.save_history(&History::sidecar_path(&app.path)) {
             return format!("imported {new} — history save failed: {e}");
         }
         app.note_seen();
@@ -156,7 +155,6 @@ pub(crate) fn add_command(
     };
     let (scratch, imported) = match crate::cmd::project::stage_clip(
         &mut app.project,
-        &mut app.history,
         &file,
         in_point.as_deref(),
         out_point.as_deref(),
@@ -172,7 +170,7 @@ pub(crate) fn add_command(
         if let Err(e) = app.project.save(&app.path) {
             return Some(format!("save failed: {e}"));
         }
-        if let Err(e) = app.history.save(&History::sidecar_path(&app.path)) {
+        if let Err(e) = app.project.save_history(&History::sidecar_path(&app.path)) {
             return Some(format!("history save failed: {e}"));
         }
         app.note_seen();
