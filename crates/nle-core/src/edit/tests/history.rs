@@ -336,16 +336,11 @@ fn failed_apply_restores_project_and_keeps_history_empty() {
     let mut p = fixture();
     let mut h = History::default();
     let before = p.clone();
-    // Zero-duration replacement passes op application but fails validate.
-    let seg = p.timeline.video_track().unwrap().segments[0].clone();
-    let bad = match seg {
-        Segment::Clip(c) => Segment::Clip(Clip {
-            asset_out: c.asset_in,
-            speed: Seconds::from_integer(1),
-            ..c
-        }),
-        Segment::Gap(_) | Segment::Transition(_) => unreachable!(),
-    };
+    // A gap past the timeline limit passes op application but fails validate
+    // (clamping does not touch gaps, so it cannot rescue this one).
+    let bad = Segment::Gap(Gap {
+        duration: Seconds::from_integer(crate::timeline::MAX_TIMELINE_SECONDS + 1),
+    });
     let batch = Batch {
         ops: vec![EditOp::Replace {
             track: 0,

@@ -15,7 +15,6 @@ use nle_core::timeline::{Segment, TrackKind};
 use nle_core::{Project, VideoSettings, frame_of};
 use nle_ffmpeg::probe;
 
-use super::detect::clamp_project_to_media;
 use super::project::{save_and_reset_history, secs_f64};
 use super::{CommandReport, asset_summary};
 use crate::{parse_fps_arg, say};
@@ -290,8 +289,8 @@ pub(crate) fn import_edl_work(
     }
     // Keep every clip inside its media and on the frame grid: an EDL's source
     // out-point can run past the file, and the model must not disagree with
-    // what export can render (see `clamp_project_to_media`).
-    for n in clamp_project_to_media(&mut project) {
+    // what export can render (see `edit::clamp_project`).
+    for n in edit::clamp_project(&mut project) {
         notes.push(format!("warning: {n}"));
     }
     project.validate()?;
@@ -473,7 +472,7 @@ pub(crate) fn import_otio_work(
         .with_context(|| format!("building timeline from {}", otio_path.display()))?;
     project.timeline = timeline;
     // Keep every clip inside its media and on the frame grid.
-    let clamp_notes = clamp_project_to_media(&mut project);
+    let clamp_notes = edit::clamp_project(&mut project);
     project.validate()?;
     save_and_reset_history(&project, project_path)?;
 

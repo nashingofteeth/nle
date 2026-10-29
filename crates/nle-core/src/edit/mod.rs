@@ -24,7 +24,7 @@ mod transitions;
 mod trim;
 mod util;
 
-pub use clamp::{clamp_to_media, purge_stumps};
+pub use clamp::{clamp_project, clamp_to_media, purge_stumps};
 pub use clip::{
     delete_clip_by_id, delete_clip_by_id_on, delete_clip_ripple_by_id, delete_clip_ripple_by_id_on,
     delete_ripple, delete_ripple_on, delete_segment, delete_segment_on, delete_under,

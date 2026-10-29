@@ -1,7 +1,6 @@
 //! `nle detect-edits`: probe a rendered file for its cuts and rebuild the
 //! timeline from the spans.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -220,7 +219,7 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
             append_spans(&mut project, audio_ti, start, audio_segments);
         }
 
-        for n in clamp_project_to_media(&mut project) {
+        for n in edit::clamp_project(&mut project) {
             out.warn(format!("warning: {n}"));
         }
         project.validate()?;
@@ -268,7 +267,7 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
         });
     }
     project.timeline = Timeline { tracks };
-    for n in clamp_project_to_media(&mut project) {
+    for n in edit::clamp_project(&mut project) {
         out.warn(format!("warning: {n}"));
     }
     project.validate()?;
@@ -283,28 +282,6 @@ pub(crate) fn detect_edits_work(args: DetectArgs) -> Result<CommandReport> {
         format_seconds(&fps),
     );
     Ok(out)
-}
-
-/// Keep every clip inside its media and on the frame grid (see
-/// [`edit::clamp_to_media`]). Returns one note per adjustment; applied by both
-/// import paths and by `purge-stumps`, so no write path leaves a clip reading
-/// past EOF or ending off the project's frame grid.
-pub(crate) fn clamp_project_to_media(project: &mut Project) -> Vec<String> {
-    let Some(fps) = project.fps else {
-        return Vec::new();
-    };
-    let durations: HashMap<u32, Seconds> = project
-        .media
-        .iter()
-        .filter_map(|a| a.duration().map(|d| (a.id, d)))
-        .collect();
-    let media = |id: u32| durations.get(&id).copied();
-    project
-        .timeline
-        .tracks
-        .iter_mut()
-        .flat_map(|t| edit::clamp_to_media(t, &media, fps))
-        .collect()
 }
 
 /// Build the clip/gap segments for a run of spans, allocating clip ids from

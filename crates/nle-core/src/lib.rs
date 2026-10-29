@@ -23,9 +23,9 @@ pub use action::{
 pub use detect::{Span, reconstruct};
 pub use edit::{
     Atom, Batch, Change, EditError, EditOp, History, absorb_outward, add_effect, add_effect_on,
-    add_transition, clamp_to_media, delete_clip_by_id, delete_ripple, delete_under, extend_edge,
-    extend_gap_end, paste, paste_ripple, purge_stumps, set_speed, split, trim_in, trim_in_ripple,
-    trim_out, trim_out_ripple,
+    add_transition, clamp_project, clamp_to_media, delete_clip_by_id, delete_ripple, delete_under,
+    extend_edge, extend_gap_end, paste, paste_ripple, purge_stumps, set_speed, split, trim_in,
+    trim_in_ripple, trim_out, trim_out_ripple,
 };
 pub use edl::{EdlDoc, EdlError, EdlEvent};
 pub use extend::{

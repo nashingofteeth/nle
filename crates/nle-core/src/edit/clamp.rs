@@ -2,6 +2,7 @@
 //! source in/out calls `clamp_to_media`, and `purge_stumps` drops the
 //! sub-frame leftovers a grid-snapped edit can strand.
 
+use crate::project::Project;
 use crate::time::{Seconds, format_seconds};
 use crate::timeline::{Clip, Gap, Segment, Track, TransitionSource};
 
@@ -183,4 +184,22 @@ pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
         pos = end;
     }
     (out, dropped)
+}
+
+/// Clamp every track of `project` to its media and frame grid. The one entry
+/// point the write paths share: imports and `purge-stumps` call it before
+/// saving, and `History::apply` calls it after every batch, so a recorded
+/// change can never leave a clip reading past EOF.
+pub fn clamp_project(project: &mut Project) -> Vec<String> {
+    let Some(fps) = project.fps else {
+        return Vec::new();
+    };
+    let media = &project.media;
+    let duration = |id: u32| media.iter().find(|a| a.id == id).and_then(|a| a.duration());
+    project
+        .timeline
+        .tracks
+        .iter_mut()
+        .flat_map(|t| clamp_to_media(t, &duration, fps))
+        .collect()
 }

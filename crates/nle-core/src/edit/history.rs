@@ -19,6 +19,7 @@ use crate::timeline::{
     Clip, Effect, Gap, Segment, Track, Transition, TransitionKind, TransitionSource,
 };
 
+use super::clamp::clamp_project;
 use super::util::video_track_index;
 use super::{Batch, EditError, EditOp, HISTORY_VERSION, MAX_HISTORY};
 
@@ -49,11 +50,18 @@ impl History {
         let track = batch_track(&batch, project)?;
         let before = snapshot_track(&project.timeline.tracks[track]);
         let saved = project.timeline.tracks[track].segments.clone();
-        if let Err(e) = apply_batch(project, &batch.ops)
-            .and_then(|_| project.validate().map_err(EditError::from))
-        {
+        // Clamp before snapshotting: the recorded `after` must be the state
+        // undo restores, so a batch can never leave a clip reading past EOF
+        // or a sub-frame sliver behind.
+        if let Err(e) = apply_batch(project, &batch.ops).map(|_| {
+            clamp_project(project);
+        }) {
             project.timeline.tracks[track].segments = saved;
             return Err(e);
+        }
+        if let Err(e) = project.validate() {
+            project.timeline.tracks[track].segments = saved;
+            return Err(e.into());
         }
         let after = snapshot_track(&project.timeline.tracks[track]);
         self.push_change(Change::Track(TrackChange {
