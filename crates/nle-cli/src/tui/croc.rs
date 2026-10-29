@@ -27,13 +27,12 @@ const TAIL_UP: &str = r#"=";::;>!-"#;
 const HAPPY_TAIL: &str = r#"=^;::;>-~"#;
 const WIDE_ALERT: &str = r#")O;::;>!-"#;
 // Spit: one body section changes at a time. A comma at the back gives way
-// to a single dot moving right-to-left through the middle to the front; the
-// jaw opens only after the wave, then shuts again.
-const SPIT1: &str = r#"=";::,>--"#;
-const SPIT2: &str = r#"=";:.;>--"#;
-const SPIT3: &str = r#"=";.:;>--"#;
-const SPIT4: &str = r#"=".::;>--"#;
-const SPIT_OPEN: &str = r#")".::;>--"#;
+// to a single dot moving right-to-left; the jaw is open for the whole short
+// wave, then shuts.
+const SPIT1: &str = r#")";::,>--"#;
+const SPIT2: &str = r#")";:.;>--"#;
+const SPIT3: &str = r#")";.:;>--"#;
+const SPIT4: &str = r#")".::;>--"#;
 
 /// A frame strip: (art, milliseconds). `None` is the idle state.
 type Strip = &'static [(&'static str, u64)];
@@ -42,24 +41,12 @@ const CHOMP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
 /// Adds (paste/insert/track add/extend) swallow with the mouth closed:
 /// a happy eye and a tail flick, never an open jaw.
 const GULP: Strip = &[(HAPPY_TAIL, 200), (TAIL2, 200)];
-const SPIT: Strip = &[
-    (SPIT1, 100),
-    (SPIT2, 100),
-    (SPIT3, 100),
-    (SPIT4, 100),
-    (SPIT_OPEN, 300),
-];
-/// Redo is the spit run backwards: the jaw holds open, then the dot travels
-/// front-to-back while the mouth closes.
-const UNSPIT: Strip = &[
-    (SPIT_OPEN, 300),
-    (SPIT4, 100),
-    (SPIT3, 100),
-    (SPIT2, 100),
-    (SPIT1, 100),
-];
-const SNAP: Strip = &[(OPEN, 100), (SLEEP, 100), (OPEN, 100), (TAIL_UP, 100)];
-const NIBBLE: Strip = &[(OPEN, 100), (SLEEP, 200), (TAIL2, 100)];
+const SPIT: Strip = &[(SPIT1, 50), (SPIT2, 50), (SPIT3, 50), (SPIT4, 50)];
+/// Redo is the spit run backwards: the same four short frames, body moving
+/// front-to-back, jaw open throughout.
+const UNSPIT: Strip = &[(SPIT4, 50), (SPIT3, 50), (SPIT2, 50), (SPIT1, 50)];
+const SNAP: Strip = &[(OPEN, 100), (WIDE, 100), (OPEN, 100), (TAIL_UP, 100)];
+const NIBBLE: Strip = &[(OPEN, 100), (WIDE, 100), (TAIL2, 200)];
 const DASH_FAST: Strip = &[(TAIL1, 100), (DASH1, 100), (DASH2, 200)];
 const DASH_SLOW: Strip = &[(TAIL2, 300), (TAIL1, 300)];
 const SLITHER: Strip = &[(TAIL1, 200), (TAIL2, 200), (TAIL1, 200)];
@@ -226,7 +213,7 @@ mod tests {
 
     const ALL_ART: &[&str] = &[
         IDLE, OPEN, WIDE, SLEEP, HISS, SWIM1, SWIM2, DASH1, DASH2, TAIL_UP, HAPPY_TAIL, WIDE_ALERT,
-        SPIT1, SPIT2, SPIT3, SPIT4, SPIT_OPEN,
+        SPIT1, SPIT2, SPIT3, SPIT4,
     ];
 
     #[test]
@@ -280,30 +267,31 @@ mod tests {
     }
 
     #[test]
-    fn the_spit_wave_moves_from_back_to_front() {
+    fn trim_and_split_keep_their_eyes_open() {
+        for act in [CrocAct::Nibble, CrocAct::Snap] {
+            for (art, _) in act.strip().expect("finite act") {
+                assert_ne!(*art, SLEEP, "{act:?} must not blink: {art}");
+                assert_ne!(art.chars().nth(1), Some('-'), "{act:?}: {art}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_spit_wave_is_short_with_the_jaw_open() {
         assert_eq!(frame_at(CrocAct::Spit, Duration::ZERO), SPIT1);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(100)), SPIT2);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), SPIT3);
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(300)), SPIT4);
-        assert_eq!(
-            frame_at(CrocAct::Spit, Duration::from_millis(400)),
-            SPIT_OPEN
-        );
-        // The jaw holds open for 300 ms, then the fallback closes it.
-        assert_eq!(
-            frame_at(CrocAct::Spit, Duration::from_millis(699)),
-            SPIT_OPEN
-        );
-        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(700)), IDLE);
-        // Only one body cell leaves the base at a time: the mark travels
-        // back-to-front instead of painting the whole back.
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(50)), SPIT2);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(100)), SPIT3);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(150)), SPIT4);
+        assert_eq!(frame_at(CrocAct::Spit, Duration::from_millis(200)), IDLE);
+        // Only one body cell leaves the base at a time; the jaw is open from
+        // the first frame, not saved for a separate hold.
         for (frame, body) in [
             (SPIT1, ";::,"),
             (SPIT2, ";:.;"),
             (SPIT3, ";.:;"),
             (SPIT4, ".::;"),
-            (SPIT_OPEN, ".::;"),
         ] {
+            assert!(frame.starts_with(')'), "jaw open during the wave: {frame}");
             assert_eq!(&frame[2..6], body, "{frame}");
             let changed = body
                 .chars()
@@ -312,22 +300,15 @@ mod tests {
                 .count();
             assert_eq!(changed, 1, "one body section at a time: {frame}");
         }
-        assert!(SPIT1.starts_with('='), "wave starts closed");
-        assert!(SPIT_OPEN.starts_with(')'), "jaw opens after the wave");
     }
 
     #[test]
     fn redo_reverses_the_spit_wave() {
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::ZERO), SPIT_OPEN);
-        assert_eq!(
-            frame_at(CrocAct::Unspit, Duration::from_millis(299)),
-            SPIT_OPEN
-        );
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(300)), SPIT4);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(400)), SPIT3);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(500)), SPIT2);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(600)), SPIT1);
-        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(700)), IDLE);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::ZERO), SPIT4);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(50)), SPIT3);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(100)), SPIT2);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(150)), SPIT1);
+        assert_eq!(frame_at(CrocAct::Unspit, Duration::from_millis(200)), IDLE);
     }
 
     #[test]
