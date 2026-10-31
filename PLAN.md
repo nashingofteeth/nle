@@ -1,15 +1,17 @@
-# nle — plan of record
+# nile — plan of record
 
-Status: **Everything through M5 is shipped** — multi-track (M4), EDL/OTIO
-import, clip speed, edit-detect, CLI/TUI action parity, and M5 (transitions,
-effects, proxy cache). **M6 next.** This file is the design/roadmap; the
-README is the user-facing how-to. Keep it in sync as milestones land.
+Project name: **nile**; installed command: **nle**. Status: **M5 shipped;
+post-M5 polish shipped; M6 next.** This file is the design/roadmap; the README
+is the user-facing how-to. Keep it in sync as milestones land.
 
 **Post-M5 additions:** transparent crop/scale masking and the offset effect
-(lower tracks show through), one effect per kind with in-place editing, a
-scale aspect lock, percent speed input (the model keeps the rational rate),
-and transition retiming (`--frames/--dur/--percent`, the `x`/`X` frames form,
-`r` for a rate); LUTs are CLI-only in the effects panel for now.
+(lower tracks show through); a TUI effects panel with one effect per kind,
+in-place editing, and a sticky aspect lock; percent speed input (the model
+keeps the rational rate); transition retiming (`--frames/--dur/--percent`,
+the `x`/`X` frames form, `r` for a rate); LUTs remain CLI-only in the panel;
+the media pool preserves its selection, preview clock, and insert cursor
+across toggles; the CLI/TUI were split into modules and `Document` pairs the
+project with its history.
 
 ## Vision
 
@@ -36,12 +38,12 @@ nle (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nile` package (binary `nle` + TUI + mpv IPC) |
-| Project file | `nle.json` — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
-| Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects later → proxy renders (M5) |
+| Project file | `nle.json` (v9) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (UHD 630), `qsv` (Quick Sync) |
 | Time | `Rational64` everywhere; floats only at ffmpeg/IPC boundaries |
-| Undo | frame-topology history (segment before/after), sidecar v4 |
+| Undo | frame-topology history (segment before/after), sidecar v15 |
 
 **Lessons banked in comments:** `-filter_complex_script` removed in ffmpeg
 9 → `-/filter_complex`; filter options use `:` not `,`;
@@ -270,16 +272,18 @@ below.)
   dangles when neighbours change and positions stay a prefix sum. Each clip
   side gives up `dur` — clip↔clip shortens the timeline by `dur` (matches
   `xfade`: 10+10−1 = 19), clip↔black leaves it. Export blends with
-  `xfade`/`acrossfade`; creation via `x` / `:transition`. Cuts only:
+  `xfade`/`acrossfade`; creation via `X` / `:transition`. Cuts only:
   `Dissolve` + `FadeBlack`. `dd`/`D` remove one and hand the frames it
   trimmed back to its neighbours (only when they still line up); `i`/`o`/`s`/
   `_` refuse. A neighbour's rate change retimes the side it owns — `dur` and
   the cut stay, the inner edge follows — so the seam never steps rate.
-- **Effects:** a typed `Effect` enum (`Crop`/`Scale`/`Eq`/`Lut`) on
+- **Effects:** a typed `Effect` enum (`Crop`/`Scale`/`Offset`/`Eq`/`Lut`) on
   `Clip.effects`, applied in the export chain after the retime and before
   the geometry normalize (so layers stay uniform for `overlay`); `:effect`
-  creates them. Undoable (`Atom::Clip`). `merge_pair` only joins clips with
-  matching effects; a paste carries them over.
+  creates them. Crop/scale are masks that reveal the tracks below; offset
+  moves the picture to or past the frame edge. Undoable (`Atom::Clip`).
+  `merge_pair` only joins clips with matching effects; a paste carries them
+  over. (The TUI effects panel and one-per-kind editing landed post-M5.)
 - **Proxy cache:** segments `edl://` can't express (effects, transitions,
   retimes, an off-sequence picture size — mpv would re-frame that one while the
   export scales it, so the framing would jump at a transition's edge)
@@ -306,14 +310,17 @@ below.)
   blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
   and `nle edl` renders and references the proxies.
 
-**Deferred:** thumbnails / waveforms and a bin/`fx` panel (effects are
-created by command); retiming a transition with `i`/`o`; OTIO transitions.
+**Deferred:** thumbnails / waveforms; OTIO transitions; direct `i`/`o`
+trimming of a transition's own span (retime it with `x`/`X`,
+`--frames`/`--dur`/`--percent` instead).
 
-## M6 — export presets (planned)
+## M6 — export scheduler, presets, bench (planned)
 
-- `preview` — VAAPI hardware, near-instant, lower quality
-- `balanced` — libx264, good quality/speed trade
-- `max` — libx265 / SVT-AV1, slow, archival
+- **Presets:** `preview` (VAAPI, near-instant), `balanced` (libx264),
+  `max` (libx265 / SVT-AV1, archival).
+- **Scheduler:** three encode lanes; segment-parallel export.
+- **Bench:** `nle bench` for repeatable timing runs.
+- **Resume/cache:** restart an interrupted export from completed segments.
 
 ## Open / deferred
 
