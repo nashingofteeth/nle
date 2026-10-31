@@ -280,3 +280,7 @@ worker while the monitor keeps playing.
 ## Export presets (planned, M6)
 
 See `PLAN.md` — `preview` (VAAPI), `balanced` (x264), `max` (x265/SVT-AV1).
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
