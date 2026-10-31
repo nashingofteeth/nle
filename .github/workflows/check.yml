@@ -83,7 +83,7 @@ jobs:
       # The headless variant is a supported build (AGENTS.md): its tests are
       # the 55 CLI/unit ones that don't need ratatui.
       - name: Test headless
-        run: cargo test --locked -p nle-cli --no-default-features
+        run: cargo test --locked -p nile --no-default-features
 
       - name: Build release
         run: cargo build --locked --release

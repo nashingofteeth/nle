@@ -1,4 +1,6 @@
-# nle
+# nile
+
+a terminal-native NLE
 
 Terminal-native video editor: TUI dashboard + mpv monitor window, vim keys,
 FFmpeg underneath. High performance with low system requirements — the Rust

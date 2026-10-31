@@ -759,6 +759,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nile"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "nle-core",
+ "nle-ffmpeg",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -781,22 +797,6 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "nle-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "nle-core",
- "nle-ffmpeg",
- "ratatui",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
 ]
 
 [[package]]

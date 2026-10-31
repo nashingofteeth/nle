@@ -8,7 +8,7 @@
 //!
 //! Purity line: `Action` covers everything that mutates a [`Project`] or
 //! its undo [`History`] from model state alone. Commands that need
-//! processes (probe, export, detect, EDL/OTIO import) stay in `nle-cli`
+//! processes (probe, export, detect, EDL/OTIO import) stay in the CLI crate
 //! and speak to this module only through the values they construct.
 
 use crate::edit::{self, EditError, History};

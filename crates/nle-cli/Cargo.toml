@@ -1,11 +1,11 @@
 [package]
-name = "nle-cli"
+name = "nile"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The nle binary"
+description = "a terminal-native NLE"
 
-# Cargo would name the binary "nle-cli"; call it what it is.
+# The project is nile; the command stays `nle` for now.
 [[bin]]
 name = "nle"
 path = "src/main.rs"
