@@ -11,7 +11,9 @@ keeps the rational rate); transition retiming (`--frames/--dur/--percent`,
 the `x`/`X` frames form, `r` for a rate); LUTs remain CLI-only in the panel;
 the media pool preserves its selection, preview clock, and insert cursor
 across toggles; the CLI/TUI were split into modules and `Document` pairs the
-project with its history.
+project with its history; project state (history, clipboard, proxy/black
+cache) lives in `.nile/<stem>/`, with an optional directory default in
+`.nile/config.json` (`nile default`).
 
 ## Vision
 
@@ -38,7 +40,7 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nile.json` (v9) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v9, or `.nile/config.json` default) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (UHD 630), `qsv` (Quick Sync) |

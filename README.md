@@ -55,10 +55,19 @@ nile add intro.mp4 --in 2.5 --out 7      # trimmed clip at the end of track 1
 nile add b-roll.mov --at 10              # creates a gap before it
 nile edit                                # TUI + mpv monitor
 nile export -o final.mp4
+
+# Pick another default for this directory (stored in .nile/config.json)
+nile default trip.json
+nile show                    # now uses trip.json
+nile default --unset         # back to nile.json
+
+# One command can override the directory default
+nile -p other.json show
 ```
 
-The project lives in `nile.json`; edits are saved automatically. Shell commands
-and an open TUI adopt each other's changes.
+The project lives in `nile.json` (or the directory default); edits are saved
+automatically. Shell commands and an open TUI adopt each other's changes.
+`--project` overrides `.nile/config.json`.
 
 ## TUI
 
@@ -287,16 +296,21 @@ NLE_LOG=/tmp/nle.log nile edit            # timestamped diagnostics
 
 ## Files and concurrency
 
-The project is `nile.json`; everything else lives in a state directory beside
-it, grouped by project stem:
+The project is `nile.json` unless this directory sets another default. The
+directory setting lives at `.nile/config.json` (written by `nile default`);
+everything else is grouped beside the project by stem:
 
 ```text
-video/.nile/nile/
-├── history.json       # undo/redo stacks
-├── clipboard.json     # yank register
-└── cache/
-    ├── proxy/         # rendered proxy clips
-    └── black/         # black-gap filler
+video/
+├── nile.json
+└── .nile/
+    ├── config.json    # optional default_project for this directory
+    └── nile/
+        ├── history.json
+        ├── clipboard.json
+        └── cache/
+            ├── proxy/
+            └── black/
 ```
 
 Multiple projects in one directory get separate `.nile/<stem>/` folders.

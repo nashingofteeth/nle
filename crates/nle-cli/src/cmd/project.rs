@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 use nle_core::edit;
 use nle_core::project::wrong_kind;
+use nle_core::state;
 use nle_core::time::{parse_signed_time, parse_time};
 use nle_core::timeline::{Clip, Segment, TrackKind};
 use nle_core::{
@@ -89,6 +90,36 @@ pub(crate) fn cmd_edl(project_path: &Path, track: Option<usize>) -> Result<()> {
         bail!("no track #{track}");
     }
     say!("{}", preview::build_edl(&project, project_path, ti)?);
+    Ok(())
+}
+
+/// The project used when `-p` is absent: `.nile/config.json`, else
+/// `nile.json` in the current directory.
+pub(crate) fn resolve_default_project(cwd: &Path) -> Result<std::path::PathBuf> {
+    Ok(state::load_default_project(cwd)?.unwrap_or_else(|| std::path::PathBuf::from("nile.json")))
+}
+
+/// `nile default [FILE]`: show or set the directory's default project.
+pub(crate) fn cmd_default(cwd: &Path, file: Option<&Path>, unset: bool) -> Result<()> {
+    if unset && file.is_some() {
+        bail!("use either a FILE or --unset, not both");
+    }
+    let config = state::config_path(cwd);
+    if unset {
+        state::save_default_project(cwd, None)?;
+        say!("default project: nile.json (fallback)");
+        return Ok(());
+    }
+    if let Some(file) = file {
+        state::save_default_project(cwd, Some(file))?;
+        say!("✓ default project: {}", file.display());
+        return Ok(());
+    }
+    match state::load_default_project(cwd)? {
+        Some(project) => say!("default project: {}", project.display()),
+        None => say!("default project: nile.json (fallback)"),
+    }
+    say!("config: {}", config.display());
     Ok(())
 }
 

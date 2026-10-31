@@ -152,8 +152,10 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   exact equality.
 - **State lives with the project.** `nile.json` is the project; its
   `.nile/<stem>/` directory holds `history.json`, `clipboard.json`, and
-  `cache/{proxy,black}`. Legacy adjacent sidecars are copied in once; don't
-  add new scattered state files. The playhead stays in `Project.playhead`.
+  `cache/{proxy,black}`. A directory default can be set with
+  `nile default FILE` (`.nile/config.json`); `--project` overrides it.
+  Legacy adjacent sidecars are copied in once; don't add new scattered state
+  files. The playhead stays in `Project.playhead`.
   The TUI adopts foreign changes (project, history, register, playhead) and
   refuses to clobber (`persist_playhead` → `Ok(false)`).
 - **Gaps and the pool.** `Mode::Pool(PoolState)` keeps "pool open" and its

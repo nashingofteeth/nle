@@ -66,15 +66,9 @@ use nle_ffmpeg::RawProbe;
     allow_negative_numbers = true
 )]
 struct Cli {
-    /// Project file
-    #[arg(
-        short,
-        long,
-        global = true,
-        default_value = "nile.json",
-        value_name = "FILE"
-    )]
-    project: PathBuf,
+    /// Project file (default: .nile/config.json, else nile.json)
+    #[arg(short, long, global = true, value_name = "FILE")]
+    project: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Cmd,
@@ -82,6 +76,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Show or set the directory's default project
+    Default {
+        /// Project path to make default; omit to show the current default
+        file: Option<PathBuf>,
+        /// Remove the configured default and fall back to nile.json
+        #[arg(long)]
+        unset: bool,
+    },
     /// Create an empty project
     Init {
         /// Overwrite an existing project file
@@ -607,7 +609,8 @@ use cmd::media::{cmd_probe, cmd_trim};
 #[cfg(feature = "tui")]
 use cmd::project::cmd_edit;
 use cmd::project::{
-    cmd_add, cmd_cache, cmd_edl, cmd_init, cmd_media_ls, cmd_seek, cmd_show, cmd_track_ls,
+    cmd_add, cmd_cache, cmd_default, cmd_edl, cmd_init, cmd_media_ls, cmd_seek, cmd_show,
+    cmd_track_ls,
 };
 use cmd::{run_cli_action, to_action};
 
@@ -625,6 +628,17 @@ pub(crate) fn edit_message(e: &edit::EditError) -> String {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let cwd = std::env::current_dir()?;
+    if let Cmd::Default { file, unset } = &cli.command {
+        if cli.project.is_some() {
+            anyhow::bail!("`nile default` takes the project as its FILE argument, not --project");
+        }
+        return cmd_default(&cwd, file.as_deref(), *unset);
+    }
+    let project = match cli.project.clone() {
+        Some(project) => project,
+        None => cmd::project::resolve_default_project(&cwd)?,
+    };
     // Process-bound commands and queries dispatch here; every edit-shaped
     // command falls through to the action catalog below — the same
     // executor (and undo history) the TUI uses.
@@ -634,10 +648,10 @@ fn main() -> Result<()> {
             dump,
             dump_size,
             dump_keys,
-        } => return cmd_edit(&cli.project, *dump, dump_size, dump_keys),
-        Cmd::Edl { track } => return cmd_edl(&cli.project, *track),
-        Cmd::Init { force } => return cmd_init(&cli.project, *force),
-        Cmd::Import { files } => return cmd_import(&cli.project, files),
+        } => return cmd_edit(&project, *dump, dump_size, dump_keys),
+        Cmd::Edl { track } => return cmd_edl(&project, *track),
+        Cmd::Init { force } => return cmd_init(&project, *force),
+        Cmd::Import { files } => return cmd_import(&project, files),
         Cmd::Add {
             file,
             track,
@@ -646,7 +660,7 @@ fn main() -> Result<()> {
             out_point,
         } => {
             return cmd_add(
-                &cli.project,
+                &project,
                 file,
                 *track,
                 at.as_deref(),
@@ -654,15 +668,15 @@ fn main() -> Result<()> {
                 out_point.as_deref(),
             );
         }
-        Cmd::Show { json } => return cmd_show(&cli.project, *json),
-        Cmd::Seek { at } => return cmd_seek(&cli.project, at.as_deref()),
+        Cmd::Show { json } => return cmd_show(&project, *json),
+        Cmd::Seek { at } => return cmd_seek(&project, at.as_deref()),
         Cmd::Track {
             action: TrackCmd::Ls,
-        } => return cmd_track_ls(&cli.project),
-        Cmd::Cache { action } => return cmd_cache(&cli.project, action),
+        } => return cmd_track_ls(&project),
+        Cmd::Cache { action } => return cmd_cache(&project, action),
         Cmd::Media {
             action: MediaCmd::Ls,
-        } => return cmd_media_ls(&cli.project),
+        } => return cmd_media_ls(&project),
         Cmd::ImportEdl {
             file,
             media,
@@ -672,7 +686,7 @@ fn main() -> Result<()> {
             force,
         } => {
             return cmd_import_edl(
-                &cli.project,
+                &project,
                 file,
                 media,
                 fps.as_deref(),
@@ -689,7 +703,7 @@ fn main() -> Result<()> {
             force,
         } => {
             return cmd_import_otio(
-                &cli.project,
+                &project,
                 file,
                 media.as_deref(),
                 fps.as_deref(),
@@ -711,7 +725,7 @@ fn main() -> Result<()> {
             force,
         } => {
             return cmd_detect_edits(DetectArgs {
-                project: &cli.project,
+                project: &project,
                 file: file.as_path(),
                 threshold: *threshold,
                 min_shot: min_shot.as_str(),
@@ -732,14 +746,7 @@ fn main() -> Result<()> {
             preset,
             bitrate,
         } => {
-            return cmd_export(
-                &cli.project,
-                output,
-                (*encoder).into(),
-                *crf,
-                preset,
-                bitrate,
-            );
+            return cmd_export(&project, output, (*encoder).into(), *crf, preset, bitrate);
         }
         Cmd::Probe { file, json } => return cmd_probe(file, *json),
         Cmd::Trim {
@@ -770,7 +777,7 @@ fn main() -> Result<()> {
     // Everything else is an edit: run it through the catalog.
     let action =
         to_action(&cli.command).ok_or_else(|| anyhow::anyhow!("internal: not an action"))?;
-    run_cli_action(&cli.project, &action.map_err(anyhow::Error::msg)?)
+    run_cli_action(&project, &action.map_err(anyhow::Error::msg)?)
 }
 
 // ------------------------------------------------------------ project cmds

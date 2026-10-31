@@ -1208,3 +1208,59 @@ fn the_default_project_is_nile_json() {
     assert!(dir.path().join("nile.json").exists());
     assert!(!dir.path().join("nle.json").exists());
 }
+
+#[test]
+fn the_default_project_can_be_configured_per_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_nile"))
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .expect("run nile")
+    };
+
+    let out = run(&["default", "trip.json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join(".nile/config.json").exists());
+
+    let out = run(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join("trip.json").exists());
+
+    let out = run(&["show"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("trip.json"));
+
+    // --project still wins over the directory default.
+    let out = run(&["-p", "other.json", "init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = run(&["show", "-p", "other.json"]);
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("other.json"));
+
+    let out = run(&["default", "--unset"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.path().join(".nile/config.json").exists());
+    let out = run(&["default"]);
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nile.json (fallback)"));
+}
