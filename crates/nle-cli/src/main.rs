@@ -1,4 +1,4 @@
-//! nile — a terminal-native NLE.
+//! nile (alias nle) — a terminal-native NLE.
 //!
 //! M2 status: interactive editor — TUI dashboard, mpv monitor, vim keys,
 //! instant EDL preview. Project file, media pool, timeline, and export

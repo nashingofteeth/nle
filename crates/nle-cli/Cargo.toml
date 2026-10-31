@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "a terminal-native NLE"
 
-# The project and command are both `nile`.
+# One binary: `scripts/install.sh` creates the `nle` alias as a symlink,
+# so no second target is compiled.
 [[bin]]
 name = "nile"
 path = "src/main.rs"

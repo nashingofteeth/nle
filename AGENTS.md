@@ -11,7 +11,7 @@ build — see "Learning Rust along the way".
 |---|---|
 | `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops + undo history. No processes. |
 | `crates/nle-ffmpeg` | ffprobe/ffmpeg wrappers, filter-graph compiler. |
-| `crates/nle-cli` | The `nile` binary + TUI + mpv IPC client. |
+| `crates/nle-cli` | The `nile` binary (plus an `nle` symlink alias) + TUI + mpv IPC client. |
 
 | Before touching | Read |
 |---|---|

@@ -65,7 +65,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Shell scripts
-        run: shellcheck scripts/check.sh demo.sh
+        run: shellcheck scripts/check.sh scripts/install.sh demo.sh
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings

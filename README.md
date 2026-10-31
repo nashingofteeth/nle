@@ -6,7 +6,7 @@ A TUI dashboard, an mpv monitor, vim-style keys, and FFmpeg underneath. The
 Rust process stays light while ffmpeg and mpv do the decoding, rendering, and
 playback.
 
-The project and installed command are both **nile**.
+The project and command are **nile**; **`nle` remains as a symlink alias**.
 
 ## Features
 
@@ -39,8 +39,8 @@ Roadmap and milestone history: [PLAN.md](PLAN.md).
 cargo build --release
 ./target/release/nile --help
 
-# Install the `nile` command
-cargo install --path crates/nle-cli
+# Install `nile` and create the `nle` alias symlink
+./scripts/install.sh
 
 # Headless CLI only (no TUI/mpv; cargo feature `tui` off)
 cargo build --release --no-default-features
