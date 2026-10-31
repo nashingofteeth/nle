@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`nle`'s operating manual: the rules an agent needs before acting. Usage is
+`nile`'s operating manual: the rules an agent needs before acting. Usage is
 `README.md`, the roadmap is `PLAN.md`, and per-subsystem lore is in `docs/`.
 The user is **learning Rust** through this project (from JS/PHP): teach as you
 build — see "Learning Rust along the way".
@@ -11,7 +11,7 @@ build — see "Learning Rust along the way".
 |---|---|
 | `crates/nle-core` | Pure timeline logic — time math, media metadata, EDL model, edit ops + undo history. No processes. |
 | `crates/nle-ffmpeg` | ffprobe/ffmpeg wrappers, filter-graph compiler. |
-| `crates/nle-cli` | The `nle` binary + TUI + mpv IPC client. |
+| `crates/nle-cli` | The `nile` binary + TUI + mpv IPC client. |
 
 | Before touching | Read |
 |---|---|
@@ -129,7 +129,7 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   the factor. A speed change always ripples, and the monitor proxies any
   non-1× clip because an EDL entry can't retime. The CLI/TUI take a
   **percentage** (100 = normal); convert at that boundary only — the model and
-  `nle show` keep the rate (`@2×`).
+  `nile show` keep the rate (`@2×`).
 - **Transitions.** Trimming beside or through a blend moves the blend, never a
   gap; a retime scales each side's span, not its rate. A blend is opaque,
   video-only and keeps its sides contiguous at the neighbour's rate. Full
@@ -169,7 +169,7 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   `composite_segments` walks every unmuted track's cuts and picks the topmost
   video with material; black only where all are gaps. A span where another
   track is audible is rendered as the export's mix through the proxy cache.
-  Switching the active track does not reload it; `nle edl` prints what it
+  Switching the active track does not reload it; `nile edl` prints what it
   plays.
 - **The active track drives navigation and edits, not the monitor.** Digits
   are vim counts, so track selection is `t`/`T`/`<N>t` — bare `1..9` would
@@ -246,6 +246,6 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 
 ### TUI diagnostics
 
-`nle edit --dump` renders once (no mpv), feeds `--dump-keys`, and prints the
+`nile edit --dump` renders once (no mpv), feeds `--dump-keys`, and prints the
 model state + grid; it is read-only (a scratch copy) and backs the render
 tests. Usage: README.

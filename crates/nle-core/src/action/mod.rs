@@ -19,7 +19,7 @@ use crate::timeline::{Effect, Segment, TrackKind, TransitionKind};
 
 /// What an action addresses: the segment under a timeline position, a
 /// clip by id (stable across edits), or a segment by index (as printed
-/// by `nle show`).
+/// by `nile show`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Target {
     At(f64),
@@ -92,7 +92,7 @@ pub enum Action {
         target: Target,
     },
     /// Paste the register at `at` (`p` overwrites, `P` ripples). An
-    /// explicit `segment` (media-pool insert, `nle add`) skips the
+    /// explicit `segment` (media-pool insert, `nile add`) skips the
     /// register.
     Paste {
         track: usize,
@@ -162,7 +162,7 @@ pub enum Action {
     TrackRm {
         track: usize,
     },
-    /// Remove an unused asset from the media pool (`nle media rm`);
+    /// Remove an unused asset from the media pool (`nile media rm`);
     /// undoable like any edit.
     AssetRm {
         id: u32,
@@ -664,7 +664,7 @@ fn purge_stumps(
 }
 
 /// Remove a track and its clips. The whole track list is recorded, so the
-/// shifted indices are what undo restores — `nle undo` brings the track
+/// shifted indices are what undo restores — `nile undo` brings the track
 /// (and its clips) back.
 fn track_rm(
     project: &mut Project,

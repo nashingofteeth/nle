@@ -2,11 +2,11 @@
 
 a terminal-native NLE
 
-nile is a terminal-native video editor: a TUI dashboard, an mpv monitor,
-vim-style keys, and FFmpeg underneath. The Rust process stays light while
-ffmpeg and mpv do the decoding, rendering, and playback.
+A TUI dashboard, an mpv monitor, vim-style keys, and FFmpeg underneath. The
+Rust process stays light while ffmpeg and mpv do the decoding, rendering, and
+playback.
 
-The project is **nile**; the installed command is **nle**.
+The project and installed command are both **nile**.
 
 ## Features
 
@@ -37,9 +37,9 @@ Roadmap and milestone history: [PLAN.md](PLAN.md).
 
 ```sh
 cargo build --release
-./target/release/nle --help
+./target/release/nile --help
 
-# Install the `nle` command
+# Install the `nile` command
 cargo install --path crates/nle-cli
 
 # Headless CLI only (no TUI/mpv; cargo feature `tui` off)
@@ -49,12 +49,12 @@ cargo build --release --no-default-features
 ## Quick start
 
 ```sh
-nle init
-nle import intro.mp4 b-roll.mov
-nle add intro.mp4 --in 2.5 --out 7      # trimmed clip at the end of track 1
-nle add b-roll.mov --at 10              # creates a gap before it
-nle edit                                # TUI + mpv monitor
-nle export -o final.mp4
+nile init
+nile import intro.mp4 b-roll.mov
+nile add intro.mp4 --in 2.5 --out 7      # trimmed clip at the end of track 1
+nile add b-roll.mov --at 10              # creates a gap before it
+nile edit                                # TUI + mpv monitor
+nile export -o final.mp4
 ```
 
 The project lives in `nle.json`; edits are saved automatically. Shell commands
@@ -62,7 +62,7 @@ and an open TUI adopt each other's changes.
 
 ## TUI
 
-Run `nle edit`. The timeline panel shows one row per track; navigation, edits,
+Run `nile edit`. The timeline panel shows one row per track; navigation, edits,
 and the monitor follow the **active track**.
 
 ### Transport and motion
@@ -168,7 +168,7 @@ is ready.
 ### Diagnostics
 
 ```sh
-nle edit --dump [--dump-size 100x30] [--dump-keys "llx"]
+nile edit --dump [--dump-size 100x30] [--dump-keys "llx"]
 ```
 
 Renders the TUI once without mpv, feeds the keys (`\n` = Enter, `\e` = Esc),
@@ -204,52 +204,52 @@ Every command has `--help`. Times accept seconds (`12.5`) or timecodes
 ### Project and media
 
 ```sh
-nle init
-nle import intro.mp4 b-roll.mov
-nle add intro.mp4 --in 2.5 --out 7       # auto-imports a new file
-nle add b-roll.mov --at 10 --track 2     # tracks are 1-based
-nle track add video                      # overlay track
-nle track add audio                      # mixed on export
-nle track ls
-nle show                                 # or --json
-nle remove 2                             # by clip id
-nle media ls
-nle media rm 3                           # only unused assets
-nle seek 12.5                            # shared playhead
+nile init
+nile import intro.mp4 b-roll.mov
+nile add intro.mp4 --in 2.5 --out 7       # auto-imports a new file
+nile add b-roll.mov --at 10 --track 2     # tracks are 1-based
+nile track add video                      # overlay track
+nile track add audio                      # mixed on export
+nile track ls
+nile show                                 # or --json
+nile remove 2                             # by clip id
+nile media ls
+nile media rm 3                           # only unused assets
+nile seek 12.5                            # shared playhead
 ```
 
 ### Timeline edits
 
 ```sh
-nle split --at 3
-nle trim-in --at 2 --ripple
-nle trim-out --at 6
-nle gap --at 4 --frames 30
-nle delete --at 5
-nle delete --clip 3 --ripple
-nle delete --seg 2
-nle yank --clip 3
-nle paste --at 5 --ripple
-nle extend --clip 3 --edge out --to 8
-nle speed 3 50                           # clip #3 at 50%
-nle transition --at 3 --frames 20
-nle undo / nle redo
-nle purge-stumps
+nile split --at 3
+nile trim-in --at 2 --ripple
+nile trim-out --at 6
+nile gap --at 4 --frames 30
+nile delete --at 5
+nile delete --clip 3 --ripple
+nile delete --seg 2
+nile yank --clip 3
+nile paste --at 5 --ripple
+nile extend --clip 3 --edge out --to 8
+nile speed 3 50                           # clip #3 at 50%
+nile transition --at 3 --frames 20
+nile undo / nile redo
+nile purge-stumps
 ```
 
 `--at` is the playhead in the TUI; `--to` may be negative (a gap head reaching
-back past time 0). `nle show` prints `[i]` segment indices and `#n` clip ids.
+back past time 0). `nile show` prints `[i]` segment indices and `#n` clip ids.
 
 ### Effects
 
 ```sh
-nle effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
-nle effect scale --clip 3 --w 50 --h 50
-nle effect offset --clip 3 --x 10 --y -5
-nle effect eq --clip 3 --brightness -0.2  # contrast/saturation default to 1
-nle effect eq --clip 3 --index 0          # replace row 0 (0-based)
-nle effect rm --clip 3 [--index N]
-nle effect clear --clip 3
+nile effect crop --clip 3 --left 10 --right 10 --top 5 --bottom 5
+nile effect scale --clip 3 --w 50 --h 50
+nile effect offset --clip 3 --x 10 --y -5
+nile effect eq --clip 3 --brightness -0.2  # contrast/saturation default to 1
+nile effect eq --clip 3 --index 0          # replace row 0 (0-based)
+nile effect rm --clip 3 [--index N]
+nile effect clear --clip 3
 ```
 
 Effects are rendered at export; the monitor plays a cached proxy for clips
@@ -259,30 +259,30 @@ the sequence.
 ### Import, detect, and export
 
 ```sh
-nle import-edl sequence.edl --media ~/footage
+nile import-edl sequence.edl --media ~/footage
 # Cuts only: dissolves/wipes/keys become cuts (each reported); black becomes
 # a gap; zero-length events are skipped. --fps/--src-offset/--map/--force.
-nle import-otio sequence.otio
+nile import-otio sequence.otio
 # OpenTimelineIO e.g. a Kdenlive export; media paths come from the file;
 # --media/--remap/--fps. Kdenlive timewarps import as clip speed.
-nle detect-edits edit.mov [--list]
-nle detect-edits edit.mov --append --track 2
+nile detect-edits edit.mov [--list]
+nile detect-edits edit.mov --append --track 2
 # One clip per detected shot; black spans become gaps. Tune with
 # --threshold/--min-shot/--black-min/--no-gaps/--video-only/--fps/--force.
-nle export -o final.mp4
-nle export -o fast.mp4 --encoder vaapi   # or qsv
+nile export -o final.mp4
+nile export -o fast.mp4 --encoder vaapi   # or qsv
 # VAAPI picks the first /dev/dri/renderD*; override with NLE_VAAPI_DEVICE.
 ```
 
 ### One-shot tools and logging
 
 ```sh
-nle probe clip.mp4 [--json]
-nle trim clip.mp4 --in 2.5 --out 7 -o cut.mp4 [--encoder vaapi] [--copy]
-nle edl                                  # composite URL the monitor plays
-nle edl --track N                        # one track (debugging)
+nile probe clip.mp4 [--json]
+nile trim clip.mp4 --in 2.5 --out 7 -o cut.mp4 [--encoder vaapi] [--copy]
+nile edl                                  # composite URL the monitor plays
+nile edl --track N                        # one track (debugging)
 
-NLE_LOG=/tmp/nle.log nle edit            # timestamped diagnostics
+NLE_LOG=/tmp/nle.log nile edit            # timestamped diagnostics
 ```
 
 ## Files and concurrency
@@ -291,6 +291,9 @@ NLE_LOG=/tmp/nle.log nle edit            # timestamped diagnostics
 - `nle.history.json` — undo/redo stacks
 - `nle.clipboard.json` — yank register
 - `~/.cache/nle/` — proxy renders and the black-gap filler
+
+The command is `nile`; these historical `nle` filenames and cache paths are
+kept for now so existing projects and previews keep working.
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a
@@ -304,7 +307,7 @@ Every timeline edit is one `Action` in `nle-core`, executed by one runner:
 |---|---|---|
 | TUI keys | frequent actions | `s`, `dd`, `p`, `e`/`E`, `u` |
 | TUI `:` line | every action | `:delete --at 3 --ripple` |
-| CLI | every action | `nle delete --at 3 --ripple` |
+| CLI | every action | `nile delete --at 3 --ripple` |
 
 Edits made in either front-end share undo history, the playhead, and the yank
 register. Commands that need processes (`:export`, `:detect`, `:edl-import`,

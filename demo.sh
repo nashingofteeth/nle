@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# nle demo — generates colorful sample media (mixed fps/resolution!) and
+# nile demo — generates colorful sample media (mixed fps/resolution!) and
 # builds a demo project end to end. Run from anywhere: it sandboxes itself.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-N=$(readlink -f ./target/release/nle)
+N=$(readlink -f ./target/release/nile)
 DIR=demo-sandbox
 mkdir -p "$DIR"
 cd "$DIR"
@@ -338,12 +338,12 @@ for t in 1 4.5 6 9; do
 done
 rm -f pixel.raw
 if output_has "at 2.5 s" "$N" --project agent.json show; then
-  echo "  ✓ shared playhead stored (nle seek → nle show)"
+  echo "  ✓ shared playhead stored (nile seek → nile show)"
 else
   echo "  ✗ playhead not stored"; exit 1
 fi
 if [ -f agent.clipboard.json ]; then
-  echo "  ✓ shared register written (nle yank → nle paste)"
+  echo "  ✓ shared register written (nile yank → nile paste)"
 else
   echo "  ✗ no register sidecar"; exit 1
 fi
@@ -395,7 +395,7 @@ fi
 
 echo "== live hand-off playground =="
 # A small project for the shell↔TUI experiment: open the TUI on it in one
-# terminal, run nle commands in another. Each write is adopted within a tick
+# terminal, run nile commands in another. Each write is adopted within a tick
 # ("adopted changes from the shell") — no keypress needed.
 rm -f live.json live.history.json live.clipboard.json
 $N --project live.json init --force >/dev/null
@@ -404,11 +404,11 @@ $N --project live.json add red.mp4  --in 0 --out 3 >/dev/null    # red 0–3
 $N --project live.json add blue.mp4 --at 4 --in 0 --out 3 >/dev/null  # gap 3–4, blue 4–7
 $N --project live.json seek 1.5 >/dev/null
 $N --project live.json show
-echo "  → in one terminal:  ./target/release/nle --project demo-sandbox/live.json edit"
-echo "    in another:       ./target/release/nle --project demo-sandbox/live.json split --at 5"
+echo "  → in one terminal:  ./target/release/nile --project demo-sandbox/live.json edit"
+echo "    in another:       ./target/release/nile --project demo-sandbox/live.json split --at 5"
 
 echo "== robustness: a closed or unwritable stdout must not panic =="
-# Rust ignores SIGPIPE, so a plain println! panics on `nle … | head` — and a
+# Rust ignores SIGPIPE, so a plain println! panics on `nile … | head` — and a
 # full disk made every command crash. Both must exit cleanly.
 if $N --project live.json media ls > /dev/full 2>/dev/null; then
   echo "  ✓ failed stdout write exits cleanly (no panic)"
@@ -433,4 +433,4 @@ fi
 rm -f "$LOG" log-check.json
 
 echo
-echo "Play with it:  cd demo-sandbox && ../target/release/nle show"
+echo "Play with it:  cd demo-sandbox && ../target/release/nile show"

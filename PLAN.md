@@ -1,6 +1,6 @@
 # nile — plan of record
 
-Project name: **nile**; installed command: **nle**. Status: **M5 shipped;
+Project and command: **nile**. Status: **M5 shipped;
 post-M5 polish shipped; M6 next.** This file is the design/roadmap; the README
 is the user-facing how-to. Keep it in sync as milestones land.
 
@@ -15,7 +15,7 @@ project with its history.
 
 ## Vision
 
-A terminal-native video editor: **TUI dashboard + mpv monitor window, vim
+A terminal-native NLE: **TUI dashboard + mpv monitor window, vim
 keybinds, FFmpeg underneath.** A general-purpose NLE built to be **high
 performance with low system requirements**: the Rust process stays small and
 responsive (8 GB RAM and 8 threads are plenty) while decode/encode is
@@ -29,7 +29,7 @@ suffice).
 ## Architecture
 
 ```
-nle (process)                       mpv window (child)
+nile (process)                       mpv window (child)
 ├── engine lib (EDL, undo, cache)   ├── hw decode (VAAPI)
 ├── TUI (ratatui) ◄─ JSON IPC ─►    ├── edl:// instant preview
 └── spawns ffmpeg (export/preview)  └── observed time-pos → playhead
@@ -37,7 +37,7 @@ nle (process)                       mpv window (child)
 
 | Piece | Decision |
 |---|---|
-| Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nile` package (binary `nle` + TUI + mpv IPC) |
+| Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nile` package (binary `nile` + TUI + mpv IPC) |
 | Project file | `nle.json` (v9) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
@@ -76,11 +76,11 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **M0** | Workspace, `probe`/`trim` (cpu/vaapi/qsv/copy), frame-accuracy (PSNR) | ✅ `2d854b3` |
 | **M1** | EDL model, project file, media pool, timeline ops, graph compiler v0, export by content | ✅ `e30d1b4` |
 | **—** | `demo.sh` playground + clippy cleanup | ✅ `100acdc`, `dac81c4` |
-| **M2** | TUI + mpv monitor + vim nav + instant preview + `r` + `:cmd` + `nle edl` | ✅ `344291a` |
+| **M2** | TUI + mpv monitor + vim nav + instant preview + `r` + `:cmd` + `nile edl` | ✅ `344291a` |
 | **M3** | Editing for real | ✅ done |
 | **M4** | Multi-track + separate audio tracks | ✅ done |
 | **M5** | Transitions (`xfade`/`acrossfade`) + per-clip effects + proxy cache | ✅ done |
-| **M6** | Export scheduler (3 lanes), segment-parallel, `nle bench`, presets, resume+cache | pending |
+| **M6** | Export scheduler (3 lanes), segment-parallel, `nile bench`, presets, resume+cache | pending |
 | **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
 ### M3 — shipped (beyond the original scope)
@@ -116,8 +116,8 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
   highlighted; `t`/`T` cycle and `<N>t` jumps (digits stay vim counts);
   navigation, edits, and the monitor (active-track EDL) all follow the
   active track; `:track add video|audio · mute [N] · rm N`.
-- **CLI:** `nle track ls|add|mute|rm`, `nle add --track N`,
-  `nle edl --track N`.
+- **CLI:** `nile track ls|add|mute|rm`, `nile add --track N`,
+  `nile edl --track N`.
 - **Verified:** 183 tests, clippy clean, `./demo.sh` multi-track pixel +
   audio checks.
 
@@ -138,7 +138,7 @@ monitor — landed in M5 as a proxy span.)
   audio events whose reel + source match a video event are skipped as
   **linked** (the clip already carries that audio); source TC → file time
   via `--src-offset`.
-- **CLI:** `nle import-edl FILE --media DIR [--fps] [--src-offset]
+- **CLI:** `nile import-edl FILE --media DIR [--fps] [--src-offset]
   [--map REEL=PATH]` — probes the directory, resolves reels/clip names
   (exact file/stem, then a unique substring), infers fps/size from the first
   event's asset, and refuses to clobber an existing project without
@@ -155,7 +155,7 @@ below.)
 - **OTIO import** (`nle-core/src/otio.rs`): reads a `Timeline`/`Stack`/
   `Track`/`Clip`/`Gap` document from `serde_json::Value`, dispatching on the
   schema *name* (the part before the `.`) — tags are versioned (`Clip.1`,
-  `Clip.2`), so a tagged enum would break on a version bump. `nle import-otio
+  `Clip.2`), so a tagged enum would break on a version bump. `nile import-otio
   FILE [--media DIR] [--fps] [--remap OLD=NEW]` resolves each clip's
   `ExternalReference.target_url`, probes it into the pool, and builds a
   multi-track timeline. Transitions/nesting are **warned**, never silently
@@ -172,10 +172,10 @@ below.)
   seconds and slowly drifted speed clips).
 - **Editing:** timeline↔source deltas scale by speed (`source_span`, or
   `Clip::source_at`/`timeline_offset_of`); a speed change **always ripples**
-  (`set_speed` / `:speed` / `nle speed`, and the `R` key) and lands the new
+  (`set_speed` / `:speed` / `nile speed`, and the `R` key) and lands the new
   duration on the frame grid, storing the rate that fits (`source / duration`)
   with the source span untouched.
-- **Repair:** `nle purge-stumps [--track N]` / `:purge` drops sub-frame stumps
+- **Repair:** `nile purge-stumps [--track N]` / `:purge` drops sub-frame stumps
   and snaps a drifted timeline back onto the frame grid (cumulative snap, so
   cuts stay within half a frame).
 - **Export:** `setpts=(PTS-STARTPTS)/speed`, `atempo` (chained outside its
@@ -194,7 +194,7 @@ below.)
 - **Reconstruct** (`nle-core/src/detect.rs`): raw cuts/blacks → exact,
   frame-snapped `Span`s (media/gap); adjacent gaps coalesce; sub-`min_shot`
   media folds into a neighbour. Pure, no ids.
-- **CLI:** `nle detect-edits FILE [--list --threshold --min-shot
+- **CLI:** `nile detect-edits FILE [--list --threshold --min-shot
   --black-min --no-gaps --fps --video-only --force]` — a video track plus a
   matching split audio track, written with `save_and_reset_history`.
   `--append [--track N]` adds the shots to an existing project at the
@@ -218,34 +218,34 @@ below.)
   (high-frequency actions only), the TUI `:cmd` line (**every** action), and
   CLI subcommands (every action).
 - **One grammar:** `Action::parse` is the `:cmd` syntax and mirrors the CLI
-  flags (`:delete --at 3 --ripple` ≡ `nle delete --at 3 --ripple`), with
+  flags (`:delete --at 3 --ripple` ≡ `nile delete --at 3 --ripple`), with
   `--at`/`--track`/`--clip` defaulting to the playhead / active track /
   clip-under in the TUI. `to_action` is the single CLI `Cmd`→`Action`
   mapping. Coverage tests walk `Action::slot`/`SLOTS` and fail if either
   spelling misses a variant — parity is enforced, not promised.
 - **Shared session state:** the undo sidecar persists **both** stacks
-  (`HISTORY_VERSION` 9), so `nle undo`/`nle redo` work across processes and
+  (`HISTORY_VERSION` 9), so `nile undo`/`nile redo` work across processes and
   on TUI-made edits; the yank register (`nle.clipboard.json`) is shared —
-  `nle yank` ↔ `yy`, `nle paste` ↔ `p`.
-- **New CLI surface:** `nle trim-in|trim-out|split|gap|delete|yank|paste|
+  `nile yank` ↔ `yy`, `nile paste` ↔ `p`.
+- **New CLI surface:** `nile trim-in|trim-out|split|gap|delete|yank|paste|
   extend|undo|redo`, `remove --ripple`, `--at`/`--clip`/`--seg` addressing,
-  and `nle show` segment indices.
+  and `nile show` segment indices.
 - **IO commands in both:** `:export`/`:detect`/`:edl-import`/`:otio-import`/
   `:add` run in a worker thread (mpsc polled by the event loop) so the
   monitor keeps playing; the printing `cmd_*` functions became `*_work`
   functions returning a `CommandReport` (warnings + summary).
 - **Extend routing moved to `nle-core::extend`** (`resolve_armed`,
-  `armed_edge`, `plan_commit`, `commit_batch`): the shell's `nle extend
+  `armed_edge`, `plan_commit`, `commit_batch`): the shell's `nile extend
   --edge in|out --to T` commits under the same rules as the TUI's `e`/`E`.
 - **Verified:** 284 tests, clippy clean, `./demo.sh` agent chain (split →
   `delete --clip` → `undo` → `gap` → `yank` → `paste` → `export`) with pixel
   checks and a register check.
 
-- **The stored playhead** (`PROJECT_VERSION` 5): `nle seek T` / `:seek T` move
+- **The stored playhead** (`PROJECT_VERSION` 5): `nile seek T` / `:seek T` move
   a shared cursor — snapped to the frame grid, clamped into the timeline; the
   TUI opens there, re-saves its position after every edit, and flushes it
   ~1 s after the transport stops (plus on quit); a reload adopts the file's
-  value. `nle show` reports `at N s`. Session state, not a catalog action (no
+  value. `nile show` reports `at N s`. Session state, not a catalog action (no
   history entry; `--at` stays explicit).
 - **Shared-session concurrency:** the TUI adopts shell writes within a tick
   (project, history, register, playhead) and never writes over an unseen
@@ -263,7 +263,7 @@ below.)
   (`crates/nle-cli/tests/behaviour.rs`, `tests/hostile.rs`) and run under
   `cargo test`.
 
-**Deferred:** `nle paste --from-clip` (the register covers it); TUI `:probe`.
+**Deferred:** `nile paste --from-clip` (the register covers it); TUI `:probe`.
 
 ## M5 — transitions, effects, proxy cache (shipped)
 
@@ -298,17 +298,17 @@ below.)
   the export's own composite (video `overlay`ed, audio `amix`ed) over that
   span, cached, and widened to contain any transition whole (a partial
   crossfade isn't expressible). Elsewhere the monitor stays on raw sources:
-  with opaque clips, fall-through *is* `overlay`. Bare `nle edl` prints the
+  with opaque clips, fall-through *is* `overlay`. Bare `nile edl` prints the
   composite the monitor plays; `--track N` still previews one track.
 - **Cache pruning:** the cache only grows (every trim, retime, or effect mints
-  a new hash), so `nle cache prune [--days N] [--dry-run]` / `:cache prune`
+  a new hash), so `nile cache prune [--days N] [--dry-run]` / `:cache prune`
   deletes entries older than N days (default 30), by mtime — which is the
   render time, since a hit does not touch it. Explicit: nothing sweeps on open
   or on a timer; a pruned proxy simply re-renders. Only `<hash>.mp4` (and a
   crashed render's temp) is a candidate, so `nle/black/` is never touched.
 - **Verified:** unit tests + real ffmpeg runs — a dissolve reads a ≈50%
   blend, `eq` desaturates at `saturation: 0` and darkens with `brightness`,
-  and `nle edl` renders and references the proxies.
+  and `nile edl` renders and references the proxies.
 
 **Deferred:** thumbnails / waveforms; OTIO transitions; direct `i`/`o`
 trimming of a transition's own span (retime it with `x`/`X`,
@@ -319,7 +319,7 @@ trimming of a transition's own span (retime it with `x`/`X`,
 - **Presets:** `preview` (VAAPI, near-instant), `balanced` (libx264),
   `max` (libx265 / SVT-AV1, archival).
 - **Scheduler:** three encode lanes; segment-parallel export.
-- **Bench:** `nle bench` for repeatable timing runs.
+- **Bench:** `nile bench` for repeatable timing runs.
 - **Resume/cache:** restart an interrupted export from completed segments.
 
 ## Open / deferred

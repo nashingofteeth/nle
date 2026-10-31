@@ -399,7 +399,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
                 }
             }
             app.set_message(&outcome.desc);
-            // The register is shared with the CLI (`nle yank`/`nle paste`).
+            // The register is shared with the CLI (`nile yank`/`nile paste`).
             if save_register(&app.path, app.register.as_ref()).is_ok() {
                 app.note_register();
             }
@@ -421,7 +421,7 @@ pub(crate) fn run_action(app: &mut App, player: &dyn Mpv, action: &Action) -> bo
 /// whichever view is showing: the pool's raw file when the pool is open, or
 /// the timeline EDL (with the playhead baked into the load) otherwise.
 pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
-    // The stored playhead follows the session — it is what `nle seek`
+    // The stored playhead follows the session — it is what `nile seek`
     // reads and where the next TUI session opens.
     match persist_playhead(app) {
         Ok(true) => {}

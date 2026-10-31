@@ -1,4 +1,4 @@
-//! `nle detect-edits`: probe a rendered file for its cuts and rebuild the
+//! `nile detect-edits`: probe a rendered file for its cuts and rebuild the
 //! timeline from the spans.
 
 use std::path::Path;

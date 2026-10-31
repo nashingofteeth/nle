@@ -10,7 +10,7 @@ use crate::timeline::{Clip, Effect, Segment, TrackKind, TransitionSource};
 use super::util::{track_at, video_track_index};
 use super::{Batch, EditError, EditOp};
 
-/// Change a clip's playback speed. nle's timeline is a sequence, so a new
+/// Change a clip's playback speed. nile's timeline is a sequence, so a new
 /// duration reflows every follower — **a speed change always ripples**. The
 /// source range is untouched; only the timeline span changes.
 /// A transition beside a clip whose side carries part of that clip's

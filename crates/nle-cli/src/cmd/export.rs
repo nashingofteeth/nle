@@ -1,4 +1,4 @@
-//! `nle export`: compile the timeline to a filter graph and run ffmpeg.
+//! `nile export`: compile the timeline to a filter graph and run ffmpeg.
 
 use std::path::Path;
 

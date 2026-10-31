@@ -610,7 +610,7 @@ pub const EXTEND_PREVIEW_SECS: i64 = 3600;
 
 /// Build the full `edl://` URL for track `ti`, generating the black gap
 /// file if the timeline has gaps. A single track is the debugging view
-/// (`nle edl --track N`); the monitor — and bare `nle edl` — plays the
+/// (`nile edl --track N`); the monitor — and bare `nile edl` — plays the
 /// composite (see `build_composite_edl`).
 pub fn build_edl(project: &Project, ti: usize) -> Result<String, PreviewError> {
     edl_from_segments(project, &segments(project, ti)?)
@@ -651,7 +651,7 @@ pub fn black_cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
-    base.join("nle").join("black")
+    base.join("nile").join("black")
 }
 
 /// Ensure a silent black clip of `BLACK_FILE_SECS` exists for this

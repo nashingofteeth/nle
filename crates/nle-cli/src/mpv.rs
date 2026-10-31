@@ -20,7 +20,7 @@ use thiserror::Error;
 pub enum MpvError {
     #[error("could not start mpv: {0}")]
     Spawn(#[from] std::io::Error),
-    #[error("mpv's IPC socket never appeared at {0} — is another nle running?")]
+    #[error("mpv's IPC socket never appeared at {0} — is another nile running?")]
     SocketTimeout(PathBuf),
     #[error("mpv IPC failed: {0}")]
     Ipc(String),

@@ -1,4 +1,4 @@
-//! `nle import`, `nle import-edl` and `nle import-otio`: probe media into
+//! `nile import`, `nile import-edl` and `nile import-otio`: probe media into
 //! the pool and rebuild a timeline from an EDL or an OTIO document.
 
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
             say!("· {} already imported (asset #{})", file.display(), a.id);
             continue;
         }
-        // Recorded: `nle undo` removes the asset again.
+        // Recorded: `nile undo` removes the asset again.
         let (id, _) = doc.add_asset(canonical, report, playhead);
         added += 1;
         let asset = doc.asset(id).context("asset vanished")?;

@@ -734,7 +734,7 @@ fn removing_a_transition_gives_the_frames_back() {
     s.assert_px("t.mp4", 3.0, GREEN, "green's head is restored");
     s.assert_px("t.mp4", 5.0, BLUE, "blue is untouched");
 
-    // The same by segment index (`nle show` prints [1] for the transition).
+    // The same by segment index (`nile show` prints [1] for the transition).
     s.base();
     s.ok(&["transition", "--at", "2", "--frames", "15"]);
     s.ok(&["delete", "--seg", "1"]);
@@ -1151,7 +1151,7 @@ fn cli_only_guards() {
     );
 }
 
-// `nle cache prune` is the only thing that deletes proxy renders: age-based
+// `nile cache prune` is the only thing that deletes proxy renders: age-based
 // on the file's mtime, and never implicit.
 #[test]
 fn cache_prune_is_explicit_and_age_based() {
@@ -1159,7 +1159,7 @@ fn cache_prune_is_explicit_and_age_based() {
 
     let s = Sandbox::new();
     s.base();
-    let dir = s.cache_dir().join("nle").join("proxy");
+    let dir = s.cache_dir().join("nile").join("proxy");
     fs::create_dir_all(&dir).unwrap();
     let now = SystemTime::now();
     let write = |name: &str, len: usize, age: Duration| {

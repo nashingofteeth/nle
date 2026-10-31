@@ -734,7 +734,7 @@ fn explain_old_ffmpeg(e: FfmpegError) -> FfmpegError {
             FfmpegError::Failed {
                 status,
                 tail: format!(
-                    "{tail}\nnote: nle needs ffmpeg 9 or newer \
+                    "{tail}\nnote: nile needs ffmpeg 9 or newer \
                      (the filter graph is passed with -/filter_complex)"
                 ),
             }

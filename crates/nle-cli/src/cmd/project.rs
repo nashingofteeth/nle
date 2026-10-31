@@ -58,14 +58,14 @@ pub(crate) fn cmd_edit(
         bail!("timeline is empty — add clips first (the monitor needs content)");
     }
     let media_title = format!(
-        "nle — {}",
+        "nile — {}",
         project_path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| project_path.display().to_string())
     );
     let player = mpv::MpvPlayer::spawn(
-        &format!("nle monitor — {}", project_path.display()),
+        &format!("nile monitor — {}", project_path.display()),
         &media_title,
     )?;
     player.observe()?;
@@ -176,7 +176,7 @@ pub(crate) fn cmd_add(
 }
 
 /// Probe `file` into the pool if it is new, validate the source range,
-/// and stage the clip to insert — shared by `nle add` and the TUI's
+/// and stage the clip to insert — shared by `nile add` and the TUI's
 /// `:add`. Returns the clip and whether the pool was written (a recorded
 /// pool addition, so it is undoable). The first clip defines the sequence
 /// settings, like a real NLE.
@@ -275,7 +275,7 @@ pub(crate) fn cmd_show(project_path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `nle seek [TIME]` — move the stored playhead (snapped to the frame grid,
+/// `nile seek [TIME]` — move the stored playhead (snapped to the frame grid,
 /// clamped into the timeline) or print it. The TUI opens where it lands.
 pub(crate) fn cmd_seek(project_path: &Path, at: Option<&str>) -> Result<()> {
     let mut project = Project::load(project_path)?;
@@ -299,12 +299,12 @@ pub(crate) fn cmd_seek(project_path: &Path, at: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `nle media ls` — the pool listing. (`nle media rm` is a catalog
+/// `nile media ls` — the pool listing. (`nile media rm` is a catalog
 /// action; `main` routes it there, undoably.)
 pub(crate) fn cmd_media_ls(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
     if project.media.is_empty() {
-        say!("media pool is empty — `nle import <file>`");
+        say!("media pool is empty — `nile import <file>`");
         return Ok(());
     }
     say!(
@@ -324,7 +324,7 @@ pub(crate) fn cmd_media_ls(project_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `nle track ls` — the track listing. (add/mute/rm are catalog actions.)
+/// `nile track ls` — the track listing. (add/mute/rm are catalog actions.)
 pub(crate) fn cmd_track_ls(project_path: &Path) -> Result<()> {
     let project = Project::load(project_path)?;
     say!(
@@ -364,7 +364,7 @@ pub(crate) fn cmd_cache(action: &CacheCmd) -> Result<()> {
     }
 }
 
-/// The human timeline report behind `nle show` (and the TUI's `:show`):
+/// The human timeline report behind `nile show` (and the TUI's `:show`):
 /// a summary line, then one line per segment (`[i]` is the segment index
 /// `--seg` addresses). A trailing newline.
 pub(crate) fn show_report(project: &Project) -> String {

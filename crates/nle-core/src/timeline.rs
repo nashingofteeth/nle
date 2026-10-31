@@ -74,7 +74,7 @@ pub enum Effect {
 }
 
 impl Effect {
-    /// The short name used by notices, `nle show`, and the effects panel.
+    /// The short name used by notices, `nile show`, and the effects panel.
     pub fn kind(&self) -> &'static str {
         match self {
             Effect::Crop { .. } => "crop",

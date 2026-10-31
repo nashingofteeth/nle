@@ -272,7 +272,7 @@ pub fn build(
                 }
                 let src_in = frames_of(ev.src_in, doc, fps) - src_offset_frames;
                 let src_out = frames_of(ev.src_out, doc, fps) - src_offset_frames;
-                // nle's timeline span for a clip is source / speed, and the
+                // nile's timeline span for a clip is source / speed, and the
                 // record span is the timeline span the original edit used —
                 // so their ratio IS the speed. Equal spans reduce to 1.
                 // (A black event's record span is the gap's length; parse

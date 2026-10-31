@@ -108,7 +108,7 @@ impl std::fmt::Display for ParseError {
 
 /// One command line: its verb, `--flag` options, and bare positional
 /// words (`:speed 50`, `:track mute 2`). The grammar mirrors the CLI
-/// flags — an agent that knows `nle delete --at 3 --ripple` knows
+/// flags — an agent that knows `nile delete --at 3 --ripple` knows
 /// `:delete --at 3 --ripple`. Public so the front-ends' own (non-edit)
 /// commands tokenize the same way.
 pub struct Flags {
@@ -238,7 +238,7 @@ fn parse_target(f: &mut Flags, d: &ParseDefaults, usage: &str) -> Result<Target,
     )))
 }
 
-/// `--track N` (1-based, matching `nle track ls` and the v1/a1 labels),
+/// `--track N` (1-based, matching `nile track ls` and the v1/a1 labels),
 /// defaulting to the front-end's active track.
 fn parse_track(f: &mut Flags, d: &ParseDefaults) -> Result<usize, ParseError> {
     match opt_usize(f, "track")? {
@@ -256,7 +256,7 @@ fn zero_based(n: usize, what: &str) -> Result<usize, ParseError> {
     }
 }
 
-/// The `:effect` / `nle effect` usage string — one spelling for both
+/// The `:effect` / `nile effect` usage string — one spelling for both
 /// front-ends.
 pub const EFFECT_USAGE: &str = ":effect [--clip N] [--track N] [--index N] \
      crop --left P --right P --top P --bottom P (%: 0 = edge, 100 = opposite) | \

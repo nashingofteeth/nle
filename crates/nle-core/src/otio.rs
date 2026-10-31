@@ -46,7 +46,7 @@ pub enum OtioError {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OtioTrack {
     pub kind: TrackKind,
-    /// `enabled: false` in OTIO becomes a muted nle track.
+    /// `enabled: false` in OTIO becomes a muted nile track.
     pub muted: bool,
     pub items: Vec<OtioItem>,
 }

@@ -71,7 +71,7 @@ fn the_command_line_runs_catalog_actions() {
     );
 }
 
-// A yank writes the register the CLI reads (`nle paste`), so a shell
+// A yank writes the register the CLI reads (`nile paste`), so a shell
 // and the TUI can hand segments back and forth.
 #[test]
 fn a_yank_writes_the_shared_register_file() {

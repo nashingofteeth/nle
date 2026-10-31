@@ -204,7 +204,7 @@ pub struct App {
     /// Pending two-key sequence.
     pub pending: Pending,
     /// Yanked segment, for `p`/`P` — the shared register (`nle.clipboard.json`),
-    /// so `nle yank` and `yy` fill the same slot. Carries the clip's asset
+    /// so `nile yank` and `yy` fill the same slot. Carries the clip's asset
     /// path, so a register from a rebuilt project resolves (or refuses)
     /// instead of pasting the wrong media.
     pub register: Option<nle_core::Register>,
@@ -555,7 +555,7 @@ impl Mpv for NullMpv {
 }
 
 /// Render the TUI once at `size` and return a text dump: the project path and
-/// model state (as `nle show` prints it), then the grid with a column ruler.
+/// model state (as `nile show` prints it), then the grid with a column ruler.
 /// Feed `keys` first (`\n` = Enter, `\e` = Esc) to reach a state.
 ///
 /// The keys run through the real handlers, which save the project, the undo
@@ -657,9 +657,9 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
     let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
     let mut app = App::new(project, path);
     app.project.set_history(history);
-    // The shared register: what `nle yank` (or an earlier session) left.
+    // The shared register: what `nile yank` (or an earlier session) left.
     app.register = load_register(&app.path);
-    // Open where `nle seek` (or the last session) left the playhead.
+    // Open where `nile seek` (or the last session) left the playhead.
     app.playhead = secs(&app.project.playhead);
     // Build the monitor off-thread before the first frame: a cold proxy can
     // take seconds and the status row will show it.
@@ -674,8 +674,8 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         let st = player.state();
         app.sync(&st);
 
-        // A shell may have written the shared files (`nle split`,
-        // `nle seek`, `nle yank`) — adopt it before anything of our own,
+        // A shell may have written the shared files (`nile split`,
+        // `nile seek`, `nile yank`) — adopt it before anything of our own,
         // so the next save can't clobber it. Modes hold indices into the
         // current state, so the reload waits for Normal.
         if watch_foreign(&mut app) {
@@ -699,7 +699,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
         poll_preview(&mut app, &player);
 
         // The stored playhead follows the transport: after a moment of
-        // stillness, write where the cursor landed (`nle seek` reads it).
+        // stillness, write where the cursor landed (`nile seek` reads it).
         // Diffing here catches every mover — keys, mpv playback, undo —
         // without instrumenting each handler.
         if playhead_moved(&app) {
@@ -726,7 +726,7 @@ pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result
                         .unwrap_or_else(|| "clip".to_string())
                 })
                 .unwrap_or_else(|| "gap".to_string());
-            let title = format!("{current} — nle");
+            let title = format!("{current} — nile");
             if last_media_title.as_deref() != Some(title.as_str()) {
                 player.set_media_title(&title);
                 last_media_title = Some(title);
@@ -776,7 +776,7 @@ fn playhead_moved(app: &App) -> bool {
 }
 
 /// Write the session playhead into the project and save it — the stored
-/// cursor `nle seek` reads. Called after edits, by `:seek`, and by the
+/// cursor `nile seek` reads. Called after edits, by `:seek`, and by the
 /// transport's idle flush.
 ///
 /// `Ok(true)` = written; `Ok(false)` = a shell got there first, so nothing
@@ -810,7 +810,7 @@ fn watch_foreign(app: &mut App) -> bool {
 
 /// Reload the project (and its undo history) from disk and rebuild the
 /// preview. A **user** reload (`R`) keeps the live playhead; adopting a
-/// foreign write (`nle seek`, an edit in another window) also adopts that
+/// foreign write (`nile seek`, an edit in another window) also adopts that
 /// file's playhead.
 fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
@@ -822,7 +822,7 @@ fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> any
     // The register is shared too: a shell may have yanked since we read it.
     app.register = load_register(&app.path);
     if adopt_playhead {
-        // A shell may have moved it (`nle seek`); adopt that cursor.
+        // A shell may have moved it (`nile seek`); adopt that cursor.
         app.playhead = secs(&app.project.playhead);
     } else {
         // A manual reload keeps the cursor; just clamp it into the new

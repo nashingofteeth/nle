@@ -8,7 +8,7 @@ use nle_core::{Armed, Project};
 
 // The transport flush: a move is detected in frames (the two float
 // paths can differ in the last ulp, which must not retrigger it), and
-// flushing writes the cursor `nle seek` reads.
+// flushing writes the cursor `nile seek` reads.
 #[test]
 fn transport_moves_flush_the_stored_playhead() {
     let path = temp_project_path("transport-flush");
@@ -43,7 +43,7 @@ fn transport_moves_flush_the_stored_playhead() {
     let _ = std::fs::remove_file(nle_core::register_path(&path));
 }
 
-// A shell write (`nle seek`, `nle yank`, an edit) is adopted within a
+// A shell write (`nile seek`, `nile yank`, an edit) is adopted within a
 // tick instead of being clobbered by our next save.
 #[test]
 fn a_foreign_write_is_seen_and_adopted() {

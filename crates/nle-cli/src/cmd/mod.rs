@@ -32,7 +32,7 @@ pub(crate) fn cli_time(s: &str) -> Result<f64, String> {
         .map_err(|e| format!("invalid time {s:?} ({e})"))
 }
 
-/// A 1-based CLI index (`--track N`, `nle track rm N`) → 0-based model
+/// A 1-based CLI index (`--track N`, `nile track rm N`) → 0-based model
 /// index. Track numbers are 1-based everywhere, matching `v1`/`a1`.
 pub(crate) fn cli_index(n: usize, what: &str) -> Result<usize, String> {
     if n >= 1 {
@@ -71,7 +71,7 @@ pub(crate) fn cli_edge(s: &str) -> Result<Edge, String> {
 /// command can't exist without its action. `None` means "not an action"
 /// (probe, export, imports, queries); `Some(Err)` is an argument problem.
 ///
-/// `nle add` is the one exception: it is a pool write + paste in one
+/// `nile add` is the one exception: it is a pool write + paste in one
 /// step, so it builds its `Paste` action after probing.
 pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
     match cmd {
@@ -308,7 +308,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
 
 /// Run one catalog action against the project file: load, apply through
 /// the undo history, persist project + sidecar + register. A CLI edit is
-/// undoable (`nle undo`) exactly like a TUI edit — same executor, same
+/// undoable (`nile undo`) exactly like a TUI edit — same executor, same
 /// history.
 pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()> {
     let project = Project::load(project_path)?;

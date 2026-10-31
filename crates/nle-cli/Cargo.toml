@@ -5,9 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "a terminal-native NLE"
 
-# The project is nile; the command stays `nle` for now.
+# The project and command are both `nile`.
 [[bin]]
-name = "nle"
+name = "nile"
 path = "src/main.rs"
 
 [features]

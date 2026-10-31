@@ -28,7 +28,7 @@ pub const PROJECT_VERSION: u32 = 9;
 pub enum ProjectError {
     #[error("project file {0:?} already exists (use --force to overwrite)")]
     Exists(PathBuf),
-    #[error("no project at {0:?} — run `nle init` first")]
+    #[error("no project at {0:?} — run `nile init` first")]
     NotFound(PathBuf),
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -115,7 +115,7 @@ pub struct Project {
     pub media: Vec<Asset>,
     #[serde(default)]
     pub timeline: Timeline,
-    /// The shared playhead (`nle seek`, the TUI's position) — stored so a
+    /// The shared playhead (`nile seek`, the TUI's position) — stored so a
     /// shell and the TUI can hand the cursor back and forth. Session
     /// state, not edit state: no edit op reads it (they take `--at`).
     #[serde(default, with = "rational_ser")]

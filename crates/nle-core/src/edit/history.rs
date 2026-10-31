@@ -211,7 +211,7 @@ impl History {
     }
 
     /// Serializable snapshot of the undo stacks (persisted in a sidecar
-    /// file). Both stacks are stored: `nle redo` runs in its own process,
+    /// file). Both stacks are stored: `nile redo` runs in its own process,
     /// so a session-only redo stack would make it permanently empty.
     pub fn state(&self) -> HistoryState {
         HistoryState {
@@ -276,7 +276,7 @@ impl History {
 }
 
 /// Serializable snapshot of the undo stacks (the sidecar file). Both
-/// stacks persist so `nle undo` / `nle redo` work across processes.
+/// stacks persist so `nile undo` / `nile redo` work across processes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryState {
     pub version: u32,

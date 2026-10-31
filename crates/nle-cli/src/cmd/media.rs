@@ -1,4 +1,4 @@
-//! `nle probe` and `nle trim`: the two commands that only look at (or cut)
+//! `nile probe` and `nile trim`: the two commands that only look at (or cut)
 //! one file, with no project involved.
 
 use std::path::Path;

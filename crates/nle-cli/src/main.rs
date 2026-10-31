@@ -1,4 +1,4 @@
-//! nle — terminal-native video editor.
+//! nile — a terminal-native NLE.
 //!
 //! M2 status: interactive editor — TUI dashboard, mpv monitor, vim keys,
 //! instant EDL preview. Project file, media pool, timeline, and export
@@ -22,7 +22,7 @@ mod tui;
 // precedes the `mod` declaration.
 mod cmd;
 
-/// Print a line, tolerating a closed consumer (`nle show | head`). Rust
+/// Print a line, tolerating a closed consumer (`nile show | head`). Rust
 /// ignores `SIGPIPE`, so `say!` *panics* on the broken pipe; a Unix
 /// tool should just stop talking. Same syntax as `say!` — all CLI
 /// output goes through here. (A genuine write failure, e.g. a full disk,
@@ -57,9 +57,9 @@ use nle_ffmpeg::RawProbe;
 
 #[derive(Parser)]
 #[command(
-    name = "nle",
+    name = "nile",
     version,
-    about = "Terminal-native video editor",
+    about = "a terminal-native NLE",
     // `--to -1.5` is a real thing (an edge reaching back past time 0), and
     // for the rest a negative is our own clear error, not clap's
     // "unexpected argument '-1'".
@@ -110,7 +110,7 @@ enum Cmd {
         #[arg(long = "out", value_name = "TIME", allow_negative_numbers = true)]
         out_point: Option<String>,
     },
-    /// Remove a clip by id (see `nle show`); `--ripple` closes the gap
+    /// Remove a clip by id (see `nile show`); `--ripple` closes the gap
     Remove {
         /// Clip id
         id: u32,
@@ -120,7 +120,7 @@ enum Cmd {
     },
     /// Change a clip's playback speed (the track ripples to fit)
     Speed {
-        /// Clip id (from `nle show`)
+        /// Clip id (from `nile show`)
         id: u32,
         /// New speed in percent: 100 = normal, 50 = half, 200 = double
         #[arg(allow_negative_numbers = true)]
@@ -189,7 +189,7 @@ enum Cmd {
         /// Delete this clip by id (finds its track)
         #[arg(long)]
         clip: Option<u32>,
-        /// Delete this segment by index (from `nle show`)
+        /// Delete this segment by index (from `nile show`)
         #[arg(long)]
         seg: Option<usize>,
         /// Track number (1-based; default 1)
@@ -211,7 +211,7 @@ enum Cmd {
         /// Yank this clip by id (finds its track)
         #[arg(long)]
         clip: Option<u32>,
-        /// Yank this segment by index (from `nle show`)
+        /// Yank this segment by index (from `nile show`)
         #[arg(long)]
         seg: Option<usize>,
         /// Track number (1-based; default 1)
@@ -235,7 +235,7 @@ enum Cmd {
         /// The clip whose edge to move (finds its track)
         #[arg(long, required_unless_present_any = ["seg", "at"])]
         clip: Option<u32>,
-        /// The segment whose edge to move (index from `nle show`)
+        /// The segment whose edge to move (index from `nile show`)
         #[arg(long)]
         seg: Option<usize>,
         /// The segment under this position (alternative to --clip/--seg)
@@ -534,7 +534,7 @@ enum MediaCmd {
     Ls,
     /// Remove an unused asset from the pool
     Rm {
-        /// Asset id (from `nle media ls`)
+        /// Asset id (from `nile media ls`)
         id: u32,
     },
 }
@@ -565,7 +565,7 @@ enum TrackCmd {
     },
     /// Toggle a track's mute flag (default: track 1)
     Mute {
-        /// Track index (1-based, from `nle track ls`)
+        /// Track index (1-based, from `nile track ls`)
         index: Option<usize>,
     },
     /// Remove a track by index (1-based), deleting its clips
@@ -972,7 +972,7 @@ mod tests {
         assert!(seen.iter().all(|&s| s), "CLI-unreachable actions: {seen:?}");
     }
 
-    // `nle show` names a clip's effects, in the order the export applies
+    // `nile show` names a clip's effects, in the order the export applies
     // them, so a shell-only session can see what is on a clip.
     #[test]
     fn show_report_names_a_clips_effects() {
@@ -1045,7 +1045,7 @@ mod tests {
         assert!(to_action(&cmd).unwrap().is_err());
     }
 
-    /// A CLI edit records history — `nle undo` undoes it, and the
+    /// A CLI edit records history — `nile undo` undoes it, and the
     /// playhead attribution comes back with the entry.
     /// Gap lengths are validated with our own message (a negative or zero
     /// length used to fall through to "shorter than one frame").
@@ -1150,7 +1150,7 @@ mod tests {
         );
     }
 
-    /// `nle seek` stores a snapped, clamped playhead — the TUI opens there.
+    /// `nile seek` stores a snapped, clamped playhead — the TUI opens there.
     #[test]
     fn seek_stores_a_clamped_playhead() {
         let dir = std::env::temp_dir().join(format!("nle-seek-test-{}", std::process::id()));

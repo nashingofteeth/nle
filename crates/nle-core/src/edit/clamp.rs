@@ -142,7 +142,7 @@ pub fn clamp_to_media(
 ///
 /// Repairs a project that accumulated sub-frame drift (an older lossy undo
 /// `Atom` could do this; fractional boundaries then made `snap` land edits on
-/// the wrong segment). `nle purge-stumps` / `:purge`.
+/// the wrong segment). `nile purge-stumps` / `:purge`.
 pub fn purge_stumps(track: &Track, fps: Seconds) -> (Vec<Segment>, usize) {
     if fps <= Seconds::from_integer(0) {
         return (track.segments.clone(), 0);

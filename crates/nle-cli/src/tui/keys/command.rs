@@ -121,7 +121,7 @@ pub(crate) fn flag_usize(f: &mut action::Flags, name: &str) -> Result<Option<usi
 }
 
 /// `:add FILE [--at T] [--in T --out T] [--track N]` — pool the file and
-/// ripple-insert it (the CLI's `nle add`; here `--at` defaults to the
+/// ripple-insert it (the CLI's `nile add`; here `--at` defaults to the
 /// playhead, like every other command).
 pub(crate) fn add_command(
     app: &mut App,
@@ -190,7 +190,7 @@ pub(crate) fn add_command(
 
 /// `:seek T` — move the playhead (and the monitor) to T. The stored
 /// playhead follows immediately, so a shell and the TUI share one cursor
-/// (`nle seek` reads the same slot).
+/// (`nile seek` reads the same slot).
 pub(crate) fn seek_command(
     app: &mut App,
     player: &dyn Mpv,
@@ -452,7 +452,7 @@ pub(crate) fn command_key(app: &mut App, player: &dyn Mpv, buf: String, key: Key
 /// Run one `:cmd`, returning a notice for the commands that don't set one
 /// themselves (built-ins and queries). Every edit is an [`Action`] — the
 /// same values the keybinds and the CLI build — so the `:cmd` line and
-/// `nle …` can't drift apart.
+/// `nile …` can't drift apart.
 pub(crate) fn run_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<String> {
     match cmd {
         "" => None,

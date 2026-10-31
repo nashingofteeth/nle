@@ -45,7 +45,7 @@ fn sidecar_round_trips_both_stacks() {
         text.contains(&format!("\"version\": {HISTORY_VERSION}")),
         "{text}"
     );
-    // Both stacks persist: `nle redo` runs in its own process, so a
+    // Both stacks persist: `nile redo` runs in its own process, so a
     // session-only redo stack would be permanently empty.
     assert!(text.contains("undone"), "{text}");
     assert!(!text.contains("30/1"), "{text}");

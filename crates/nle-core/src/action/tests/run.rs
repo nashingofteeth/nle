@@ -383,7 +383,7 @@ fn purge_is_undoable() {
 }
 
 /// Clip ids are unique across tracks: a clip-addressed action finds its
-/// own track, so `nle speed ID` needs no `--track` (same as
+/// own track, so `nile speed ID` needs no `--track` (same as
 /// delete/yank/extend).
 #[test]
 fn a_clip_addressed_action_finds_its_own_track() {

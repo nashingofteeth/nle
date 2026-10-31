@@ -1,7 +1,7 @@
 //! Shared fixture for the behaviour tests.
 //!
 //! These are the old shell batteries turned into ordinary `#[test]`s: they
-//! drive the built `nle` binary with real ffmpeg, real exports and real
+//! drive the built `nile` binary with real ffmpeg, real exports and real
 //! pixels, so `cargo test` is the whole verification and there is no second
 //! script to keep in sync.
 //!
@@ -70,7 +70,7 @@ impl Sandbox {
     // ---------------------------------------------------------------- running
 
     fn command(&self, project: &str, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nle"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_nile"));
         cmd.current_dir(self.path())
             .env("XDG_CACHE_HOME", &self.cache)
             .arg("--project")
@@ -84,7 +84,7 @@ impl Sandbox {
     }
 
     pub fn run_on(&self, project: &str, args: &[&str]) -> Output {
-        self.command(project, args).output().expect("spawn nle")
+        self.command(project, args).output().expect("spawn nile")
     }
 
     /// Run, require success, return stdout.
@@ -96,7 +96,7 @@ impl Sandbox {
         let out = self.run_on(project, args);
         assert!(
             out.status.success(),
-            "nle {args:?} should have succeeded:\n{}",
+            "nile {args:?} should have succeeded:\n{}",
             merged(&out)
         );
         String::from_utf8_lossy(&out.stdout).into_owned()
@@ -107,7 +107,7 @@ impl Sandbox {
         let out = self.run(args);
         assert!(
             !out.status.success(),
-            "nle {args:?} should have refused:\n{}",
+            "nile {args:?} should have refused:\n{}",
             merged(&out)
         );
         merged(&out)
@@ -327,7 +327,7 @@ impl Sandbox {
         self.ok(&["show"])
     }
 
-    /// The EDL the monitor plays (the composite), via bare `nle edl`.
+    /// The EDL the monitor plays (the composite), via bare `nile edl`.
     pub fn edl(&self) -> String {
         self.ok(&["edl"])
     }
@@ -409,7 +409,7 @@ impl Sandbox {
     pub fn run_with_stdout(&self, args: &[&str], sink: Stdio) -> std::process::ExitStatus {
         let mut cmd = self.command(P, args);
         cmd.stderr(Stdio::null()).stdout(sink);
-        cmd.status().expect("spawn nle")
+        cmd.status().expect("spawn nile")
     }
 
     /// Spawn, read one line, close the pipe, and return the exit status.
@@ -420,7 +420,7 @@ impl Sandbox {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .expect("spawn nle");
+            .expect("spawn nile");
         {
             let mut lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
             assert!(lines.next().is_some(), "no first line");
@@ -606,18 +606,18 @@ fn gen_a(dir: &Path, name: &str, dur: &str) {
     ]);
 }
 
-/// `nle` on one project, for building the templates (no sandbox yet).
+/// `nile` on one project, for building the templates (no sandbox yet).
 fn cli(dir: &Path, project: &Path, args: &[&str]) {
-    let out = Command::new(env!("CARGO_BIN_EXE_nle"))
+    let out = Command::new(env!("CARGO_BIN_EXE_nile"))
         .current_dir(dir)
         .arg("--project")
         .arg(project)
         .args(args)
         .output()
-        .expect("spawn nle");
+        .expect("spawn nile");
     assert!(
         out.status.success(),
-        "template setup nle {args:?}:\n{}",
+        "template setup nile {args:?}:\n{}",
         merged(&out)
     );
 }

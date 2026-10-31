@@ -6,7 +6,7 @@
 //! everything the render reads, so a change (or a replaced file) re-renders.
 //!
 //! An entry's mtime is when it was rendered (a cache hit does not touch it).
-//! Nothing sweeps on its own: `nle cache prune` / `:cache prune` deletes
+//! Nothing sweeps on its own: `nile cache prune` / `:cache prune` deletes
 //! entries older than a chosen age, explicitly. A pruned proxy simply
 //! re-renders on the next play.
 
@@ -80,7 +80,7 @@ pub fn proxy_cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_else(std::env::temp_dir);
-    base.join("nle").join("proxy")
+    base.join("nile").join("proxy")
 }
 
 /// What one prune pass found.
