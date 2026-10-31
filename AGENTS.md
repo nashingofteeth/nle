@@ -98,8 +98,8 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 ## Model invariants
 
 - **Compatibility: none, by design.** Single-user project; project files are
-  local state, not a distributed format. `nle.json`, `nle.history.json`, and
-  cached artifacts may change shape any time; old files are **rejected with a
+  local state, not a distributed format. `nile.json` and the files under
+  `.nile/<stem>/` may change shape any time; old files are **rejected with a
   clear error** (never silently misread) and the fix is "rebuild it"
   (`./demo.sh`). Bump the format
   version; don't write migration code. The project file is plain JSON with
@@ -150,11 +150,12 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   the next undo refuses ("history entry does not apply"). Both stacks persist.
   Track add/mute/rm are whole-list changes (`Change::Tracks`), verified by
   exact equality.
-- **Shared state on disk.** The playhead is `Project.playhead`; the yank
-  register is `nle.clipboard.json`. Both are convenience — a missing or
-  version-skewed register reads as empty. The TUI adopts foreign changes
-  (project, history, register, playhead) and refuses to clobber
-  (`persist_playhead` → `Ok(false)`).
+- **State lives with the project.** `nile.json` is the project; its
+  `.nile/<stem>/` directory holds `history.json`, `clipboard.json`, and
+  `cache/{proxy,black}`. Legacy adjacent sidecars are copied in once; don't
+  add new scattered state files. The playhead stays in `Project.playhead`.
+  The TUI adopts foreign changes (project, history, register, playhead) and
+  refuses to clobber (`persist_playhead` → `Ok(false)`).
 - **Gaps and the pool.** `Mode::Pool(PoolState)` keeps "pool open" and its
   selection together; tracks are 1-based (0 refused); a shorter track pads
   with a trailing gap in the row and the preview. The pool remembers the
@@ -177,7 +178,7 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
 - **The monitor proxies whatever `edl://` can't express** — effects, non-1×
   retimes, transitions, foreign picture sizes, audible-mix spans — using the
   *export* graph (no second filter chain to drift), cached under
-  `~/.cache/nle/proxy`. See `docs/pitfalls/mpv-ffmpeg.md`.
+  `.nile/<stem>/cache/proxy`. See `docs/pitfalls/mpv-ffmpeg.md`.
 - **Export stays byte-identical for the simple case:** one video track + no
   audio track keeps the classic concat path; otherwise every track is padded
   to the timeline length, video layers `overlay` bottom→top (upper gaps

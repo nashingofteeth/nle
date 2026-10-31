@@ -84,7 +84,7 @@ pub(crate) fn io_command(app: &mut App, player: &dyn Mpv, cmd: &str) -> Option<S
         "show" => Some(show_command(app)),
         "media" => Some(media_ls_command(app)),
         "track" => Some(track_ls_command(app)),
-        "cache" => cache_command(&mut f),
+        "cache" => cache_command(app, &mut f),
         "reload" => {
             app.reload_requested = true;
             None
@@ -213,7 +213,7 @@ pub(crate) fn seek_command(
         Ok(true) => {}
         Ok(false) => {
             app.reload_pending = true;
-            return Some("not saved: nle.json changed on disk — reloading".to_string());
+            return Some("not saved: nile.json changed on disk — reloading".to_string());
         }
         Err(e) => return Some(format!("save failed: {e}")),
     }
@@ -525,7 +525,7 @@ pub(crate) fn track_ls_command(app: &App) -> String {
 
 /// `:cache prune [--days N] [--dry-run]` — delete old proxy renders. Not an
 /// edit: it touches no project state and has no undo.
-pub(crate) fn cache_command(f: &mut action::Flags) -> Option<String> {
+pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> {
     const USAGE: &str = "usage: :cache prune [--days N] [--dry-run]";
     let Some(verb) = f.positional() else {
         return Some(USAGE.to_string());
@@ -544,7 +544,11 @@ pub(crate) fn cache_command(f: &mut action::Flags) -> Option<String> {
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
-    match crate::proxy::prune(Duration::from_secs(days.saturating_mul(86_400)), dry_run) {
+    match crate::proxy::prune(
+        &app.path,
+        Duration::from_secs(days.saturating_mul(86_400)),
+        dry_run,
+    ) {
         Ok(report) => Some(report.summary(dry_run)),
         Err(e) => Some(format!("prune failed: {e}")),
     }

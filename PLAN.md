@@ -38,7 +38,7 @@ nile (process)                       mpv window (child)
 | Piece | Decision |
 |---|---|
 | Crates | `nle-core` (pure model) · `nle-ffmpeg` (wrappers + graph compiler) · `nile` package (binary `nile` + an `nle` symlink alias + TUI + mpv IPC) |
-| Project file | `nle.json` (v9) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
+| Project file | `nile.json` (v9) — media pool (embedded ffprobe reports) + **segment tracks**. Exact rational times, atomic saves, validated on load; vim is a legitimate UI for it |
 | Preview | mpv `edl://` — instant cuts, EDL time = timeline time. Gaps → cached 10 s black file. Effects, speed changes and transitions → cached proxy renders |
 | Export | filter-graph compiler: `trim`/`atrim` + normalization + `concat`; gaps → `color`/`anullsrc`; frame-grid snapping; hw tail; `-/filter_complex` script files |
 | Encoders | `cpu` (libx264), `vaapi` (UHD 630), `qsv` (Quick Sync) |
@@ -225,7 +225,7 @@ below.)
   spelling misses a variant — parity is enforced, not promised.
 - **Shared session state:** the undo sidecar persists **both** stacks
   (`HISTORY_VERSION` 9), so `nile undo`/`nile redo` work across processes and
-  on TUI-made edits; the yank register (`nle.clipboard.json`) is shared —
+  on TUI-made edits; the yank register (`.nile/<stem>/clipboard.json`) is shared —
   `nile yank` ↔ `yy`, `nile paste` ↔ `p`.
 - **New CLI surface:** `nile trim-in|trim-out|split|gap|delete|yank|paste|
   extend|undo|redo`, `remove --ripple`, `--at`/`--clip`/`--seg` addressing,
@@ -287,7 +287,7 @@ below.)
 - **Proxy cache:** segments `edl://` can't express (effects, transitions,
   retimes, an off-sequence picture size — mpv would re-frame that one while the
   export scales it, so the framing would jump at a transition's edge)
-  are rendered once into `~/.cache/nle/proxy/<hash>.mp4` and the monitor
+  are rendered once into `.nile/<stem>/cache/proxy/<hash>.mp4` and the monitor
   plays the proxy; the hash covers the segment + geometry + frame rate +
   each asset's path **and mtime**. The render puts the segment on its own
   track and reuses the export graph compiler, so there's no second
@@ -300,9 +300,10 @@ below.)
   crossfade isn't expressible). Elsewhere the monitor stays on raw sources:
   with opaque clips, fall-through *is* `overlay`. Bare `nile edl` prints the
   composite the monitor plays; `--track N` still previews one track.
-- **Cache pruning:** the cache only grows (every trim, retime, or effect mints
-  a new hash), so `nile cache prune [--days N] [--dry-run]` / `:cache prune`
-  deletes entries older than N days (default 30), by mtime — which is the
+- **Cache pruning:** each project has its own cache; it only grows (every trim,
+  retime, or effect mints a new hash), so `nile cache prune [--days N]
+  [--dry-run]` / `:cache prune` deletes that project's entries older than N
+  days (default 30), by mtime — which is the
   render time, since a hit does not touch it. Explicit: nothing sweeps on open
   or on a timer; a pruned proxy simply re-renders. Only `<hash>.mp4` (and a
   crashed render's temp) is a candidate, so `nle/black/` is never touched.

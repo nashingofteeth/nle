@@ -80,7 +80,7 @@ pub(crate) fn cmd_edit(
 pub(crate) fn cmd_edl(project_path: &Path, track: Option<usize>) -> Result<()> {
     let project = Project::load(project_path)?;
     let Some(track) = track else {
-        say!("{}", preview::build_composite_edl(&project)?);
+        say!("{}", preview::build_composite_edl(&project, project_path)?);
         return Ok(());
     };
     // 1-based, and 0 is not a track number (it used to mean "track 1").
@@ -88,7 +88,7 @@ pub(crate) fn cmd_edl(project_path: &Path, track: Option<usize>) -> Result<()> {
     if project.timeline.track(ti).is_none() {
         bail!("no track #{track}");
     }
-    say!("{}", preview::build_edl(&project, ti)?);
+    say!("{}", preview::build_edl(&project, project_path, ti)?);
     Ok(())
 }
 
@@ -128,7 +128,7 @@ pub(crate) fn cmd_add(
 ) -> Result<()> {
     let mut doc = Document::with_history(
         Project::load(project_path)?,
-        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default(),
+        edit::History::load_project(project_path).unwrap_or_default(),
     );
     // `--track` is 1-based (matching the `v1`/`a1` labels); 0 internally.
     // 0 is not a track number — it used to silently mean "track 1".
@@ -349,14 +349,14 @@ pub(crate) fn cmd_track_ls(project_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn cmd_cache(action: &CacheCmd) -> Result<()> {
+pub(crate) fn cmd_cache(project_path: &Path, action: &CacheCmd) -> Result<()> {
     match action {
         CacheCmd::Prune { days, dry_run } => {
             if *days == 0 {
                 bail!("--days must be at least 1 (there is no --all)");
             }
             let max_age = std::time::Duration::from_secs(days.saturating_mul(86_400));
-            let report = proxy::prune(max_age, *dry_run)?;
+            let report = proxy::prune(project_path, max_age, *dry_run)?;
             let prefix = if *dry_run { "prune --dry-run" } else { "prune" };
             say!("{prefix}: {}", report.summary(*dry_run));
             Ok(())

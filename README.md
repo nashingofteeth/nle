@@ -57,7 +57,7 @@ nile edit                                # TUI + mpv monitor
 nile export -o final.mp4
 ```
 
-The project lives in `nle.json`; edits are saved automatically. Shell commands
+The project lives in `nile.json`; edits are saved automatically. Shell commands
 and an open TUI adopt each other's changes.
 
 ## TUI
@@ -287,13 +287,23 @@ NLE_LOG=/tmp/nle.log nile edit            # timestamped diagnostics
 
 ## Files and concurrency
 
-- `nle.json` — plain JSON project (rational times, no float drift)
-- `nle.history.json` — undo/redo stacks
-- `nle.clipboard.json` — yank register
-- `~/.cache/nle/` — proxy renders and the black-gap filler
+The project is `nile.json`; everything else lives in a state directory beside
+it, grouped by project stem:
 
-The command is `nile`; these historical `nle` filenames and cache paths are
-kept for now so existing projects and previews keep working.
+```text
+video/.nile/nile/
+├── history.json       # undo/redo stacks
+├── clipboard.json     # yank register
+└── cache/
+    ├── proxy/         # rendered proxy clips
+    └── black/         # black-gap filler
+```
+
+Multiple projects in one directory get separate `.nile/<stem>/` folders.
+Legacy adjacent `*.history.json` / `*.clipboard.json` files are copied into
+the state directory on first load; old `nle.json` projects still open with
+`--project nle.json`. The old global `~/.cache/nile` is no longer used, and
+`nile cache prune` only touches the current project’s cache.
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a

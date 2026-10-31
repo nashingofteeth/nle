@@ -312,8 +312,7 @@ pub(crate) fn to_action(cmd: &Cmd) -> Option<Result<Action, String>> {
 /// history.
 pub(crate) fn run_cli_action(project_path: &Path, action: &Action) -> Result<()> {
     let project = Project::load(project_path)?;
-    let history =
-        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default();
+    let history = edit::History::load_project(project_path).unwrap_or_default();
     let mut doc = Document::with_history(project, history);
     let mut register = load_register(project_path);
     // The edit is "made from" its own position, so undoing it returns

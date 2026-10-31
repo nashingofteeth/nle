@@ -13,7 +13,7 @@ Read before touching `graph.rs`, `preview.rs`, `proxy.rs`, or the mpv client.
 
 - The monitor proxies whatever `edl://` can't express, rendered by the
   *export* graph (so there is no second filter chain to drift) and cached
-  under `~/.cache/nle/proxy`:
+  under `.nile/<stem>/cache/proxy`:
   - a *segment* (`preview::needs_proxy`): an effect, a non-1× retime, a
     transition, or a picture size that isn't the sequence's (mpv re-frames a
     raw file to *its* aspect while the export scales it, so the framing would

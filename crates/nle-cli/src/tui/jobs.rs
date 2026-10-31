@@ -104,6 +104,7 @@ pub(crate) fn start_preview(app: &mut App) {
         return;
     }
     let project = app.project.clone();
+    let project_path = app.path.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     app.preview = Some(PreviewJob {
         rx,
@@ -116,8 +117,8 @@ pub(crate) fn start_preview(app: &mut App) {
         let mut report = move |done, total, frac| {
             let _ = progress_tx.send(PreviewMsg::Progress { done, total, frac });
         };
-        let result =
-            preview::build_composite_edl_with(&project, &mut report).map_err(|e| e.to_string());
+        let result = preview::build_composite_edl_with(&project, &project_path, &mut report)
+            .map_err(|e| e.to_string());
         let _ = tx.send(PreviewMsg::Done(result));
     });
 }

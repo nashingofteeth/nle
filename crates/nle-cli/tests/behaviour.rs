@@ -1159,7 +1159,7 @@ fn cache_prune_is_explicit_and_age_based() {
 
     let s = Sandbox::new();
     s.base();
-    let dir = s.cache_dir().join("nile").join("proxy");
+    let dir = s.cache_dir().join("proxy");
     fs::create_dir_all(&dir).unwrap();
     let now = SystemTime::now();
     let write = |name: &str, len: usize, age: Duration| {
@@ -1190,4 +1190,21 @@ fn cache_prune_is_explicit_and_age_based() {
 
     let out = s.err(&["cache", "prune", "--days", "0"]);
     assert!(out.contains("at least 1"), "0 days is refused:\n{out}");
+}
+
+#[test]
+fn the_default_project_is_nile_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_nile"))
+        .arg("init")
+        .current_dir(dir.path())
+        .output()
+        .expect("run init");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(dir.path().join("nile.json").exists());
+    assert!(!dir.path().join("nle.json").exists());
 }

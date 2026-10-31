@@ -434,7 +434,7 @@ pub(crate) fn persist_and_refresh(app: &mut App, player: &dyn Mpv) {
             }
             let prev = app.message.clone();
             app.fail(&format!(
-                "{prev} — not saved: nle.json changed on disk (reloaded)"
+                "{prev} — not saved: nile.json changed on disk (reloaded)"
             ));
             return;
         }

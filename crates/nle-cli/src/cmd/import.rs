@@ -21,7 +21,7 @@ use crate::{parse_fps_arg, say};
 pub(crate) fn cmd_import(project_path: &Path, files: &[PathBuf]) -> Result<()> {
     let mut doc = Document::with_history(
         Project::load(project_path)?,
-        edit::History::load(&edit::History::sidecar_path(project_path)).unwrap_or_default(),
+        edit::History::load_project(project_path).unwrap_or_default(),
     );
     let playhead = frame_of(doc.fps.as_ref(), secs_f64(&doc.playhead));
     let mut added = 0usize;

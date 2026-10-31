@@ -14,6 +14,7 @@ pub mod extend;
 pub mod media;
 pub mod otio;
 pub mod project;
+pub mod state;
 pub mod time;
 pub mod timeline;
 

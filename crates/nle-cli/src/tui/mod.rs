@@ -183,7 +183,7 @@ fn stamp(path: &std::path::Path) -> Option<Stamp> {
     })
 }
 
-/// The files a session shares with the shell — `nle.json`, its undo
+/// The files a session shares with the shell — `nile.json`, its undo
 /// sidecar, and the yank register — and how we last saw them. A foreign
 /// stamp means a shell command got there first.
 #[derive(Debug, Default)]
@@ -203,7 +203,7 @@ pub struct App {
     pub count: Option<u32>,
     /// Pending two-key sequence.
     pub pending: Pending,
-    /// Yanked segment, for `p`/`P` — the shared register (`nle.clipboard.json`),
+    /// Yanked segment, for `p`/`P` — the shared register (`.nile/<stem>/clipboard.json`),
     /// so `nile yank` and `yy` fill the same slot. Carries the clip's asset
     /// path, so a register from a rebuilt project resolves (or refuses)
     /// instead of pasting the wrong media.
@@ -654,7 +654,7 @@ pub fn dump(project: Project, path: PathBuf, size: (u16, u16), keys: &str) -> St
 
 pub fn run<P: Mpv>(project: Project, path: PathBuf, player: P) -> anyhow::Result<()> {
     let mut terminal = ratatui::init(); // raw mode + alternate screen + panic hook
-    let history = History::load(&History::sidecar_path(&path)).unwrap_or_default();
+    let history = History::load_project(&path).unwrap_or_default();
     let mut app = App::new(project, path);
     app.project.set_history(history);
     // The shared register: what `nile yank` (or an earlier session) left.
@@ -814,7 +814,7 @@ fn watch_foreign(app: &mut App) -> bool {
 /// file's playhead.
 fn reload_project(app: &mut App, _player: &dyn Mpv, adopt_playhead: bool) -> anyhow::Result<()> {
     let project = Project::load(&app.path)?;
-    let history = History::load(&History::sidecar_path(&app.path)).unwrap_or_default();
+    let history = History::load_project(&app.path).unwrap_or_default();
     app.project = Document::with_history(project, history);
     app.active_track = app
         .active_track

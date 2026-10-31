@@ -63,3 +63,30 @@ fn the_register_round_trips_through_its_sidecar() {
     assert_eq!(load_register(&path), None, "clearing removes the file");
     assert!(!register_path(&path).exists());
 }
+
+#[test]
+fn an_old_adjacent_register_is_copied_into_the_state_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("nile.json");
+    let reg = Register {
+        segment: Segment::Gap(Gap {
+            duration: Seconds::from_integer(2),
+        }),
+        path: None,
+    };
+    save_register(&project, Some(&reg)).unwrap();
+    let new = register_path(&project);
+    let legacy = dir.path().join("nile.clipboard.json");
+    std::fs::copy(&new, &legacy).unwrap();
+    std::fs::remove_file(&new).unwrap();
+
+    assert_eq!(load_register(&project), Some(reg));
+    assert!(
+        new.exists(),
+        "the old register is copied into .nile/<stem>/"
+    );
+
+    save_register(&project, None).unwrap();
+    assert!(!new.exists());
+    assert!(!legacy.exists(), "clearing removes the legacy copy too");
+}

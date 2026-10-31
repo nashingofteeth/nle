@@ -151,6 +151,7 @@ impl Document {
     pub fn reset_history(&mut self, project_path: &Path) {
         self.history = History::default();
         let _ = std::fs::remove_file(History::sidecar_path(project_path));
+        let _ = std::fs::remove_file(crate::state::legacy_history_path(project_path));
     }
 }
 

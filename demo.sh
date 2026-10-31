@@ -8,6 +8,7 @@ N=$(readlink -f ./target/release/nile)
 DIR=demo-sandbox
 mkdir -p "$DIR"
 cd "$DIR"
+rm -rf .nile
 
 gen() { # gen NAME COLOR SIZE RATE DUR FREQ
   local name=$1 color=$2 size=$3 rate=$4 dur=$5 freq=$6
@@ -342,7 +343,7 @@ if output_has "at 2.5 s" "$N" --project agent.json show; then
 else
   echo "  ✗ playhead not stored"; exit 1
 fi
-if [ -f agent.clipboard.json ]; then
+if [ -f .nile/agent/clipboard.json ]; then
   echo "  ✓ shared register written (nile yank → nile paste)"
 else
   echo "  ✗ no register sidecar"; exit 1

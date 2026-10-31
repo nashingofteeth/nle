@@ -1,9 +1,10 @@
 //! Proxy render cache for the monitor.
 //!
 //! `edl://` can neither apply effects nor blend a transition, so those
-//! segments are rendered once into `~/.cache/nle/proxy/<hash>.mp4` and the
-//! monitor plays the proxy instead of the raw source. The hash covers
-//! everything the render reads, so a change (or a replaced file) re-renders.
+//! segments are rendered once into the project's
+//! `.nile/<stem>/cache/proxy/<hash>.mp4` and the monitor plays the proxy
+//! instead of the raw source. The hash covers everything the render reads, so
+//! a change (or a replaced file) re-renders.
 //!
 //! An entry's mtime is when it was rendered (a cache hit does not touch it).
 //! Nothing sweeps on its own: `nile cache prune` / `:cache prune` deletes
@@ -74,13 +75,9 @@ fn off_geometry(project: &Project, asset: u32) -> bool {
     }
 }
 
-/// `~/.cache/nle/proxy` (or `$XDG_CACHE_HOME/nle/proxy`).
-pub fn proxy_cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("nile").join("proxy")
+/// The proxy directory inside a project's state folder.
+pub fn proxy_cache_dir(project_path: &Path) -> PathBuf {
+    nle_core::state::cache_dir(project_path).join("proxy")
 }
 
 /// What one prune pass found.
@@ -131,8 +128,17 @@ fn human_bytes(bytes: u64) -> String {
 
 /// Delete proxy renders older than `max_age` from the real cache directory.
 /// Explicit only — nothing calls this on a timer or on project open.
-pub fn prune(max_age: Duration, dry_run: bool) -> Result<PruneReport, ProxyError> {
-    prune_at(&proxy_cache_dir(), max_age, SystemTime::now(), dry_run)
+pub fn prune(
+    project_path: &Path,
+    max_age: Duration,
+    dry_run: bool,
+) -> Result<PruneReport, ProxyError> {
+    prune_at(
+        &proxy_cache_dir(project_path),
+        max_age,
+        SystemTime::now(),
+        dry_run,
+    )
 }
 
 /// The sweep itself, with the directory and the clock injected so tests can
@@ -310,8 +316,9 @@ fn render_cached(
     hash: u64,
     duration: f64,
     progress: &mut dyn FnMut(f64),
+    project_path: &Path,
 ) -> Result<PathBuf, ProxyError> {
-    let dir = proxy_cache_dir();
+    let dir = proxy_cache_dir(project_path);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{hash:x}.mp4"));
     if complete(&path) {
@@ -346,8 +353,12 @@ fn render_cached(
 /// on a track of its own and handed to the export graph compiler — which
 /// already applies effects and blends transitions — so the proxy is the
 /// one source of truth for "what this segment looks like".
-pub fn proxy_for(project: &Project, seg: &Segment) -> Result<PathBuf, ProxyError> {
-    proxy_for_with(project, seg, &mut |_| {})
+pub fn proxy_for(
+    project: &Project,
+    seg: &Segment,
+    project_path: &Path,
+) -> Result<PathBuf, ProxyError> {
+    proxy_for_with(project, seg, &mut |_| {}, project_path)
 }
 
 /// [`proxy_for`] reporting this render's fraction (0–1).
@@ -355,6 +366,7 @@ pub fn proxy_for_with(
     project: &Project,
     seg: &Segment,
     progress: &mut dyn FnMut(f64),
+    project_path: &Path,
 ) -> Result<PathBuf, ProxyError> {
     let (w, h) = match &project.video {
         Some(v) => (v.width, v.height),
@@ -372,7 +384,7 @@ pub fn proxy_for_with(
         muted: false,
         segments: vec![seg.clone()],
     }];
-    render_cached(&p, hash, duration, progress)
+    render_cached(&p, hash, duration, progress, project_path)
 }
 
 /// The cached composite of `[start, end)` — the span rendered the way the
@@ -385,6 +397,7 @@ pub fn composite_proxy_with(
     start: Seconds,
     end: Seconds,
     progress: &mut dyn FnMut(f64),
+    project_path: &Path,
 ) -> Result<PathBuf, ProxyError> {
     let (w, h) = match &project.video {
         Some(v) => (v.width, v.height),
@@ -398,7 +411,7 @@ pub fn composite_proxy_with(
     let duration = secs_f64(&(end - start));
     let mut p = project.clone();
     p.timeline.tracks = tracks;
-    render_cached(&p, hash, duration, progress)
+    render_cached(&p, hash, duration, progress, project_path)
 }
 
 /// Every unmuted track's segments covering `[start, end)`, trimmed at the edges
@@ -851,6 +864,14 @@ mod tests {
         );
         let r = prune_at(dir.path(), Duration::ZERO, now, false).unwrap();
         assert_eq!((r.removed, r.kept), (0, 1), "clock skew keeps the entry");
+    }
+
+    #[test]
+    fn proxies_live_in_the_project_state() {
+        assert_eq!(
+            proxy_cache_dir(Path::new("video/nile.json")),
+            PathBuf::from("video/.nile/nile/cache/proxy")
+        );
     }
 
     #[test]

@@ -71,7 +71,7 @@ struct Cli {
         short,
         long,
         global = true,
-        default_value = "nle.json",
+        default_value = "nile.json",
         value_name = "FILE"
     )]
     project: PathBuf,
@@ -659,7 +659,7 @@ fn main() -> Result<()> {
         Cmd::Track {
             action: TrackCmd::Ls,
         } => return cmd_track_ls(&cli.project),
-        Cmd::Cache { action } => return cmd_cache(action),
+        Cmd::Cache { action } => return cmd_cache(&cli.project, action),
         Cmd::Media {
             action: MediaCmd::Ls,
         } => return cmd_media_ls(&cli.project),

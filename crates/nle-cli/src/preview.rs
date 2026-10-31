@@ -60,7 +60,11 @@ pub enum Segment {
 /// Flatten track `ti` into ordered preview segments. A track shorter than
 /// the timeline is padded with a trailing gap, so the monitor spans the
 /// whole timeline instead of stopping at the track's own end.
-pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewError> {
+pub fn segments(
+    project: &Project,
+    ti: usize,
+    project_path: &Path,
+) -> Result<Vec<Segment>, PreviewError> {
     let track = project
         .timeline
         .track(ti)
@@ -82,7 +86,7 @@ pub fn segments(project: &Project, ti: usize) -> Result<Vec<Segment>, PreviewErr
         // expressed by `edl://`: play the rendered proxy instead of the raw
         // source.
         if crate::proxy::needs_proxy(project, seg) {
-            let p = crate::proxy::proxy_for(project, seg)?;
+            let p = crate::proxy::proxy_for(project, seg, project_path)?;
             segs.push(Segment::Clip {
                 path: p,
                 start: Seconds::from_integer(0),
@@ -365,8 +369,11 @@ fn transition_spans(project: &Project) -> Vec<(Seconds, Seconds)> {
 /// Render progress: `(finished, total, fraction of the render in flight)`.
 pub type ProgressFn<'a> = &'a mut dyn FnMut(usize, usize, f64);
 
-pub fn composite_segments(project: &Project) -> Result<Vec<Segment>, PreviewError> {
-    composite_segments_with(project, &mut |_, _, _| {})
+pub fn composite_segments(
+    project: &Project,
+    project_path: &Path,
+) -> Result<Vec<Segment>, PreviewError> {
+    composite_segments_with(project, project_path, &mut |_, _, _| {})
 }
 
 /// One proxy plan step. `Window` may or may not need a proxy; `Span` always
@@ -381,6 +388,7 @@ enum Step<'a> {
 /// the one in flight)`.
 pub fn composite_segments_with(
     project: &Project,
+    project_path: &Path,
     progress: ProgressFn<'_>,
 ) -> Result<Vec<Segment>, PreviewError> {
     let steps = composite_steps(project)?;
@@ -398,6 +406,7 @@ pub fn composite_segments_with(
             Step::Window(window) => {
                 push_window(
                     project,
+                    project_path,
                     &window,
                     &mut segs,
                     &mut *progress,
@@ -407,7 +416,13 @@ pub fn composite_segments_with(
             }
             Step::Span(start, end) => {
                 let mut report = |f: f64| progress(done, total, f);
-                let path = crate::proxy::composite_proxy_with(project, start, end, &mut report)?;
+                let path = crate::proxy::composite_proxy_with(
+                    project,
+                    start,
+                    end,
+                    &mut report,
+                    project_path,
+                )?;
                 done += 1;
                 segs.push(Segment::Clip {
                     path,
@@ -461,6 +476,7 @@ fn window_needs_proxy(project: &Project, window: &Window<'_>) -> bool {
 /// One non-composite window: its own source, its proxy, or black.
 fn push_window(
     project: &Project,
+    project_path: &Path,
     window: &Window<'_>,
     segs: &mut Vec<Segment>,
     progress: ProgressFn<'_>,
@@ -473,7 +489,7 @@ fn push_window(
         WindowKind::Segment(seg, offset) => {
             if crate::proxy::needs_proxy(project, seg) {
                 let mut report = |f: f64| progress(*done, total, f);
-                let path = crate::proxy::proxy_for_with(project, seg, &mut report)?;
+                let path = crate::proxy::proxy_for_with(project, seg, &mut report, project_path)?;
                 *done += 1;
                 segs.push(Segment::Clip {
                     path,
@@ -589,12 +605,13 @@ pub fn build_clip_preview(
 /// across the whole span.
 pub fn build_black_preview(
     project: &Project,
+    project_path: &Path,
     origin: f64,
     length: Seconds,
 ) -> Result<ExtendPreview, PreviewError> {
     let size = project.video.as_ref().ok_or(PreviewError::NoSize)?;
     let fps = project.fps.ok_or(PreviewError::NoFps)?;
-    let black = ensure_black_file(size.width, size.height, &fps)?;
+    let black = ensure_black_file(size.width, size.height, &fps, project_path)?;
     let url = format!(
         "edl://{}",
         assemble_edl(&[Segment::Gap { length }], Some(&black))?
@@ -612,46 +629,64 @@ pub const EXTEND_PREVIEW_SECS: i64 = 3600;
 /// file if the timeline has gaps. A single track is the debugging view
 /// (`nile edl --track N`); the monitor — and bare `nile edl` — plays the
 /// composite (see `build_composite_edl`).
-pub fn build_edl(project: &Project, ti: usize) -> Result<String, PreviewError> {
-    edl_from_segments(project, &segments(project, ti)?)
+pub fn build_edl(
+    project: &Project,
+    project_path: &Path,
+    ti: usize,
+) -> Result<String, PreviewError> {
+    edl_from_segments(project, project_path, &segments(project, ti, project_path)?)
 }
 
 /// Build the `edl://` URL for the whole timeline — the composite of every
 /// unmuted video track, topmost clip winning. This is what the monitor
 /// plays, so a gap falls through to the layer below.
-pub fn build_composite_edl(project: &Project) -> Result<String, PreviewError> {
-    edl_from_segments(project, &composite_segments(project)?)
+pub fn build_composite_edl(project: &Project, project_path: &Path) -> Result<String, PreviewError> {
+    edl_from_segments(
+        project,
+        project_path,
+        &composite_segments(project, project_path)?,
+    )
 }
 
 /// [`build_composite_edl`] with render progress.
 pub fn build_composite_edl_with(
     project: &Project,
+    project_path: &Path,
     progress: ProgressFn<'_>,
 ) -> Result<String, PreviewError> {
-    edl_from_segments(project, &composite_segments_with(project, progress)?)
+    edl_from_segments(
+        project,
+        project_path,
+        &composite_segments_with(project, project_path, progress)?,
+    )
 }
 
 /// Render preview segments to an `edl://` URL, generating the cached black
 /// filler file when a gap is present.
-fn edl_from_segments(project: &Project, segs: &[Segment]) -> Result<String, PreviewError> {
+fn edl_from_segments(
+    project: &Project,
+    project_path: &Path,
+    segs: &[Segment],
+) -> Result<String, PreviewError> {
     let has_gap = segs.iter().any(|s| matches!(s, Segment::Gap { .. }));
     let black = if has_gap {
         let size = project.video.as_ref().ok_or(PreviewError::NoSize)?;
         let fps = project.fps.ok_or(PreviewError::NoFps)?;
-        Some(ensure_black_file(size.width, size.height, &fps)?)
+        Some(ensure_black_file(
+            size.width,
+            size.height,
+            &fps,
+            project_path,
+        )?)
     } else {
         None
     };
     Ok(format!("edl://{}", assemble_edl(segs, black.as_deref())?))
 }
 
-/// Cache dir for black gap files: `$XDG_CACHE_HOME/nle/black` or `~/.cache/nle/black`.
-pub fn black_cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("nile").join("black")
+/// Black-gap cache inside the project's state folder.
+pub fn black_cache_dir(project_path: &Path) -> PathBuf {
+    nle_core::state::cache_dir(project_path).join("black")
 }
 
 /// Ensure a silent black clip of `BLACK_FILE_SECS` exists for this
@@ -662,8 +697,9 @@ pub fn ensure_black_file(
     width: u32,
     height: u32,
     fps: &Seconds,
+    project_path: &Path,
 ) -> Result<PathBuf, std::io::Error> {
-    let dir = black_cache_dir();
+    let dir = black_cache_dir(project_path);
     fs::create_dir_all(&dir)?;
     let name = format!("{width}x{height}_{}_{}.mp4", fps.numer(), fps.denom());
     let path = dir.join(name.clone());
@@ -1151,7 +1187,7 @@ mod tests {
     #[test]
     fn segments_flatten_clips_and_gaps_in_order() {
         let p = project_with_gap();
-        let segs = segments(&p, 0).unwrap();
+        let segs = segments(&p, 0, Path::new("t.json")).unwrap();
         assert_eq!(
             segs,
             vec![
@@ -1177,7 +1213,7 @@ mod tests {
         let mut p = project_with_gap(); // track 0 ends at 8 s
         let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
         p.timeline.tracks[ti].segments = vec![seg_clip(9, 0, 2)]; // 2 s
-        let segs = segments(&p, ti).unwrap();
+        let segs = segments(&p, ti, Path::new("t.json")).unwrap();
         assert_eq!(
             segs,
             vec![
@@ -1198,7 +1234,7 @@ mod tests {
     fn empty_track_previews_the_whole_timeline_as_black() {
         let mut p = project_with_gap(); // timeline ends at 8 s
         let ti = p.timeline.add_track(nle_core::timeline::TrackKind::Video);
-        let segs = segments(&p, ti).unwrap();
+        let segs = segments(&p, ti, Path::new("t.json")).unwrap();
         assert_eq!(
             segs,
             vec![Segment::Gap {
@@ -1244,7 +1280,7 @@ mod tests {
     #[test]
     fn composite_picks_the_topmost_clip_and_falls_through_gaps() {
         let p = composite_project();
-        let segs = composite_segments(&p).unwrap();
+        let segs = composite_segments(&p, Path::new("t.json")).unwrap();
         assert_eq!(
             segs,
             vec![
@@ -1286,7 +1322,7 @@ mod tests {
             speed: Seconds::from_integer(1),
             effects: Vec::new(),
         })];
-        let segs = composite_segments(&p).unwrap();
+        let segs = composite_segments(&p, Path::new("t.json")).unwrap();
         assert_eq!(
             segs,
             vec![Segment::Clip {
@@ -1310,7 +1346,7 @@ mod tests {
             duration: Seconds::from_integer(2),
         })];
         // Timeline end is the longer track (3 s); both gaps read black.
-        let segs = composite_segments(&p).unwrap();
+        let segs = composite_segments(&p, Path::new("t.json")).unwrap();
         assert_eq!(
             segs,
             vec![Segment::Gap {
@@ -1389,7 +1425,7 @@ mod tests {
         // geometry errors surface without touching the cache
         let mut bare = Project::new();
         assert!(matches!(
-            build_black_preview(&bare, 5.0, Seconds::from_integer(25)),
+            build_black_preview(&bare, Path::new("t.json"), 5.0, Seconds::from_integer(25)),
             Err(PreviewError::NoSize)
         ));
         bare.video = Some(VideoSettings {
@@ -1397,15 +1433,23 @@ mod tests {
             height: 240,
         });
         assert!(matches!(
-            build_black_preview(&bare, 5.0, Seconds::from_integer(25)),
+            build_black_preview(&bare, Path::new("t.json"), 5.0, Seconds::from_integer(25)),
             Err(PreviewError::NoFps)
         ));
     }
 
     #[test]
+    fn black_files_live_in_the_project_state() {
+        assert_eq!(
+            black_cache_dir(Path::new("video/nile.json")),
+            PathBuf::from("video/.nile/nile/cache/black")
+        );
+    }
+
+    #[test]
     fn edl_starts_with_prefix() {
         let p = project_with_gap();
-        let segs = segments(&p, 0).unwrap();
+        let segs = segments(&p, 0, Path::new("t.json")).unwrap();
         let edl = assemble_edl(&segs, Some(Path::new("/b.mp4"))).unwrap();
         assert!(edl.starts_with("%14%/media/red.mp4,1,2;"), "{edl}");
     }

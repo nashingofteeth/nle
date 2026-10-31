@@ -18,7 +18,7 @@ pub const REGISTER_VERSION: u32 = 2;
 
 /// A yanked segment plus, for a clip, the asset path it came from. Asset
 /// ids are **project-scoped**, so a register that outlives its project
-/// (a rebuilt `nle.json`, a copied sidecar) must be resolved against the
+/// (a rebuilt project, a copied sidecar) must be resolved against the
 /// pool by path — pasting the wrong media silently would be worse than
 /// refusing.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,16 +72,38 @@ struct RegisterFile {
     path: Option<PathBuf>,
 }
 
-/// The register sidecar for a project (`nle.json` → `nle.clipboard.json`).
+/// The register sidecar for a project (`nile.json` →
+/// `.nile/nile/clipboard.json`).
 pub fn register_path(project_path: &Path) -> PathBuf {
-    project_path.with_extension("clipboard.json")
+    crate::state::clipboard_path(project_path)
 }
 
-/// The yanked segment a project's register holds, if any.
+/// The yanked segment a project's register holds, if any. A legacy adjacent
+/// sidecar is copied into the state directory on first read.
 pub fn load_register(project_path: &Path) -> Option<Register> {
-    let text = std::fs::read_to_string(register_path(project_path)).ok()?;
+    let path = register_path(project_path);
+    let mut legacy = None;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let old = crate::state::legacy_clipboard_path(project_path);
+            let text = std::fs::read_to_string(&old).ok()?;
+            legacy = Some(old);
+            text
+        }
+        Err(_) => return None,
+    };
     let file: RegisterFile = serde_json::from_str(&text).ok()?;
-    (file.version == REGISTER_VERSION).then_some(Register {
+    if file.version != REGISTER_VERSION {
+        return None;
+    }
+    if let Some(old) = legacy {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::copy(old, &path);
+    }
+    Some(Register {
         segment: file.segment,
         path: file.path,
     })
@@ -93,7 +115,8 @@ pub fn save_register(project_path: &Path, register: Option<&Register>) -> std::i
     use std::io::Write as _;
     let path = register_path(project_path);
     let Some(register) = register else {
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(crate::state::legacy_clipboard_path(project_path));
         return Ok(());
     };
     let file = RegisterFile {
@@ -108,6 +131,7 @@ pub fn save_register(project_path: &Path, register: Option<&Register>) -> std::i
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(json.as_bytes())?;
     tmp.persist(path).map_err(|e| e.error)?;

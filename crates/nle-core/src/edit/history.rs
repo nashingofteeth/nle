@@ -239,10 +239,30 @@ impl History {
         Self { done, undone }
     }
 
-    /// Sidecar path for a project file (`nle.json` → `nle.history.json`).
-    /// The history lives next to the project so both move together.
+    /// Sidecar path for a project file (`nile.json` →
+    /// `.nile/nile/history.json`). The history lives in the project's state
+    /// directory so the whole set moves together.
     pub fn sidecar_path(project_path: &Path) -> PathBuf {
-        project_path.with_extension("history.json")
+        crate::state::history_path(project_path)
+    }
+
+    /// Load a project's history, copying an old adjacent sidecar into the
+    /// state directory once if the new one does not exist yet.
+    pub fn load_project(project_path: &Path) -> Result<Self, std::io::Error> {
+        let path = Self::sidecar_path(project_path);
+        match Self::load(&path) {
+            Ok(history) => Ok(history),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let legacy = crate::state::legacy_history_path(project_path);
+                if !legacy.exists() {
+                    return Err(e);
+                }
+                let history = Self::load(&legacy)?;
+                let _ = history.save(&path);
+                Ok(history)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Atomic save to the sidecar file (crash can't corrupt it).
@@ -253,6 +273,7 @@ impl History {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir)?;
         let tmp = NamedTempFile::new_in(dir)?;
         tmp.as_file().write_all(json.as_bytes())?;
         tmp.persist(path).map_err(|e| e.error)?;

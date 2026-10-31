@@ -284,7 +284,7 @@ pub(crate) fn apply_extend_plan(app: &mut App, player: &dyn Mpv, plan: ExtendPla
                 Some(hi) => Seconds::new(((hi - origin) * 1e6).round() as i64, 1_000_000),
                 None => Seconds::from_integer(preview::EXTEND_PREVIEW_SECS),
             };
-            match preview::build_black_preview(&app.project, *origin, length) {
+            match preview::build_black_preview(&app.project, &app.path, *origin, length) {
                 Err(e) => {
                     app.fail(&format!("preview failed: {e}"));
                     return;

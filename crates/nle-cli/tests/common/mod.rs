@@ -37,22 +37,19 @@ pub enum Look {
 
 pub struct Sandbox {
     dir: TempDir,
-    cache: PathBuf,
 }
 
 impl Sandbox {
     /// A throwaway working directory with the generated media copied in (so
-    /// commands can name `red.mp4` the way the scripts did), and its own cache
-    /// dir (so no test races another, or the user's `~/.cache`).
+    /// commands can name `red.mp4` the way the scripts did). All state and
+    /// cache live under the project's own `.nile/p/` directory.
     pub fn new() -> Sandbox {
         let dir = tempfile::tempdir().expect("a temp dir");
         for name in MEDIA {
             fs::copy(media_dir().join(name), dir.path().join(name))
                 .unwrap_or_else(|e| panic!("copy {name}: {e}"));
         }
-        let cache = dir.path().join(".cache");
-        fs::create_dir_all(&cache).expect("a cache dir");
-        Sandbox { dir, cache }
+        Sandbox { dir }
     }
 
     pub fn path(&self) -> &Path {
@@ -63,8 +60,8 @@ impl Sandbox {
         self.dir.path().join(name)
     }
 
-    pub fn cache_dir(&self) -> &Path {
-        &self.cache
+    pub fn cache_dir(&self) -> PathBuf {
+        self.dir.path().join(".nile").join("p").join("cache")
     }
 
     // ---------------------------------------------------------------- running
@@ -72,7 +69,6 @@ impl Sandbox {
     fn command(&self, project: &str, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_nile"));
         cmd.current_dir(self.path())
-            .env("XDG_CACHE_HOME", &self.cache)
             .arg("--project")
             .arg(project)
             .args(args);
@@ -444,7 +440,7 @@ impl Sandbox {
             }
         }
         let mut out = Vec::new();
-        walk(&self.cache, &mut out);
+        walk(&self.cache_dir(), &mut out);
         out.sort();
         out
     }

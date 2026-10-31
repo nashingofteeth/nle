@@ -17,14 +17,30 @@ fn failed_batches_leave_no_trace() {
 #[test]
 fn sidecar_path_maps_beside_the_project() {
     assert_eq!(
-        History::sidecar_path(Path::new("nle.json")),
-        PathBuf::from("nle.history.json")
+        History::sidecar_path(Path::new("nile.json")),
+        PathBuf::from(".nile/nile/history.json")
     );
-    // A project without an extension still gets one.
+    // A project without an extension still gets a state directory.
     assert_eq!(
         History::sidecar_path(Path::new("dir/proj")),
-        PathBuf::from("dir/proj.history.json")
+        PathBuf::from("dir/.nile/proj/history.json")
     );
+}
+
+#[test]
+fn an_old_adjacent_history_is_copied_into_the_state_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("nile.json");
+    let legacy = dir.path().join("nile.history.json");
+    let history = History::default();
+    history.save(&legacy).unwrap();
+    let loaded = History::load_project(&project).unwrap();
+    assert_eq!(loaded.depth(), 0);
+    assert!(
+        History::sidecar_path(&project).exists(),
+        "the legacy sidecar is copied into .nile/<stem>/"
+    );
+    assert!(legacy.exists(), "the old file is left for safety");
 }
 
 #[test]
