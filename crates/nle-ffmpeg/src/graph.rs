@@ -632,6 +632,7 @@ fn apply_encoder_tail(graph: String, encoder: Encoder) -> (String, &'static str)
             graph.push_str(";\n[vout]format=nv12,hwupload=extra_hw_frames=64[venc]\n");
             "venc"
         }
+        Encoder::X265 | Encoder::SvtAv1 => "vout",
     };
     (graph, vmap)
 }

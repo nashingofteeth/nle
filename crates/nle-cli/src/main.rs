@@ -448,23 +448,35 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
+    /// Benchmark export presets and report time/fps
+    Bench {
+        /// Number of runs per preset
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
+        /// Benchmark only this tier
+        #[arg(long, value_enum)]
+        preset: Option<QualityPreset>,
+    },
     /// Render the timeline to a file
     Export {
         /// Output file
         #[arg(short, long, value_name = "FILE")]
         output: PathBuf,
-        /// Encode engine: cpu, vaapi, qsv
-        #[arg(long, value_enum, default_value = "cpu")]
-        encoder: EncoderArg,
-        /// x264 quality, 0-51, lower = better [cpu only]
-        #[arg(long, default_value_t = 18)]
-        crf: u8,
-        /// x264 preset: ultrafast..veryslow [cpu only]
-        #[arg(long, default_value = "fast")]
-        preset: String,
-        /// Target bitrate for hardware encoders [vaapi/qsv]
-        #[arg(long, default_value = "8M")]
-        bitrate: String,
+        /// Quality tier: preview, balanced, max
+        #[arg(long, value_enum, default_value = "balanced")]
+        preset: QualityPreset,
+        /// Override the tier's encode engine (cpu|vaapi|qsv|x265|svtav1)
+        #[arg(long, value_enum)]
+        encoder: Option<EncoderArg>,
+        /// Override the tier's quality (0-51, lower = better)
+        #[arg(long)]
+        crf: Option<u8>,
+        /// Override the encoder's own preset (x264 names or SVT-AV1 number)
+        #[arg(long)]
+        encoder_preset: Option<String>,
+        /// Override the hardware bitrate (vaapi/qsv)
+        #[arg(long)]
+        bitrate: Option<String>,
     },
     /// Interactive editor: TUI dashboard + mpv monitor, vim keys
     #[cfg(feature = "tui")]
@@ -590,6 +602,9 @@ enum EncoderArg {
     Cpu,
     Vaapi,
     Qsv,
+    X265,
+    #[value(alias = "svtav1")]
+    SvtAv1,
 }
 
 impl From<EncoderArg> for Encoder {
@@ -598,12 +613,14 @@ impl From<EncoderArg> for Encoder {
             EncoderArg::Cpu => Encoder::Cpu,
             EncoderArg::Vaapi => Encoder::Vaapi,
             EncoderArg::Qsv => Encoder::Qsv,
+            EncoderArg::X265 => Encoder::X265,
+            EncoderArg::SvtAv1 => Encoder::SvtAv1,
         }
     }
 }
 
 use cmd::detect::{DetectArgs, cmd_detect_edits};
-use cmd::export::cmd_export;
+use cmd::export::{ExportOptions, QualityPreset, cmd_export};
 use cmd::import::{cmd_import, cmd_import_edl, cmd_import_otio};
 use cmd::media::{cmd_probe, cmd_trim};
 #[cfg(feature = "tui")]
@@ -739,14 +756,23 @@ fn main() -> Result<()> {
                 force: *force,
             });
         }
+        Cmd::Bench { runs, preset } => return cmd::export::cmd_bench(&project, *runs, *preset),
         Cmd::Export {
             output,
+            preset,
             encoder,
             crf,
-            preset,
+            encoder_preset,
             bitrate,
         } => {
-            return cmd_export(&project, output, (*encoder).into(), *crf, preset, bitrate);
+            let options = ExportOptions {
+                preset: *preset,
+                encoder: encoder.map(Into::into),
+                crf: *crf,
+                encoder_preset: encoder_preset.clone(),
+                bitrate: bitrate.clone(),
+            };
+            return cmd_export(&project, output, &options);
         }
         Cmd::Probe { file, json } => return cmd_probe(file, *json),
         Cmd::Trim {

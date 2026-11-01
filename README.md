@@ -156,7 +156,7 @@ The `:` line is the CLI grammar, flag for flag:
 :track add video|audio        :track mute [N] / :track rm N
 :media ls|rm                  :cache prune [--days N] [--dry-run]
 :import / :add                :show / :seek T
-:export -o FILE               :detect FILE
+:export -o FILE [--preset T]  :detect FILE
 :edl-import / :otio-import    :help / :q
 ```
 
@@ -278,9 +278,15 @@ nile detect-edits edit.mov [--list]
 nile detect-edits edit.mov --append --track 2
 # One clip per detected shot; black spans become gaps. Tune with
 # --threshold/--min-shot/--black-min/--no-gaps/--video-only/--fps/--force.
-nile export -o final.mp4
-nile export -o fast.mp4 --encoder vaapi   # or qsv
-# VAAPI picks the first /dev/dri/renderD*; override with NLE_VAAPI_DEVICE.
+nile export -o final.mp4                   # balanced: x264 fast CRF 22
+nile export -o fast.mp4 --preset preview   # VAAPI 6M; CPU fallback if unavailable
+nile export -o master.mp4 --preset max     # x265 medium CRF 20
+# Preview uses the first /dev/dri/renderD*; override with NLE_VAAPI_DEVICE.
+# Explicit overrides: --encoder cpu|vaapi|qsv|x265|svt-av1, --crf N,
+# --encoder-preset P, --bitrate B.
+
+nile bench [--runs N] [--preset preview|balanced|max]
+# Renders to a temp file and reports wall time and effective fps.
 ```
 
 ### One-shot tools and logging
