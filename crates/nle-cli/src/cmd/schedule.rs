@@ -55,6 +55,15 @@ pub(crate) fn run(
     if total <= Seconds::from_integer(0) || workers < 2 {
         return Ok(None);
     }
+    // The serial graph rounds sub-frame segment spans to frames. Chunk trims
+    // use exact wall-clock windows, so a sub-frame segment (or a source cut
+    // between source frames) can make the two paths differ by a frame at a
+    // boundary. Only chunk when both the timeline and the source cuts land on
+    // their frame grids.
+    if !frame_aligned(project) {
+        log::line("chunked export needs frame-aligned segments; using one encoder");
+        return Ok(None);
+    }
     let cuts = choose_cuts(project, workers);
     if cuts.len() < 2 {
         return Ok(None);
@@ -221,6 +230,64 @@ fn concat(paths: &[PathBuf], output: &Path, total: &Seconds, quiet: bool) -> Res
     args.push(output.display().to_string());
     run_ffmpeg_opt(&args, !quiet).context("mux export chunks")?;
     Ok(())
+}
+
+fn frame_aligned(project: &Project) -> bool {
+    let Some(fps) = project.fps else {
+        return false;
+    };
+    if fps <= Seconds::from_integer(0) {
+        return false;
+    }
+    project.timeline.tracks.iter().all(|track| {
+        track.segments.iter().all(|seg| {
+            if !(seg.duration() * fps).is_integer() {
+                return false;
+            }
+            match seg {
+                Segment::Clip(c) => {
+                    if track.kind == nle_core::TrackKind::Video {
+                        let Some(asset) = project.asset(c.asset) else {
+                            return false;
+                        };
+                        let Some(source_fps) = asset.probe.fps() else {
+                            return false;
+                        };
+                        if !(c.asset_in * source_fps).is_integer()
+                            || !(c.asset_out * source_fps).is_integer()
+                        {
+                            return false;
+                        }
+                    }
+                }
+                Segment::Transition(tr) => {
+                    for side in [&tr.a, &tr.b] {
+                        if let nle_core::timeline::TransitionSource::Clip {
+                            asset,
+                            src_in,
+                            src_out,
+                            ..
+                        } = side
+                        {
+                            let Some(asset) = project.asset(*asset) else {
+                                return false;
+                            };
+                            let Some(source_fps) = asset.probe.fps() else {
+                                return false;
+                            };
+                            if !(src_in * source_fps).is_integer()
+                                || !(src_out * source_fps).is_integer()
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                Segment::Gap(_) => {}
+            }
+            true
+        })
+    })
 }
 
 /// All frame-aligned cut points, plus transition midpoints, in [0, total].
@@ -434,6 +501,22 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn sub_frame_segments_disable_the_scheduler() {
+        let mut p = project();
+        if let Segment::Clip(c) = &mut p.timeline.tracks[0].segments[0] {
+            c.speed = Seconds::new(7, 3);
+        }
+        assert!(!frame_aligned(&p));
+        let mut p = project();
+        if let Segment::Clip(c) = &mut p.timeline.tracks[0].segments[0] {
+            c.asset_in = Seconds::new(1, 7);
+        }
+        assert!(!frame_aligned(&p));
+        let p = project();
+        assert!(frame_aligned(&p));
     }
 
     #[test]

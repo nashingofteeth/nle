@@ -327,8 +327,10 @@ trimming of a transition's own span (retime it with `x`/`X`,
   writes to a temp file and reports wall time/effective fps.
 - **Scheduler (shipped, opt-in):** `--parallel N` splits at cuts and
   transition midpoints, renders chunks concurrently, stream-copies the video
-  and encodes audio once at the final mux. Auto stays single-worker because
-  local x264/VAAPI benchmarks showed no gain on short timelines.
+  and encodes audio once at the final mux. It uses one encoder unless segment
+  durations and source in/out points are frame-aligned (the serial graph
+  rounds sub-frame spans, which chunk trims cannot reproduce). Auto stays
+  single-worker because local x264/VAAPI benchmarks showed no gain.
 - **Resume/cache (shipped):** chunks live in
   `.nile/<stem>/cache/export/<hash>.mkv`; completed chunks survive a failed
   run and are reused. `cache prune` ages both proxies and export chunks.

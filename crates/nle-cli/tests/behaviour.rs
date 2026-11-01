@@ -674,9 +674,12 @@ fn transitions() {
 fn parallel_export_splits_at_a_transition_midpoint() {
     let s = Sandbox::new();
     s.base();
-    // red 0-2, green 2-4 split at 3, blue 4-6; a 15f dissolve at 3 makes the
-    // timeline 5.5 s and puts its midpoint at 2.75 s, exactly the two-way
-    // target.
+    // Keep the scheduler's frame-alignment precondition: replace the 59.94
+    // blue source with 30 fps red, then split green at 3. Red 0-2, green
+    // 2-4 split at 3, red 4-6; a 15f dissolve at 3 makes the timeline 5.5 s
+    // and puts its midpoint at 2.75 s, exactly the two-way target.
+    s.ok(&["delete", "--at", "5", "--ripple"]);
+    s.ok(&["add", "red.mp4", "--at", "4", "--in", "0", "--out", "2"]);
     s.ok(&["split", "--at", "3"]);
     s.ok(&["transition", "--at", "3", "--frames", "15"]);
     let out = s.ok(&["export", "-o", "parallel.mp4", "--parallel", "2"]);
@@ -687,7 +690,7 @@ fn parallel_export_splits_at_a_transition_midpoint() {
         "parallel chunks concatenate to the timeline length",
     );
     s.assert_px("parallel.mp4", 1.0, RED, "before the split");
-    s.assert_px("parallel.mp4", 4.5, BLUE, "after the split");
+    s.assert_px("parallel.mp4", 4.5, RED, "after the split");
     assert!(
         s.has_audio("parallel.mp4"),
         "the final mux must keep the mix"

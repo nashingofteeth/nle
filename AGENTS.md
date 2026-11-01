@@ -186,8 +186,9 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   override. The chunk scheduler is opt-in (`--parallel N`), cuts at cut
   points and transition midpoints; video chunks are stream-copied and their
   PCM audio is encoded AAC once at the final mux. Chunks cache under
-  `.nile/<stem>/cache/export`; auto stays single-worker until a benchmark
-  shows a win.
+  `.nile/<stem>/cache/export`; it falls back to one encoder when segment
+  durations or source cuts are off the frame grid. Auto stays single-worker
+  until a benchmark shows a win.
 - **Export stays byte-identical for the simple case:** one video track + no
   audio track keeps the classic concat path; otherwise every track is padded
   to the timeline length, video layers `overlay` bottom→top (upper gaps
