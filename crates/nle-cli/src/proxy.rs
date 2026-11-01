@@ -100,9 +100,15 @@ pub struct PruneReport {
 impl PruneReport {
     /// `removed 3 proxy renders (12.4 MB), kept 5 (230.1 MB)` — the line the
     /// CLI prints and the TUI's notice shows.
+    #[cfg(test)]
     pub fn summary(&self, dry_run: bool) -> String {
+        self.summary_named(dry_run, "proxy render")
+    }
+
+    /// The report line, with a caller-chosen noun.
+    pub fn summary_named(&self, dry_run: bool, noun: &str) -> String {
         let mut s = format!(
-            "{} {} proxy render{} ({}), kept {} ({})",
+            "{} {} {noun}{} ({}), kept {} ({})",
             if dry_run { "would remove" } else { "removed" },
             self.removed,
             if self.removed == 1 { "" } else { "s" },
@@ -197,12 +203,15 @@ pub fn prune_at(
 }
 
 /// A cache entry's name: `<hash>.mp4`, or a crashed render's
-/// `<hash>.tmp-<pid>-<seq>.mp4`. The hash is written as `{hash:x}`, so it is
+/// `<hash>.tmp-<token>.mp4/mkv`. The hash is written as `{hash:x}`, so it is
 /// 1–16 hex digits; anything else in the directory is not ours to delete.
 fn is_entry_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".mp4") else {
+    let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
+    if ext != "mp4" && ext != "mkv" {
+        return false;
+    }
     let (hash, pid) = match stem.split_once(".tmp-") {
         Some((hash, pid)) => (hash, Some(pid)),
         None => (stem, None),
@@ -210,7 +219,9 @@ fn is_entry_name(name: &str) -> bool {
     !hash.is_empty()
         && hash.len() <= 16
         && hash.bytes().all(|b| b.is_ascii_hexdigit())
-        && pid.is_none_or(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit() || b == b'-'))
+        && pid.is_none_or(|p| {
+            !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 /// A render-local uniquifier for the tmp names below. The pid guards against
@@ -331,6 +342,7 @@ fn render_cached(
         crf: 18,
         preset: "ultrafast".into(),
         bitrate: "8M".into(),
+        audio: nle_ffmpeg::AudioCodec::Aac,
     };
     // Quiet: this runs from the monitor's reload, so ffmpeg's chatter would
     // paint over the TUI. A failure still carries the reason. The render's
@@ -810,24 +822,26 @@ mod tests {
         let young = Duration::from_secs(24 * 3600);
         entry(dir.path(), "abcd.mp4", 10, old, now);
         entry(dir.path(), "beef.tmp-77.mp4", 5, old, now); // crashed render
+        entry(dir.path(), "dead.mkv", 7, old, now); // export chunk
         entry(dir.path(), "cafe.mp4", 20, young, now);
         entry(dir.path(), "notes.txt", 3, old, now); // not ours
         std::fs::create_dir(dir.path().join("sub")).unwrap();
 
         let r = prune_at(dir.path(), Duration::from_secs(30 * 24 * 3600), now, false).unwrap();
-        assert_eq!(r.removed, 2, "{r:?}");
-        assert_eq!(r.bytes, 15);
+        assert_eq!(r.removed, 3, "{r:?}");
+        assert_eq!(r.bytes, 22);
         assert_eq!(r.kept, 1);
         assert_eq!(r.kept_bytes, 20);
         assert_eq!(r.failed, 0);
         assert!(!dir.path().join("abcd.mp4").exists());
         assert!(!dir.path().join("beef.tmp-77.mp4").exists());
+        assert!(!dir.path().join("dead.mkv").exists());
         assert!(dir.path().join("cafe.mp4").exists());
         assert!(dir.path().join("notes.txt").exists());
         assert!(dir.path().join("sub").is_dir());
         assert!(
             r.summary(false)
-                .starts_with("removed 2 proxy renders (0 KB)")
+                .starts_with("removed 3 proxy renders (0 KB)")
         );
     }
 
@@ -876,7 +890,14 @@ mod tests {
 
     #[test]
     fn entry_names_are_narrow() {
-        for ok in ["a.mp4", "0123456789abcdef.mp4", "dead.tmp-1.mp4"] {
+        for ok in [
+            "a.mp4",
+            "0123456789abcdef.mp4",
+            "dead.tmp-1.mp4",
+            "dead.mkv",
+            "dead.tmp-1.mkv",
+            "dead.tmp-A1b2.mkv",
+        ] {
             assert!(is_entry_name(ok), "{ok}");
         }
         for no in [
@@ -885,8 +906,8 @@ mod tests {
             "0123456789abcdef0.mp4", // 17 hex digits: not a u64 hash
             "xyz.mp4",               // not hex
             "dead.tmp-.mp4",
-            "dead.tmp-x.mp4",
             "dead.mp4.bak",
+            "dead.mkv.bak",
         ] {
             assert!(!is_entry_name(no), "{no}");
         }

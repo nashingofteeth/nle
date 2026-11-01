@@ -23,6 +23,7 @@ pub(crate) mod export;
 pub(crate) mod import;
 pub(crate) mod media;
 pub(crate) mod project;
+pub(crate) mod schedule;
 
 /// A CLI time: seconds or timecode, optionally negative (an extend target
 /// can reach back past time 0).

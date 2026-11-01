@@ -456,6 +456,9 @@ enum Cmd {
         /// Benchmark only this tier
         #[arg(long, value_enum)]
         preset: Option<QualityPreset>,
+        /// Number of chunked-export workers (benchmark; default: single)
+        #[arg(long)]
+        parallel: Option<usize>,
     },
     /// Render the timeline to a file
     Export {
@@ -477,6 +480,9 @@ enum Cmd {
         /// Override the hardware bitrate (vaapi/qsv)
         #[arg(long)]
         bitrate: Option<String>,
+        /// Force N chunked-export workers; omit to stay single-worker
+        #[arg(long)]
+        parallel: Option<usize>,
     },
     /// Interactive editor: TUI dashboard + mpv monitor, vim keys
     #[cfg(feature = "tui")]
@@ -756,7 +762,11 @@ fn main() -> Result<()> {
                 force: *force,
             });
         }
-        Cmd::Bench { runs, preset } => return cmd::export::cmd_bench(&project, *runs, *preset),
+        Cmd::Bench {
+            runs,
+            preset,
+            parallel,
+        } => return cmd::export::cmd_bench(&project, *runs, *preset, *parallel),
         Cmd::Export {
             output,
             preset,
@@ -764,6 +774,7 @@ fn main() -> Result<()> {
             crf,
             encoder_preset,
             bitrate,
+            parallel,
         } => {
             let options = ExportOptions {
                 preset: *preset,
@@ -771,6 +782,8 @@ fn main() -> Result<()> {
                 crf: *crf,
                 encoder_preset: encoder_preset.clone(),
                 bitrate: bitrate.clone(),
+                parallel: *parallel,
+                use_cache: true,
             };
             return cmd_export(&project, output, &options);
         }

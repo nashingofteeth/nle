@@ -157,6 +157,7 @@ The `:` line is the CLI grammar, flag for flag:
 :media ls|rm                  :cache prune [--days N] [--dry-run]
 :import / :add                :show / :seek T
 :export -o FILE [--preset T]  :detect FILE
+#        [--parallel N] (chunked export; opt-in)
 :edl-import / :otio-import    :help / :q
 ```
 
@@ -285,7 +286,13 @@ nile export -o master.mp4 --preset max     # x265 medium CRF 20
 # Explicit overrides: --encoder cpu|vaapi|qsv|x265|svt-av1, --crf N,
 # --encoder-preset P, --bitrate B.
 
-nile bench [--runs N] [--preset preview|balanced|max]
+nile export -o final.mp4 --parallel 2      # chunked export, opt-in
+# Chunks split at cut points and transition midpoints, render independently,
+# stream-copy the video and encode the audio once at the final mux. Cached in
+# .nile/<stem>/cache/export; a repeat export reuses completed chunks. Auto
+# mode stays single-worker: local tests showed no gain for these timelines.
+
+nile bench [--runs N] [--preset preview|balanced|max] [--parallel N]
 # Renders to a temp file and reports wall time and effective fps.
 ```
 
@@ -323,7 +330,8 @@ Multiple projects in one directory get separate `.nile/<stem>/` folders.
 Legacy adjacent `*.history.json` / `*.clipboard.json` files are copied into
 the state directory on first load; old `nle.json` projects still open with
 `--project nle.json`. The old global `~/.cache/nile` is no longer used, and
-`nile cache prune` only touches the current project’s cache.
+`nile cache prune` only touches the current project’s cache — proxy renders
+and completed export chunks.
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a

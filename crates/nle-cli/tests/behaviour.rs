@@ -671,6 +671,42 @@ fn transitions() {
 }
 
 #[test]
+fn parallel_export_splits_at_a_transition_midpoint() {
+    let s = Sandbox::new();
+    s.base();
+    // red 0-2, green 2-4 split at 3, blue 4-6; a 15f dissolve at 3 makes the
+    // timeline 5.5 s and puts its midpoint at 2.75 s, exactly the two-way
+    // target.
+    s.ok(&["split", "--at", "3"]);
+    s.ok(&["transition", "--at", "3", "--frames", "15"]);
+    let out = s.ok(&["export", "-o", "parallel.mp4", "--parallel", "2"]);
+    assert!(out.contains("2-way"), "scheduler was not used: {out}");
+    s.assert_dur(
+        "parallel.mp4",
+        5.5,
+        "parallel chunks concatenate to the timeline length",
+    );
+    s.assert_px("parallel.mp4", 1.0, RED, "before the split");
+    s.assert_px("parallel.mp4", 4.5, BLUE, "after the split");
+    assert!(
+        s.has_audio("parallel.mp4"),
+        "the final mux must keep the mix"
+    );
+    s.assert_px_ne(
+        "parallel.mp4",
+        2.6,
+        RED,
+        "inside the first half of the blend",
+    );
+    s.assert_px_ne(
+        "parallel.mp4",
+        2.9,
+        BLUE,
+        "inside the second half of the blend",
+    );
+}
+
+#[test]
 fn a_fade_at_a_clip_gap_seam_exports_through_black() {
     let s = Sandbox::new();
     s.base();

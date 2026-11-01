@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 
 use nle_core::Project;
-use nle_ffmpeg::{Encoder, ExportSpec};
+use nle_ffmpeg::{AudioCodec, Encoder, ExportSpec};
 
 use crate::cmd::media::parse_f64;
 use crate::{log, say};
@@ -32,6 +32,10 @@ pub struct ExportOptions {
     pub crf: Option<u8>,
     pub encoder_preset: Option<String>,
     pub bitrate: Option<String>,
+    /// Number of segment workers; `None` stays single-worker.
+    pub parallel: Option<usize>,
+    /// Reuse completed chunk files. Benchmarks turn this off.
+    pub use_cache: bool,
 }
 
 impl Default for ExportOptions {
@@ -42,12 +46,14 @@ impl Default for ExportOptions {
             crf: None,
             encoder_preset: None,
             bitrate: None,
+            parallel: None,
+            use_cache: true,
         }
     }
 }
 
 impl QualityPreset {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             QualityPreset::Preview => "preview",
             QualityPreset::Balanced => "balanced",
@@ -92,6 +98,7 @@ impl ExportOptions {
             crf,
             preset,
             bitrate: bitrate.to_string(),
+            audio: AudioCodec::Aac,
         }
     }
 
@@ -108,6 +115,7 @@ impl ExportOptions {
             crf: spec.crf,
             preset: preset.to_string(),
             bitrate: spec.bitrate.clone(),
+            audio: spec.audio,
         }
     }
 }
@@ -131,6 +139,18 @@ pub(crate) fn run_export(
     quiet: bool,
 ) -> Result<String> {
     let project = Project::load(project_path)?;
+    // The scheduler is opt-in: a local benchmark showed no gain from
+    // splitting an x264 (already multithreaded) or a short VAAPI export.
+    // `--parallel N` is for benchmarking/experiments and for long-proxy
+    // workloads where the caller measured a win.
+    let workers = options.parallel.unwrap_or(1).max(1);
+    if workers > 1 {
+        match crate::cmd::schedule::run(&project, project_path, output, options, workers, quiet) {
+            Ok(Some(summary)) => return Ok(summary),
+            Ok(None) => {}
+            Err(e) => log::line(&format!("parallel export failed ({e}); retrying single")),
+        }
+    }
     let spec = options.spec(output);
     log::line(&format!(
         "export -> {} ({:?}, {:?})",
@@ -187,6 +207,7 @@ pub(crate) fn cmd_bench(
     project_path: &Path,
     runs: usize,
     only: Option<QualityPreset>,
+    parallel: Option<usize>,
 ) -> Result<()> {
     if runs == 0 {
         anyhow::bail!("--runs must be at least 1");
@@ -219,6 +240,8 @@ pub(crate) fn cmd_bench(
             let out = dir.path().join(format!("{}-{run}.mp4", preset.label()));
             let options = ExportOptions {
                 preset,
+                parallel,
+                use_cache: false,
                 ..Default::default()
             };
             let started = std::time::Instant::now();

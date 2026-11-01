@@ -620,21 +620,54 @@ fn push_audio_silence(
 /// Hardware encoders can't sit directly after a software filter graph —
 /// route [vout] through hw surfaces first. Returns (graph, video label).
 /// The leading `;` closes the previous (audio-concat) chain.
-fn apply_encoder_tail(graph: String, encoder: Encoder) -> (String, &'static str) {
+fn apply_encoder_tail(
+    graph: String,
+    encoder: Encoder,
+    vout: &'static str,
+) -> (String, &'static str) {
     let mut graph = graph;
     let vmap = match encoder {
-        Encoder::Cpu => "vout",
+        Encoder::Cpu | Encoder::X265 | Encoder::SvtAv1 => vout,
         Encoder::Vaapi => {
-            graph.push_str(";\n[vout]format=nv12,hwupload[venc]\n");
+            graph.push_str(&format!(";\n[{vout}]format=nv12,hwupload[venc]\n"));
             "venc"
         }
         Encoder::Qsv => {
-            graph.push_str(";\n[vout]format=nv12,hwupload=extra_hw_frames=64[venc]\n");
+            graph.push_str(&format!(
+                ";\n[{vout}]format=nv12,hwupload=extra_hw_frames=64[venc]\n"
+            ));
             "venc"
         }
-        Encoder::X265 | Encoder::SvtAv1 => "vout",
     };
     (graph, vmap)
+}
+
+/// Trim the graph's final video/audio output to a time range. Used by the
+/// segment scheduler when a chunk must include a whole transition around its
+/// output slice.
+fn apply_output_range(
+    mut graph: String,
+    offset: Seconds,
+    duration: Seconds,
+) -> (String, &'static str, &'static str) {
+    let start = secs_f64(&offset);
+    let duration = secs_f64(&duration);
+    graph.push_str(&format!(
+        ";\n[vout]trim=start={start}:duration={duration},setpts=PTS-STARTPTS[vout_range]\n"
+    ));
+    graph.push_str(&format!(
+        ";\n[aout]atrim=start={start}:duration={duration},asetpts=PTS-STARTPTS[aout_range]\n"
+    ));
+    (graph, "vout_range", "aout_range")
+}
+
+/// Audio codec for the output. Scheduler chunks use PCM so independent
+/// chunks concatenate without codec-header/priming gaps; the final mux
+/// encodes AAC once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodec {
+    Aac,
+    Pcm,
 }
 
 /// Export settings beyond what the graph compiler decides.
@@ -645,18 +678,19 @@ pub struct ExportSpec {
     pub crf: u8,
     pub preset: String,
     pub bitrate: String,
+    pub audio: AudioCodec,
 }
 
 /// Compile the graph and run the export. Returns the plan on success.
 pub fn export(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, true, None)
+    run_export(project, spec, true, None, None)
 }
 
 /// [`export`] for a caller whose stderr is a terminal UI: ffmpeg's chatter
 /// (and our own `$ ffmpeg …` line) is swallowed rather than painted over the
 /// screen. A failure still carries ffmpeg's reason.
 pub fn export_quiet(project: &Project, spec: &ExportSpec) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, false, None)
+    run_export(project, spec, false, None, None)
 }
 
 /// [`export_quiet`] reporting the output position (seconds) as it renders —
@@ -666,7 +700,26 @@ pub fn export_quiet_progress(
     spec: &ExportSpec,
     progress: &mut dyn FnMut(f64),
 ) -> Result<ExportPlan, ExportError> {
-    run_export(project, spec, false, Some(progress))
+    run_export(project, spec, false, Some(progress), None)
+}
+
+/// Render only `[offset, offset + duration)` of a project (a scheduler chunk).
+/// The project must already be sliced to a window that contains this range
+/// plus any transition overlap.
+pub fn export_range_quiet(
+    project: &Project,
+    spec: &ExportSpec,
+    offset: Seconds,
+    duration: Seconds,
+) -> Result<ExportPlan, ExportError> {
+    run_export(project, spec, false, None, Some((offset, duration)))
+}
+
+fn is_mp4(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("mp4" | "mov" | "m4v")
+    )
 }
 
 fn run_export(
@@ -674,9 +727,14 @@ fn run_export(
     spec: &ExportSpec,
     echo: bool,
     mut progress: Option<&mut dyn FnMut(f64)>,
+    range: Option<(Seconds, Seconds)>,
 ) -> Result<ExportPlan, ExportError> {
     let plan = compile_export(project)?;
-    let (graph, vmap) = apply_encoder_tail(plan.graph.clone(), spec.encoder);
+    let (graph, vout, aout) = match range {
+        Some((offset, duration)) => apply_output_range(plan.graph.clone(), offset, duration),
+        None => (plan.graph.clone(), "vout", "aout"),
+    };
+    let (graph, vmap) = apply_encoder_tail(graph, spec.encoder, vout);
 
     // Long graphs exceed argv limits — pass via `-/filter_complex`, the
     // ffmpeg 9 file-read syntax (ffmpeg ≤8 used -filter_complex_script,
@@ -696,19 +754,29 @@ fn run_export(
     args.push("-map".into());
     args.push(format!("[{vmap}]"));
     args.push("-map".into());
-    args.push("[aout]".into());
+    args.push(format!("[{aout}]"));
     args.extend(video_encode_args(
         spec.encoder,
         spec.crf,
         &spec.preset,
         &spec.bitrate,
     ));
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-b:a".into());
-    args.push("192k".into());
-    args.push("-movflags".into());
-    args.push("+faststart".into());
+    match spec.audio {
+        AudioCodec::Aac => {
+            args.push("-c:a".into());
+            args.push("aac".into());
+            args.push("-b:a".into());
+            args.push("192k".into());
+        }
+        AudioCodec::Pcm => {
+            args.push("-c:a".into());
+            args.push("pcm_s16le".into());
+        }
+    }
+    if is_mp4(&spec.output) {
+        args.push("-movflags".into());
+        args.push("+faststart".into());
+    }
     // `--` ends option parsing (protects outputs named like options).
     args.push("--".into());
     args.push(spec.output.display().to_string());
@@ -997,17 +1065,17 @@ mod tests {
 
     #[test]
     fn hw_encoders_route_vout_through_hwupload() {
-        let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::Vaapi);
+        let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::Vaapi, "vout");
         assert_eq!(vmap, "venc");
         assert!(g.contains("[vout]format=nv12,hwupload[venc]"), "{g}");
 
-        let (g, _) = apply_encoder_tail("[vout]\n".into(), Encoder::Qsv);
+        let (g, _) = apply_encoder_tail("[vout]\n".into(), Encoder::Qsv, "vout");
         assert!(
             g.contains("[vout]format=nv12,hwupload=extra_hw_frames=64[venc]"),
             "{g}"
         );
 
-        let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::Cpu);
+        let (g, vmap) = apply_encoder_tail("[vout]\n".into(), Encoder::Cpu, "vout");
         assert_eq!(vmap, "vout");
         assert_eq!(g, "[vout]\n");
     }

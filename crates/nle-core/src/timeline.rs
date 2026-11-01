@@ -620,6 +620,63 @@ impl Timeline {
         }
     }
 
+    /// Slice the whole timeline to `[start, end)`. Clips are trimmed at the
+    /// source level (speed included); gaps are shortened; a transition must
+    /// be wholly inside the range. Every track is padded to the range length
+    /// so an export of the slice has exactly `end - start` seconds.
+    pub fn slice_range(&self, start: Seconds, end: Seconds) -> Result<Timeline, TimelineError> {
+        if end <= start {
+            return Err(TimelineError::Corrupt("empty slice range".into()));
+        }
+        let length = end - start;
+        let mut tracks = Vec::with_capacity(self.tracks.len());
+        for track in &self.tracks {
+            let mut segments = Vec::new();
+            let mut acc = Seconds::from_integer(0);
+            for seg in &track.segments {
+                let seg_end = acc + seg.duration();
+                let take_start = if start > acc { start } else { acc };
+                let take_end = if end < seg_end { end } else { seg_end };
+                if take_start < take_end {
+                    match seg {
+                        Segment::Gap(_g) => segments.push(Segment::Gap(Gap {
+                            duration: take_end - take_start,
+                        })),
+                        Segment::Clip(c) => {
+                            let mut c = c.clone();
+                            c.asset_in += (take_start - acc) * c.speed;
+                            c.asset_out -= (seg_end - take_end) * c.speed;
+                            if c.asset_out > c.asset_in {
+                                segments.push(Segment::Clip(c));
+                            }
+                        }
+                        Segment::Transition(tr) => {
+                            if take_start != acc || take_end != seg_end {
+                                return Err(TimelineError::Corrupt(
+                                    "slice cuts through a transition".into(),
+                                ));
+                            }
+                            segments.push(Segment::Transition(tr.clone()));
+                        }
+                    }
+                }
+                acc = seg_end;
+            }
+            let used: Seconds = segments.iter().map(Segment::duration).sum();
+            if used < length {
+                segments.push(Segment::Gap(Gap {
+                    duration: length - used,
+                }));
+            }
+            tracks.push(Track {
+                kind: track.kind,
+                muted: track.muted,
+                segments,
+            });
+        }
+        Ok(Timeline { tracks })
+    }
+
     /// Track at `ti` (by position — the stacking order).
     pub fn track(&self, ti: usize) -> Option<&Track> {
         self.tracks.get(ti)

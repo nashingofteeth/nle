@@ -181,6 +181,13 @@ subject then a short **why** body. Report findings (bugs, tradeoffs) plainly.
   retimes, transitions, foreign picture sizes, audible-mix spans — using the
   *export* graph (no second filter chain to drift), cached under
   `.nile/<stem>/cache/proxy`. See `docs/pitfalls/mpv-ffmpeg.md`.
+- **Export presets are local.** `preview` is VAAPI 6M with CPU fallback,
+  `balanced` x264 fast CRF 22, `max` x265 medium CRF 20; direct flags
+  override. The chunk scheduler is opt-in (`--parallel N`), cuts at cut
+  points and transition midpoints; video chunks are stream-copied and their
+  PCM audio is encoded AAC once at the final mux. Chunks cache under
+  `.nile/<stem>/cache/export`; auto stays single-worker until a benchmark
+  shows a win.
 - **Export stays byte-identical for the simple case:** one video track + no
   audio track keeps the classic concat path; otherwise every track is padded
   to the timeline length, video layers `overlay` bottom→top (upper gaps

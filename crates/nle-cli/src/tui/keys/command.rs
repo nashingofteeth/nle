@@ -230,7 +230,8 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     use crate::cmd::export::{ExportOptions, QualityPreset};
 
     const USAGE: &str = "usage: :export -o FILE [--preset preview|balanced|max] \
-        [--encoder cpu|vaapi|qsv|x265|svtav1] [--encoder-preset P] [--crf N] [--bitrate B]";
+        [--encoder cpu|vaapi|qsv|x265|svtav1] [--encoder-preset P] [--crf N] [--bitrate B] \
+        [--parallel N]";
     let output = match f.take("out").or_else(|| f.positional()) {
         Some(o) => PathBuf::from(o),
         None => return Some(USAGE.to_string()),
@@ -267,6 +268,13 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     };
     let encoder_preset = f.take("encoder-preset");
     let bitrate = f.take("bitrate");
+    let parallel = match f.take("parallel") {
+        Some(v) => match v.parse() {
+            Ok(n) => Some(n),
+            Err(_) => return Some("--parallel expects a number".to_string()),
+        },
+        None => None,
+    };
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
@@ -276,6 +284,8 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
         crf,
         encoder_preset,
         bitrate,
+        parallel,
+        use_cache: true,
     };
     let notice = format!("exporting to {}…", output.display());
     let Some(job) = start_job(app, "export", false) else {
@@ -575,12 +585,18 @@ pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> 
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
-    match crate::proxy::prune(
-        &app.path,
-        Duration::from_secs(days.saturating_mul(86_400)),
-        dry_run,
-    ) {
-        Ok(report) => Some(report.summary(dry_run)),
-        Err(e) => Some(format!("prune failed: {e}")),
-    }
+    let age = Duration::from_secs(days.saturating_mul(86_400));
+    let proxy = match crate::proxy::prune(&app.path, age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
+    let export = match crate::cmd::schedule::prune_export(&app.path, age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
+    Some(format!(
+        "{}; export: {}",
+        proxy.summary_named(dry_run, "proxy render"),
+        export.summary_named(dry_run, "export chunk")
+    ))
 }
