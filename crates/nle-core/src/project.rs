@@ -313,7 +313,7 @@ mod tests {
     use crate::edit::{self, History};
     use crate::media::{RawFormat, RawStream};
     use crate::time::Seconds;
-    use crate::timeline::{Segment, Transition, TransitionKind, TransitionSource};
+    use crate::timeline::{Effect, Segment, Transition, TransitionKind, TransitionSource};
 
     fn probe_report(duration: &str, w: u32, h: u32, rate: &str, audio: bool) -> RawProbe {
         let mut streams = vec![RawStream {
@@ -458,6 +458,22 @@ mod tests {
         assert_eq!(p, back);
         // human-readable exact times in the file itself
         assert!(json.contains("\"30000/1001\""), "{json}");
+    }
+
+    #[test]
+    fn effect_floats_round_trip_exactly() {
+        let mut p = sample_project();
+        if let Segment::Clip(c) = &mut p.timeline.video_track_mut().unwrap().segments[0] {
+            c.effects.push(Effect::Crop {
+                left: 25.936_916_977_875_356,
+                right: -51.972_412_671_360_22,
+                top: 109.115_355_159_373_05,
+                bottom: 137.207_469_284_410_93,
+            });
+        }
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, back);
     }
 
     #[test]

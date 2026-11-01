@@ -85,6 +85,28 @@ impl Effect {
         }
     }
 
+    /// Every numeric parameter is finite. Non-finite values cannot be
+    /// represented in the project JSON (serde writes them as `null`), so
+    /// refuse them at the model boundary.
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Effect::Crop {
+                left,
+                right,
+                top,
+                bottom,
+            } => [left, right, top, bottom].iter().all(|v| v.is_finite()),
+            Effect::Scale { w, h } => w.is_finite() && h.is_finite(),
+            Effect::Offset { x, y } => x.is_finite() && y.is_finite(),
+            Effect::Eq {
+                brightness,
+                contrast,
+                saturation,
+            } => brightness.is_finite() && contrast.is_finite() && saturation.is_finite(),
+            Effect::Lut { .. } => true,
+        }
+    }
+
     /// The parameters as one line — the panel's detail column.
     pub fn details(&self) -> String {
         match self {
@@ -754,6 +776,9 @@ impl Timeline {
                         if c.speed <= Seconds::from_integer(0) {
                             return Err(bad("clip has a non-positive speed"));
                         }
+                        if c.effects.iter().any(|e| !e.is_finite()) {
+                            return Err(bad("effect has a non-finite parameter"));
+                        }
                     }
                     Segment::Gap(g) => {
                         if g.duration <= Seconds::from_integer(0) {
@@ -772,11 +797,20 @@ impl Timeline {
                         }
                         for side in [&t.a, &t.b] {
                             if let TransitionSource::Clip {
-                                src_in, src_out, ..
+                                src_in,
+                                src_out,
+                                effects,
+                                ..
                             } = side
-                                && src_out <= src_in
                             {
-                                return Err(bad("transition side has a non-positive source span"));
+                                if src_out <= src_in {
+                                    return Err(bad(
+                                        "transition side has a non-positive source span",
+                                    ));
+                                }
+                                if effects.iter().any(|e| !e.is_finite()) {
+                                    return Err(bad("effect has a non-finite parameter"));
+                                }
                             }
                         }
                     }
@@ -831,6 +865,41 @@ mod tests {
         Segment::Gap(Gap {
             duration: Seconds::from_integer(dur),
         })
+    }
+
+    #[test]
+    fn non_finite_effect_parameters_are_rejected() {
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        c.effects.push(Effect::Crop {
+            left: 10.0,
+            right: f64::NAN,
+            top: 0.0,
+            bottom: 0.0,
+        });
+        t.tracks[0].segments.push(Segment::Clip(c));
+        assert!(matches!(t.validate(), Err(TimelineError::Corrupt(_))));
+    }
+
+    #[test]
+    fn slicing_close_large_denominators_stays_valid() {
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        c.asset_in = Seconds::new(299, 15);
+        c.asset_out = Seconds::from_integer(20);
+        c.speed = Seconds::new(1, 1_000_000);
+        t.tracks[0].segments.push(Segment::Clip(c));
+        let sliced = t
+            .slice_range(Seconds::new(57_273, 1000), Seconds::new(59_202, 1000))
+            .unwrap();
+        assert_eq!(sliced.end(), Seconds::new(1_929, 1000));
+        sliced.validate().unwrap();
     }
 
     #[test]
