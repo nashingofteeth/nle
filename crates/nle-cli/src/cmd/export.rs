@@ -76,12 +76,12 @@ impl ExportOptions {
         let (tier_encoder, mut crf, tier_preset, tier_bitrate) = self.preset.base();
         let encoder = self.encoder.unwrap_or(tier_encoder);
         let mut bitrate = tier_bitrate.to_string();
-        let mut preset = match (self.encoder, encoder) {
+        let mut preset = match self.encoder {
             // Keep the tier's speed when the user only changes CPU/GPU engine.
-            (None, _) | (Some(Encoder::Cpu), _) => tier_preset.to_string(),
-            (Some(Encoder::X265), _) => "medium".to_string(),
-            (Some(Encoder::SvtAv1), _) => "6".to_string(),
-            (Some(Encoder::Vaapi | Encoder::Qsv), _) => "fast".to_string(),
+            None | Some(Encoder::Cpu) => tier_preset.to_string(),
+            Some(Encoder::X265) => "medium".to_string(),
+            Some(Encoder::SvtAv1) => "6".to_string(),
+            Some(Encoder::Vaapi | Encoder::Qsv) => "fast".to_string(),
         };
         if let Some(c) = self.crf {
             crf = c;
@@ -97,7 +97,7 @@ impl ExportOptions {
             encoder,
             crf,
             preset,
-            bitrate: bitrate.to_string(),
+            bitrate,
             audio: AudioCodec::Aac,
         }
     }

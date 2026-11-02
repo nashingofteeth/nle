@@ -468,11 +468,11 @@ enum Cmd {
         /// Quality tier: preview, balanced, max
         #[arg(long, value_enum, default_value = "balanced")]
         preset: QualityPreset,
-        /// Override the tier's encode engine (cpu|vaapi|qsv|x265|svtav1)
+        /// Override the tier's encode engine (cpu|vaapi|qsv|x265|svt-av1)
         #[arg(long, value_enum)]
         encoder: Option<EncoderArg>,
         /// Override the tier's quality (0-51, lower = better)
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=51))]
         crf: Option<u8>,
         /// Override the encoder's own preset (x264 names or SVT-AV1 number)
         #[arg(long)]

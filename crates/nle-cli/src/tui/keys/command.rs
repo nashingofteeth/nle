@@ -261,8 +261,8 @@ pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<Str
     };
     let crf = match f.take("crf") {
         Some(v) => match v.parse() {
-            Ok(crf) => Some(crf),
-            Err(_) => return Some("--crf expects a number 0-51".to_string()),
+            Ok(crf) if crf <= 51 => Some(crf),
+            _ => return Some("--crf expects a number 0-51".to_string()),
         },
         None => None,
     };

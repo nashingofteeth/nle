@@ -521,7 +521,8 @@ fn fmt(t: &Seconds) -> String {
 }
 
 /// Prune this project's completed chunk cache. The same narrow entry-name
-/// rules as the proxy cache apply (only `<hash>.mp4` and crashed temps).
+/// rules as the proxy cache apply (only `<hash>.mkv`, `<hash>.mp4` and
+/// crashed temps).
 pub(crate) fn prune_export(
     project_path: &Path,
     max_age: Duration,
