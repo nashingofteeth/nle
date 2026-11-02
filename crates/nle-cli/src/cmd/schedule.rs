@@ -101,17 +101,21 @@ pub(crate) fn run(
     // GPU: `concat` stream-copies, so mixing two encoder heads (VAAPI + x264)
     // keeps only the first stream's headers. Retry the whole run on CPU, and
     // key those chunks by their own spec so they are never reused as GPU ones.
-    let (paths, fallback) = match render_all(project, cache, &spec, &chunks) {
-        Ok(paths) => (paths, false),
+    let (paths, encoder, fallback) = match render_all(project, cache, &spec, &chunks) {
+        Ok(paths) => (paths, spec.encoder, false),
         Err(e) if matches!(spec.encoder, Encoder::Vaapi | Encoder::Qsv) => {
             log::line(&format!("chunked export fell back to CPU: {e}"));
             let cpu = options.cpu_fallback(&spec);
-            (render_all(project, cache, &cpu, &chunks)?, true)
+            (
+                render_all(project, cache, &cpu, &chunks)?,
+                cpu.encoder,
+                true,
+            )
         }
         Err(e) => return Err(e),
     };
 
-    concat(&paths, output, &project.timeline.end(), quiet)?;
+    concat(&paths, output, &project.timeline.end(), quiet, encoder)?;
     let shown = nle_ffmpeg::probe(output)?
         .format
         .duration
@@ -195,7 +199,13 @@ fn usable_chunk(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.len() > 0) && nle_ffmpeg::probe(path).is_ok()
 }
 
-fn concat(paths: &[PathBuf], output: &Path, total: &Seconds, quiet: bool) -> Result<()> {
+fn concat(
+    paths: &[PathBuf],
+    output: &Path,
+    total: &Seconds,
+    quiet: bool,
+    encoder: Encoder,
+) -> Result<()> {
     let video = tempfile::Builder::new()
         .suffix(".mkv")
         .tempfile()
@@ -243,6 +253,12 @@ fn concat(paths: &[PathBuf], output: &Path, total: &Seconds, quiet: bool) -> Res
         output.extension().and_then(|e| e.to_str()),
         Some("mp4" | "mov" | "m4v")
     ) {
+        // The chunks are Matroska and their tags don't survive the stream
+        // copy; re-tag HEVC as `hvc1` (Apple players reject `hev1`).
+        if encoder == Encoder::X265 {
+            args.push("-tag:v".into());
+            args.push("hvc1".into());
+        }
         args.push("-movflags".into());
         args.push("+faststart".into());
     }

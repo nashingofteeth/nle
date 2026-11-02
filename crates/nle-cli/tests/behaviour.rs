@@ -747,6 +747,30 @@ fn a_playhead_move_keeps_the_parallel_chunks_cached() {
 }
 
 #[test]
+fn a_chunked_hevc_export_is_tagged_hvc1() {
+    // Chunks are Matroska, so their `-tag:v hvc1` cannot survive the stream
+    // copy; the final mux has to set it or Apple players reject the file.
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["delete", "--at", "5", "--ripple"]);
+    s.ok(&["add", "red.mp4", "--at", "4", "--in", "0", "--out", "2"]);
+    s.ok(&["split", "--at", "3"]);
+    let out = s.ok(&[
+        "export",
+        "-o",
+        "hevc.mp4",
+        "--preset",
+        "max",
+        "--encoder-preset",
+        "ultrafast",
+        "--parallel",
+        "2",
+    ]);
+    assert!(out.contains("2-way"), "scheduler was not used: {out}");
+    assert_eq!(s.video_tag("hevc.mp4"), "hvc1");
+}
+
+#[test]
 fn a_fade_at_a_clip_gap_seam_exports_through_black() {
     let s = Sandbox::new();
     s.base();

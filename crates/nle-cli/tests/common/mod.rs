@@ -317,6 +317,21 @@ impl Sandbox {
             .is_empty()
     }
 
+    /// The first video stream's container tag — `avc1`, `hvc1`, `hev1`.
+    pub fn video_tag(&self, file: &str) -> String {
+        self.probe(
+            file,
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_tag_string",
+                "-of",
+                "csv=p=0",
+            ],
+        )
+    }
+
     // ------------------------------------------------------------------ views
 
     pub fn show(&self) -> String {
