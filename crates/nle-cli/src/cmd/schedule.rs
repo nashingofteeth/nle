@@ -27,12 +27,12 @@ use nle_core::{Project, Seconds};
 use nle_ffmpeg::trim::run_ffmpeg_opt;
 use nle_ffmpeg::{Encoder, ExportSpec, export_range_quiet};
 
-use crate::cmd::export::{ExportOptions, QualityPreset};
+use crate::cmd::export::ExportOptions;
 use crate::cmd::media::parse_f64;
 use crate::log;
 use crate::proxy::{self, PruneReport};
 
-const EXPORT_CACHE_VERSION: u64 = 2;
+const EXPORT_CACHE_VERSION: u64 = 3;
 
 struct Chunk {
     a: Seconds,
@@ -86,18 +86,24 @@ pub(crate) fn run(
     // Each chunk is independent; the cache is keyed by the project, encode
     // settings and exact render window. A completed chunk from an interrupted
     // run is reused as-is.
-    let results: Vec<(PathBuf, bool)> = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for chunk in &chunks {
-            handles.push(scope.spawn(move || render_chunk(project, cache, options, chunk)));
+    //
+    // Chunk audio is PCM: lossless chunks carry no AAC priming, so boundaries
+    // stay sample-exact. The final mux encodes AAC once.
+    let mut spec = options.spec(&PathBuf::new());
+    spec.audio = nle_ffmpeg::AudioCodec::Pcm;
+    // A partial hardware failure must not leave the rest of the chunks on the
+    // GPU: `concat` stream-copies, so mixing two encoder heads (VAAPI + x264)
+    // keeps only the first stream's headers. Retry the whole run on CPU, and
+    // key those chunks by their own spec so they are never reused as GPU ones.
+    let (paths, fallback) = match render_all(project, cache, &spec, &chunks) {
+        Ok(paths) => (paths, false),
+        Err(e) if matches!(spec.encoder, Encoder::Vaapi | Encoder::Qsv) => {
+            log::line(&format!("chunked export fell back to CPU: {e}"));
+            let cpu = options.cpu_fallback(&spec);
+            (render_all(project, cache, &cpu, &chunks)?, true)
         }
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("export worker panicked"))
-            .collect::<Result<Vec<_>>>()
-    })?;
-    let fallback = results.iter().any(|(_, f)| *f);
-    let paths: Vec<PathBuf> = results.into_iter().map(|(p, _)| p).collect();
+        Err(e) => return Err(e),
+    };
 
     concat(&paths, output, &project.timeline.end(), quiet)?;
     let shown = nle_ffmpeg::probe(output)?
@@ -121,20 +127,36 @@ pub(crate) fn run(
     )))
 }
 
+/// Render every chunk concurrently; the first error aborts the run (the other
+/// workers are joined before it is returned).
+fn render_all(
+    project: &Project,
+    cache: &Path,
+    spec: &ExportSpec,
+    chunks: &[Chunk],
+) -> Result<Vec<PathBuf>> {
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in chunks {
+            handles.push(scope.spawn(move || render_chunk(project, cache, spec, chunk)));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("export worker panicked"))
+            .collect()
+    })
+}
+
 fn render_chunk(
     project: &Project,
     cache: &Path,
-    options: &ExportOptions,
+    spec: &ExportSpec,
     chunk: &Chunk,
-) -> Result<(PathBuf, bool)> {
-    let mut spec = options.spec(&PathBuf::new());
-    // Lossless chunk audio has no AAC priming, so chunk boundaries stay
-    // sample-exact; the final mux encodes AAC once.
-    spec.audio = nle_ffmpeg::AudioCodec::Pcm;
-    let hash = chunk_hash(project, &spec, chunk, options.preset);
+) -> Result<PathBuf> {
+    let hash = chunk_hash(project, spec, chunk);
     let path = cache.join(format!("{hash:016x}.mkv"));
     if usable_chunk(&path) {
-        return Ok((path, false));
+        return Ok(path);
     }
 
     let timeline = project
@@ -153,22 +175,14 @@ fn render_chunk(
         .suffix(".mkv")
         .tempfile_in(cache)
         .context("chunk temp file")?;
-    let mut spec = options.spec(temp.path());
-    spec.audio = nle_ffmpeg::AudioCodec::Pcm;
-
-    let first = export_range_quiet(&sub, &spec, offset, duration);
-    let (result, fallback) = match first {
-        Ok(plan) => (Ok(plan), false),
-        Err(e) if matches!(spec.encoder, Encoder::Vaapi | Encoder::Qsv) => {
-            log::line(&format!("chunk {} fallback to CPU: {e}", fmt(&chunk.a)));
-            let cpu = options.cpu_fallback(&spec);
-            (export_range_quiet(&sub, &cpu, offset, duration), true)
-        }
-        Err(e) => (Err(e), false),
+    let render = ExportSpec {
+        output: temp.path().to_path_buf(),
+        ..spec.clone()
     };
-    result?;
+
+    export_range_quiet(&sub, &render, offset, duration)?;
     fs::rename(temp.path(), &path).with_context(|| format!("publish chunk {}", path.display()))?;
-    Ok((path, fallback))
+    Ok(path)
 }
 
 fn usable_chunk(path: &Path) -> bool {
@@ -387,7 +401,7 @@ fn snap(fps: Option<&Seconds>, t: Seconds) -> Seconds {
     Seconds::new(frame * fps.denom(), *fps.numer())
 }
 
-fn chunk_hash(project: &Project, spec: &ExportSpec, chunk: &Chunk, preset: QualityPreset) -> u64 {
+fn chunk_hash(project: &Project, spec: &ExportSpec, chunk: &Chunk) -> u64 {
     let mut h = DefaultHasher::new();
     EXPORT_CACHE_VERSION.hash(&mut h);
     serde_json::to_vec(project).unwrap_or_default().hash(&mut h);
@@ -410,7 +424,6 @@ fn chunk_hash(project: &Project, spec: &ExportSpec, chunk: &Chunk, preset: Quali
     spec.preset.hash(&mut h);
     spec.bitrate.hash(&mut h);
     format!("{:?}", spec.audio).hash(&mut h);
-    preset.label().hash(&mut h);
     for value in [chunk.a, chunk.b, chunk.pre, chunk.post] {
         value.numer().hash(&mut h);
         value.denom().hash(&mut h);
@@ -436,6 +449,7 @@ pub(crate) fn prune_export(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::export::QualityPreset;
     use nle_core::timeline::{Clip, Track, TrackKind, TransitionKind, TransitionSource};
 
     fn project() -> Project {
@@ -620,14 +634,13 @@ mod tests {
     #[test]
     fn chunk_hash_is_stable_but_respects_the_chunk_and_the_preset() {
         let p = project();
-        let spec = ExportSpec {
-            output: PathBuf::from("/tmp/out.mp4"),
-            encoder: Encoder::Cpu,
-            crf: 22,
-            preset: "fast".into(),
-            bitrate: "8M".into(),
-            audio: nle_ffmpeg::AudioCodec::Aac,
-        };
+        let out = Path::new("/tmp/out.mp4");
+        let balanced = ExportOptions::default().spec(out);
+        let max = ExportOptions {
+            preset: QualityPreset::Max,
+            ..Default::default()
+        }
+        .spec(out);
         let one = Chunk {
             a: Seconds::from_integer(0),
             b: Seconds::from_integer(2),
@@ -640,19 +653,15 @@ mod tests {
             pre: Seconds::from_integer(2),
             post: Seconds::from_integer(5),
         };
-        let hash = |c: &Chunk, preset| chunk_hash(&p, &spec, c, preset);
         assert_eq!(
-            hash(&one, QualityPreset::Balanced),
-            hash(&one, QualityPreset::Balanced)
+            chunk_hash(&p, &balanced, &one),
+            chunk_hash(&p, &balanced, &one)
         );
         assert_ne!(
-            hash(&one, QualityPreset::Balanced),
-            hash(&two, QualityPreset::Balanced)
+            chunk_hash(&p, &balanced, &one),
+            chunk_hash(&p, &balanced, &two)
         );
-        assert_ne!(
-            hash(&one, QualityPreset::Balanced),
-            hash(&one, QualityPreset::Max)
-        );
+        assert_ne!(chunk_hash(&p, &balanced, &one), chunk_hash(&p, &max, &one));
     }
 
     #[test]

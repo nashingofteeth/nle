@@ -291,7 +291,9 @@ nile export -o final.mp4 --parallel 2      # chunked export, opt-in
 # stream-copy the video and encode the audio once at the final mux. Cached in
 # .nile/<stem>/cache/export; a repeat export reuses completed chunks. It falls
 # back to one encoder unless segment durations and source cuts are on the frame
-# grid. Auto mode stays single-worker: local tests showed no gain.
+# grid. If a hardware chunk fails, the whole run retries on the CPU rather than
+# mixing encoder heads in one stream-copied file. Auto mode stays single-worker:
+# local tests showed no gain.
 
 nile bench [--runs N] [--preset preview|balanced|max] [--parallel N]
 # Renders to a temp file and reports wall time and effective fps.
@@ -324,6 +326,7 @@ video/
         ├── clipboard.json
         └── cache/
             ├── proxy/
+            ├── export/
             └── black/
 ```
 
