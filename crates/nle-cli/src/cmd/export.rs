@@ -269,10 +269,14 @@ pub(crate) fn cmd_bench(
             } else {
                 0.0
             };
-            let notes = if summary.contains("CPU fallback") {
-                "CPU fallback"
-            } else {
-                ""
+            let notes = match (
+                summary.contains("CPU fallback"),
+                summary.contains("single ("),
+            ) {
+                (true, true) => "CPU fallback; single",
+                (true, false) => "CPU fallback",
+                (false, true) => "single",
+                (false, false) => "",
             };
             say!(
                 "{:<10} {:>3}  {:>7.2}s  {:>7.1}  {notes}",
