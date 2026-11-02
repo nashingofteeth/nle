@@ -17,5 +17,5 @@ pub use graph::{
 // Media types live in core; re-exported here for callers that treat
 // this crate as the media facade.
 pub use nle_core::media::{RawFormat, RawProbe, RawStream};
-pub use probe::{ProbeError, probe};
+pub use probe::{ProbeError, frame_count, probe};
 pub use trim::{Encoder, FfmpegError, TrimError, TrimSpec, trim};

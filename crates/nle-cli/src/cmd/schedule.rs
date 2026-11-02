@@ -50,9 +50,11 @@ pub(crate) fn run(
     options: &ExportOptions,
     workers: usize,
     quiet: bool,
+    skipped: &mut Option<&'static str>,
 ) -> Result<Option<String>> {
     let total = project.timeline.end();
     if total <= Seconds::from_integer(0) || workers < 2 {
+        *skipped = Some("nothing to split");
         return Ok(None);
     }
     // The serial graph rounds sub-frame segment spans to frames. Chunk trims
@@ -62,20 +64,24 @@ pub(crate) fn run(
     // their frame grids.
     if !frame_aligned(project) {
         log::line("chunked export needs frame-aligned segments; using one encoder");
+        *skipped = Some("chunks need frame-aligned cuts");
         return Ok(None);
     }
     let cuts = choose_cuts(project, workers);
     if cuts.len() < 2 {
+        *skipped = Some("no useful split point");
         return Ok(None);
     }
     let chunks = chunks(project, &cuts)?;
     if chunks.len() < 2 {
+        *skipped = Some("no useful split point");
         return Ok(None);
     }
     // A cut inside a clip makes `slice_range` start from a fractional source
     // frame, so the chunk renders frames the single export wouldn't.
     if !boundaries_on_frames(project, &chunks) {
         log::line("chunked export needs every cut on a source frame; using one encoder");
+        *skipped = Some("chunks need frame-aligned cuts");
         return Ok(None);
     }
 
@@ -124,7 +130,8 @@ pub(crate) fn run(
         .map(|d| format!("{d:.2}"))
         .unwrap_or_else(|| "?".into());
     let fps = project.fps.unwrap_or(Seconds::from_integer(30));
-    let frames = (secs_f64(&project.timeline.end()) * secs_f64(&fps)).round() as i64;
+    let frames = nle_ffmpeg::frame_count(output)
+        .unwrap_or_else(|| (secs_f64(&project.timeline.end()) * secs_f64(&fps)).round() as i64);
     let fallback = if fallback { " · CPU fallback" } else { "" };
     Ok(Some(format!(
         "✓ {}  ({} s · {} frames @ {}/{}) · {}{fallback} · {workers}-way",

@@ -144,11 +144,23 @@ pub(crate) fn run_export(
     // `--parallel N` is for benchmarking/experiments and for long-proxy
     // workloads where the caller measured a win.
     let workers = options.parallel.unwrap_or(1).max(1);
+    let mut skipped = None;
     if workers > 1 {
-        match crate::cmd::schedule::run(&project, project_path, output, options, workers, quiet) {
+        match crate::cmd::schedule::run(
+            &project,
+            project_path,
+            output,
+            options,
+            workers,
+            quiet,
+            &mut skipped,
+        ) {
             Ok(Some(summary)) => return Ok(summary),
             Ok(None) => {}
-            Err(e) => log::line(&format!("parallel export failed ({e}); retrying single")),
+            Err(e) => {
+                log::line(&format!("parallel export failed ({e}); retrying single"));
+                skipped = Some("chunking failed");
+            }
         }
     }
     let spec = options.spec(output);
@@ -190,12 +202,16 @@ pub(crate) fn run_export(
         .map(|d| format!("{d:.2}"))
         .unwrap_or_else(|| "?".into());
     let tier = options.preset.label();
+    let frames = nle_ffmpeg::frame_count(output).unwrap_or(plan.frames);
     let fallback = if fallback { " · CPU fallback" } else { "" };
+    let skipped = skipped
+        .map(|why| format!(" · single ({why})"))
+        .unwrap_or_default();
     Ok(format!(
-        "✓ {}  ({} s · {} frames @ {}/{}) · {tier}{fallback}",
+        "✓ {}  ({} s · {} frames @ {}/{}) · {tier}{fallback}{skipped}",
         output.display(),
         shown,
-        plan.frames,
+        frames,
         plan.fps.numer(),
         plan.fps.denom()
     ))
@@ -247,8 +263,9 @@ pub(crate) fn cmd_bench(
             let started = std::time::Instant::now();
             let summary = run_export(project_path, &out, &options, true)?;
             let elapsed = started.elapsed().as_secs_f64();
+            let actual = nle_ffmpeg::frame_count(&out).unwrap_or(frames);
             let effective = if elapsed > 0.0 {
-                frames as f64 / elapsed
+                actual as f64 / elapsed
             } else {
                 0.0
             };

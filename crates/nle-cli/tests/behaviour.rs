@@ -184,6 +184,38 @@ fn audio_retiming_keeps_the_audio() {
 }
 
 #[test]
+fn export_summary_reports_actual_frames() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "blue.mp4", "red.mp4"]);
+    s.ok(&["add", "blue.mp4", "--at", "0", "--in", "0", "--out", "2.5"]);
+    s.ok(&["add", "red.mp4", "--at", "2.5", "--in", "0", "--out", "1.5"]);
+    s.ok(&["add", "blue.mp4", "--at", "4", "--in", "0", "--out", "2.5"]);
+    s.ok(&["split", "--at", "5.013"]);
+    s.ok(&["split", "--at", "3.795"]);
+    s.ok(&["split", "--at", "5.031"]);
+    s.ok(&["gap", "--at", "0.635", "--frames", "15"]);
+    let report = s.export_report("actual.mp4");
+    let actual = s.frame_count("actual.mp4");
+    assert!(
+        report.contains(&format!("{actual} frames")),
+        "summary should report {actual} actual frames:\n{report}"
+    );
+}
+
+#[test]
+fn parallel_export_reports_when_it_must_stay_single() {
+    let s = Sandbox::new();
+    s.base();
+    let out = s.ok(&["export", "-o", "single.mp4", "--parallel", "2"]);
+    assert!(
+        out.contains("single (chunks need frame-aligned cuts)"),
+        "the fallback must be visible:\n{out}"
+    );
+    assert!(!out.contains("2-way"), "scheduler should not run:\n{out}");
+}
+
+#[test]
 fn sixty_fps_source_follows_the_timeline_rate() {
     let s = Sandbox::new();
     s.ok(&["init", "--force"]);
