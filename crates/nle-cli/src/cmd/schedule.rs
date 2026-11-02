@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 
 use nle_core::state;
 use nle_core::time::secs_f64;
-use nle_core::timeline::{Segment, Transition};
+use nle_core::timeline::{Segment, Track, Transition};
 use nle_core::{Project, Seconds};
 
 use nle_ffmpeg::trim::run_ffmpeg_opt;
@@ -70,6 +70,12 @@ pub(crate) fn run(
     }
     let chunks = chunks(project, &cuts)?;
     if chunks.len() < 2 {
+        return Ok(None);
+    }
+    // A cut inside a clip makes `slice_range` start from a fractional source
+    // frame, so the chunk renders frames the single export wouldn't.
+    if !boundaries_on_frames(project, &chunks) {
+        log::line("chunked export needs every cut on a source frame; using one encoder");
         return Ok(None);
     }
 
@@ -304,6 +310,49 @@ fn frame_aligned(project: &Project) -> bool {
     })
 }
 
+/// Every chunk boundary must start every video track on a source frame. The
+/// per-clip check in [`frame_aligned`] covers each clip's existing in/out, but
+/// a cut derived from one track can fall mid-clip on another; slicing there
+/// invents a source cut that is not on the source's frame grid.
+fn boundaries_on_frames(project: &Project, chunks: &[Chunk]) -> bool {
+    chunks.iter().all(|chunk| {
+        [chunk.pre, chunk.post].iter().all(|at| {
+            project
+                .timeline
+                .video_tracks()
+                .all(|track| track_starts_on_a_frame(project, track, *at))
+        })
+    })
+}
+
+fn track_starts_on_a_frame(project: &Project, track: &Track, at: Seconds) -> bool {
+    // A boundary exactly on a segment edge is the case `frame_aligned` already
+    // covers (the clip's own `asset_in`); only a cut inside a clip needs the
+    // source position at that offset.
+    let Some(i) = track.index_at(at) else {
+        return true;
+    };
+    let start = track.start_of(i);
+    if start == at {
+        return true;
+    }
+    match &track.segments[i] {
+        Segment::Clip(c) => {
+            let Some(asset) = project.asset(c.asset) else {
+                return false;
+            };
+            let Some(fps) = asset.probe.fps() else {
+                return false;
+            };
+            (c.source_at(at - start) * fps).is_integer()
+        }
+        Segment::Gap(_) => true,
+        // `chunks` widens each chunk over every blend it touches, so a cut can
+        // only land inside one if that widening did not converge.
+        Segment::Transition(_) => false,
+    }
+}
+
 /// All frame-aligned cut points, plus transition midpoints, in [0, total].
 fn candidates(project: &Project) -> Vec<Seconds> {
     let total = project.timeline.end();
@@ -367,13 +416,26 @@ fn chunks(project: &Project, cuts: &[Seconds]) -> Result<Vec<Chunk>> {
             continue;
         }
         // Include every transition that overlaps this output range, whole:
-        // the graph needs both sides and the blend itself.
+        // the graph needs both sides and the blend itself. Widening can reach
+        // a blend on another track, so repeat until the range stops growing.
         let mut pre = a;
         let mut post = b;
-        for (start, end) in &transitions {
-            if *start < b && *end > a {
-                pre = pre.min(*start);
-                post = post.max(*end);
+        loop {
+            let mut grew = false;
+            for (start, end) in &transitions {
+                if *start < post && *end > pre {
+                    if *start < pre {
+                        pre = *start;
+                        grew = true;
+                    }
+                    if *end > post {
+                        post = *end;
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                break;
             }
         }
         out.push(Chunk { a, b, pre, post });
@@ -457,7 +519,7 @@ pub(crate) fn prune_export(
 mod tests {
     use super::*;
     use crate::cmd::export::QualityPreset;
-    use nle_core::timeline::{Clip, Track, TrackKind, TransitionKind, TransitionSource};
+    use nle_core::timeline::{Clip, Gap, TrackKind, TransitionKind, TransitionSource};
 
     fn project() -> Project {
         let mut p = Project::new();
@@ -687,6 +749,102 @@ mod tests {
         moved.set_playhead(1.5);
         assert_ne!(moved.playhead, p.playhead);
         assert_eq!(chunk_hash(&p, &spec, &one), chunk_hash(&moved, &spec, &one));
+    }
+
+    /// The fixture plus a second video track reading a 24 fps source: a cut at
+    /// 1/30 s is a project frame but not a frame of that source.
+    fn two_rate_project() -> Project {
+        let mut p = project();
+        let mut probe24 = probe();
+        probe24.streams[0].r_frame_rate = Some("24/1".into());
+        let (b, _) = p.add_asset("/media/blue.mp4".into(), probe24);
+        p.timeline.tracks.push(Track {
+            kind: TrackKind::Video,
+            muted: false,
+            segments: vec![Segment::Clip(Clip::new(
+                b,
+                b,
+                Seconds::from_integer(0),
+                Seconds::from_integer(5),
+            ))],
+        });
+        p
+    }
+
+    #[test]
+    fn a_cut_inside_another_tracks_clip_must_land_on_its_source_frame() {
+        let p = two_rate_project();
+        let off_grid = Chunk {
+            a: Seconds::from_integer(0),
+            b: Seconds::new(1, 30),
+            pre: Seconds::from_integer(0),
+            post: Seconds::new(1, 30),
+        };
+        assert!(!boundaries_on_frames(&p, &[off_grid]));
+        // 1/3 s is frame 10 at 30 fps and frame 8 at 24 fps.
+        let on_grid = Chunk {
+            a: Seconds::from_integer(0),
+            b: Seconds::new(1, 3),
+            pre: Seconds::from_integer(0),
+            post: Seconds::new(1, 3),
+        };
+        assert!(boundaries_on_frames(&p, &[on_grid]));
+    }
+
+    fn blend(id: u32, a: u32, dur: Seconds) -> Segment {
+        Segment::Transition(Transition {
+            id,
+            dur,
+            kind: TransitionKind::Dissolve,
+            a: TransitionSource::Clip {
+                asset: a,
+                src_in: Seconds::from_integer(0),
+                src_out: Seconds::from_integer(1),
+                effects: Vec::new(),
+            },
+            b: TransitionSource::Clip {
+                asset: a,
+                src_in: Seconds::from_integer(1),
+                src_out: Seconds::from_integer(2),
+                effects: Vec::new(),
+            },
+        })
+    }
+
+    fn gap(duration: Seconds) -> Segment {
+        Segment::Gap(Gap { duration })
+    }
+
+    /// Two blends on different tracks: widening for the second (2.0..3.0)
+    /// reaches the first (2.9..3.1). One pass would stop at 3.0 and slice the
+    /// first blend in half.
+    #[test]
+    fn widening_follows_a_chain_of_transitions_on_other_tracks() {
+        let mut p = project();
+        let a = p.media[0].id;
+        p.timeline.tracks = vec![
+            Track {
+                kind: TrackKind::Video,
+                muted: false,
+                segments: vec![gap(Seconds::new(29, 10)), blend(1, a, Seconds::new(2, 10))],
+            },
+            Track {
+                kind: TrackKind::Video,
+                muted: false,
+                segments: vec![
+                    gap(Seconds::from_integer(2)),
+                    blend(2, a, Seconds::from_integer(1)),
+                ],
+            },
+        ];
+        let cuts = vec![
+            Seconds::from_integer(2),
+            Seconds::new(21, 10),
+            Seconds::new(31, 10),
+        ];
+        let chunks = chunks(&p, &cuts).unwrap();
+        assert_eq!(chunks[0].pre, Seconds::from_integer(2));
+        assert_eq!(chunks[0].post, Seconds::new(31, 10));
     }
 
     #[test]
