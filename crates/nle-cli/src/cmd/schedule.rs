@@ -528,6 +528,133 @@ mod tests {
         assert!(points.contains(&total));
     }
 
+    /// The fixture is `[clip 0..2][transition 2..3][clip 3..5]`, so the only
+    /// interior cut points are 2, 2.5 (the blend midpoint) and 3.
+    #[test]
+    fn cuts_land_on_the_nearest_cut_point_not_a_raw_fraction() {
+        let p = project();
+        // Thirds of 5 s are 1.667 and 3.333 — neither is a cut, so the
+        // scheduler must fall back to the nearest one, never encode from the
+        // middle of a clip's frame.
+        assert_eq!(
+            choose_cuts(&p, 3),
+            vec![
+                Seconds::from_integer(0),
+                Seconds::from_integer(2),
+                Seconds::from_integer(3),
+                p.timeline.end(),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_or_zero_workers_is_the_single_export() {
+        let p = project();
+        let whole = vec![Seconds::from_integer(0), p.timeline.end()];
+        assert_eq!(choose_cuts(&p, 1), whole);
+        // `--parallel 0` must not divide by zero on the way to "no split".
+        assert_eq!(choose_cuts(&p, 0), whole);
+    }
+
+    #[test]
+    fn every_split_is_sorted_bounded_and_distinct() {
+        let p = project();
+        for workers in 2..=8 {
+            let cuts = choose_cuts(&p, workers);
+            assert_eq!(cuts.first(), Some(&Seconds::from_integer(0)), "{workers}");
+            assert_eq!(cuts.last(), Some(&p.timeline.end()), "{workers}");
+            for pair in cuts.windows(2) {
+                assert!(pair[0] < pair[1], "unordered or empty range: {pair:?}");
+            }
+            assert!(
+                cuts.len() <= workers + 1,
+                "more cuts than requested: {cuts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn degenerate_cut_lists_produce_no_chunks() {
+        let p = project();
+        assert!(chunks(&p, &[]).unwrap().is_empty());
+        assert!(chunks(&p, &[Seconds::from_integer(1)]).unwrap().is_empty());
+        // Repeated cuts would be zero-width chunks; they are skipped, not
+        // passed to ffmpeg as `-ss N -to N`.
+        let repeated = [Seconds::from_integer(0), Seconds::from_integer(0)];
+        assert!(chunks(&p, &repeated).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snap_rounds_to_the_nearest_frame() {
+        let fps = Seconds::from_integer(30);
+        // 1.01 s is 30.3 frames -> frame 30; 1.02 s is 30.6 -> frame 31.
+        assert_eq!(
+            snap(Some(&fps), Seconds::new(101, 100)),
+            Seconds::from_integer(1)
+        );
+        assert_eq!(
+            snap(Some(&fps), Seconds::new(102, 100)),
+            Seconds::new(31, 30)
+        );
+        // No fps (a probe that failed) leaves the time alone.
+        assert_eq!(snap(None, Seconds::new(101, 100)), Seconds::new(101, 100));
+    }
+
+    #[test]
+    fn transitions_are_reported_with_their_output_span() {
+        assert_eq!(
+            transitions(&project()),
+            vec![(Seconds::from_integer(2), Seconds::from_integer(3))]
+        );
+    }
+
+    #[test]
+    fn a_zero_or_missing_fps_disables_the_scheduler() {
+        let mut p = project();
+        p.fps = None;
+        assert!(!frame_aligned(&p));
+        p.fps = Some(Seconds::from_integer(0));
+        assert!(!frame_aligned(&p));
+    }
+
+    #[test]
+    fn chunk_hash_is_stable_but_respects_the_chunk_and_the_preset() {
+        let p = project();
+        let spec = ExportSpec {
+            output: PathBuf::from("/tmp/out.mp4"),
+            encoder: Encoder::Cpu,
+            crf: 22,
+            preset: "fast".into(),
+            bitrate: "8M".into(),
+            audio: nle_ffmpeg::AudioCodec::Aac,
+        };
+        let one = Chunk {
+            a: Seconds::from_integer(0),
+            b: Seconds::from_integer(2),
+            pre: Seconds::from_integer(0),
+            post: Seconds::from_integer(2),
+        };
+        let two = Chunk {
+            a: Seconds::from_integer(2),
+            b: Seconds::from_integer(5),
+            pre: Seconds::from_integer(2),
+            post: Seconds::from_integer(5),
+        };
+        let hash = |c: &Chunk, preset| chunk_hash(&p, &spec, c, preset);
+        assert_eq!(
+            hash(&one, QualityPreset::Balanced),
+            hash(&one, QualityPreset::Balanced)
+        );
+        assert_ne!(
+            hash(&one, QualityPreset::Balanced),
+            hash(&two, QualityPreset::Balanced)
+        );
+        assert_ne!(
+            hash(&one, QualityPreset::Balanced),
+            hash(&one, QualityPreset::Max)
+        );
+    }
+
     #[test]
     fn chunks_include_the_whole_transition_around_a_midpoint_split() {
         let p = project();
