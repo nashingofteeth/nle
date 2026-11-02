@@ -1,8 +1,9 @@
 # nile — plan of record
 
-Project and command: **nile**. Status: **M5 shipped;
-post-M5 polish shipped; M6 next.** This file is the design/roadmap; the README
-is the user-facing how-to. Keep it in sync as milestones land.
+Project and command: **nile**. Status: **M5 shipped; post-M5 polish shipped;
+M6 shipped** (presets, bench and the opt-in chunk scheduler/cache; auto stays
+single-worker until a workload shows a win). This file is the design/roadmap;
+the README is the user-facing how-to. Keep it in sync as milestones land.
 
 **Post-M5 additions:** transparent crop/scale masking and the offset effect
 (lower tracks show through); a TUI effects panel with one effect per kind,
@@ -82,7 +83,7 @@ editing (`i/o`, `I/O`, `s`, `_`, `dd/D`, `yy/p/P`, `u`), and extend
 | **M3** | Editing for real | ✅ done |
 | **M4** | Multi-track + separate audio tracks | ✅ done |
 | **M5** | Transitions (`xfade`/`acrossfade`) + per-clip effects + proxy cache | ✅ done |
-| **M6** | Export scheduler (3 lanes), segment-parallel, `nile bench`, presets, resume+cache | pending |
+| **M6** | Export scheduler (3 lanes), segment-parallel, `nile bench`, presets, resume+cache | shipped (scheduler opt-in) |
 | **M7** | GUI (Tauri+WebCodecs or libmpv) | someday |
 
 ### M3 — shipped (beyond the original scope)
@@ -317,13 +318,24 @@ below.)
 trimming of a transition's own span (retime it with `x`/`X`,
 `--frames`/`--dur`/`--percent` instead).
 
-## M6 — export scheduler, presets, bench (planned)
+## M6 — export scheduler, presets, bench (shipped; scheduler opt-in)
 
-- **Presets:** `preview` (VAAPI, near-instant), `balanced` (libx264),
-  `max` (libx265 / SVT-AV1, archival).
-- **Scheduler:** three encode lanes; segment-parallel export.
-- **Bench:** `nile bench` for repeatable timing runs.
-- **Resume/cache:** restart an interrupted export from completed segments.
+- **Presets (shipped):** `preview` = VAAPI H.264 6M with CPU fallback;
+  `balanced` = libx264 fast CRF 22; `max` = libx265 medium CRF 20.
+  `--encoder`/`--crf`/`--encoder-preset`/`--bitrate` override.
+- **Bench (shipped):** `nile bench [--runs N] [--preset T] [--parallel N]`
+  writes to a temp file and reports wall time/effective fps.
+- **Scheduler (shipped, opt-in):** `--parallel N` splits at cuts and
+  transition midpoints, renders chunks concurrently, stream-copies the video
+  and encodes audio once at the final mux. It uses one encoder unless segment
+  durations and source in/out points are frame-aligned (the serial graph
+  rounds sub-frame spans, which chunk trims cannot reproduce). Auto stays
+  single-worker because local x264/VAAPI benchmarks showed no gain.
+- **Resume/cache (shipped):** chunks live in
+  `.nile/<stem>/cache/export/<hash>.mkv`; completed chunks survive a failed
+  run and are reused. `cache prune` ages both proxies and export chunks.
+- **Deferred:** auto-enabling multi-lane scheduling on a workload where a
+  local benchmark shows a win; this machine's x264/VAAPI short exports did not.
 
 ## Open / deferred
 
@@ -332,6 +344,5 @@ trimming of a transition's own span (retime it with `x`/`X`,
 
 ## Open decisions (non-blocking)
 
-1. M6 encode-tier presets (`preview`/`balanced`/`max`).
-2. `v` visual/select semantics.
-3. M7 GUI technology.
+1. `v` visual/select semantics.
+2. M7 GUI technology.

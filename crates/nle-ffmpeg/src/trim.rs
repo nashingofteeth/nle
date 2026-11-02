@@ -53,6 +53,10 @@ pub enum Encoder {
     Vaapi,
     /// Intel Quick Sync (same GPU, different API).
     Qsv,
+    /// libx265 — software HEVC, archival.
+    X265,
+    /// libsvtav1 — software AV1, archival.
+    SvtAv1,
 }
 
 #[derive(Debug, Error)]
@@ -117,6 +121,7 @@ pub fn device_args(encoder: Encoder, hw_decode: bool) -> Vec<String> {
                 a.push("qsv".into());
             }
         }
+        Encoder::X265 | Encoder::SvtAv1 => {}
     }
     a
 }
@@ -144,6 +149,24 @@ pub fn video_encode_args(encoder: Encoder, crf: u8, preset: &str, bitrate: &str)
             a.push("h264_qsv".into());
             a.push("-b:v".into());
             a.push(bitrate.into());
+        }
+        Encoder::X265 => {
+            a.push("-c:v".into());
+            a.push("libx265".into());
+            a.push("-preset".into());
+            a.push(preset.into());
+            a.push("-crf".into());
+            a.push(crf.to_string());
+            a.push("-tag:v".into());
+            a.push("hvc1".into());
+        }
+        Encoder::SvtAv1 => {
+            a.push("-c:v".into());
+            a.push("libsvtav1".into());
+            a.push("-preset".into());
+            a.push(preset.into());
+            a.push("-crf".into());
+            a.push(crf.to_string());
         }
     }
     a

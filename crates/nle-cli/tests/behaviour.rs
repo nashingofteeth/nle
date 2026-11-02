@@ -184,6 +184,38 @@ fn audio_retiming_keeps_the_audio() {
 }
 
 #[test]
+fn export_summary_reports_actual_frames() {
+    let s = Sandbox::new();
+    s.ok(&["init", "--force"]);
+    s.ok(&["import", "blue.mp4", "red.mp4"]);
+    s.ok(&["add", "blue.mp4", "--at", "0", "--in", "0", "--out", "2.5"]);
+    s.ok(&["add", "red.mp4", "--at", "2.5", "--in", "0", "--out", "1.5"]);
+    s.ok(&["add", "blue.mp4", "--at", "4", "--in", "0", "--out", "2.5"]);
+    s.ok(&["split", "--at", "5.013"]);
+    s.ok(&["split", "--at", "3.795"]);
+    s.ok(&["split", "--at", "5.031"]);
+    s.ok(&["gap", "--at", "0.635", "--frames", "15"]);
+    let report = s.export_report("actual.mp4");
+    let actual = s.frame_count("actual.mp4");
+    assert!(
+        report.contains(&format!("{actual} frames")),
+        "summary should report {actual} actual frames:\n{report}"
+    );
+}
+
+#[test]
+fn parallel_export_reports_when_it_must_stay_single() {
+    let s = Sandbox::new();
+    s.base();
+    let out = s.ok(&["export", "-o", "single.mp4", "--parallel", "2"]);
+    assert!(
+        out.contains("single (chunks need frame-aligned cuts)"),
+        "the fallback must be visible:\n{out}"
+    );
+    assert!(!out.contains("2-way"), "scheduler should not run:\n{out}");
+}
+
+#[test]
 fn sixty_fps_source_follows_the_timeline_rate() {
     let s = Sandbox::new();
     s.ok(&["init", "--force"]);
@@ -668,6 +700,106 @@ fn transitions() {
     s.ok(&["transition", "fade", "--at", "2", "--dur", "0.5"]);
     s.export("t.mp4");
     s.assert_dur("t.mp4", 5.5, "--dur and the fade kind agree");
+}
+
+#[test]
+fn parallel_export_splits_at_a_transition_midpoint() {
+    let s = Sandbox::new();
+    s.base();
+    // Keep the scheduler's frame-alignment precondition: replace the 59.94
+    // blue source with 30 fps red, then split green at 3. Red 0-2, green
+    // 2-4 split at 3, red 4-6; a 15f dissolve at 3 makes the timeline 5.5 s
+    // and puts its midpoint at 2.75 s, exactly the two-way target.
+    s.ok(&["delete", "--at", "5", "--ripple"]);
+    s.ok(&["add", "red.mp4", "--at", "4", "--in", "0", "--out", "2"]);
+    s.ok(&["split", "--at", "3"]);
+    s.ok(&["transition", "--at", "3", "--frames", "15"]);
+    let out = s.ok(&["export", "-o", "parallel.mp4", "--parallel", "2"]);
+    assert!(out.contains("2-way"), "scheduler was not used: {out}");
+    s.assert_dur(
+        "parallel.mp4",
+        5.5,
+        "parallel chunks concatenate to the timeline length",
+    );
+    s.assert_px("parallel.mp4", 1.0, RED, "before the split");
+    s.assert_px("parallel.mp4", 4.5, RED, "after the split");
+    assert!(
+        s.has_audio("parallel.mp4"),
+        "the final mux must keep the mix"
+    );
+    s.assert_px_ne(
+        "parallel.mp4",
+        2.6,
+        RED,
+        "inside the first half of the blend",
+    );
+    s.assert_px_ne(
+        "parallel.mp4",
+        2.9,
+        BLUE,
+        "inside the second half of the blend",
+    );
+}
+
+#[test]
+fn a_playhead_move_keeps_the_parallel_chunks_cached() {
+    use std::os::unix::fs::MetadataExt;
+
+    // The TUI persists the playhead on every seek; it is session state, not
+    // render state, so it must not invalidate the chunk cache.
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["delete", "--at", "5", "--ripple"]);
+    s.ok(&["add", "red.mp4", "--at", "4", "--in", "0", "--out", "2"]);
+    s.ok(&["split", "--at", "3"]);
+    s.ok(&["transition", "--at", "3", "--frames", "15"]);
+    s.ok(&["export", "-o", "one.mp4", "--parallel", "2"]);
+
+    let dir = s.cache_dir().join("export");
+    // The inode changes when a chunk is re-rendered (temp file + rename), so
+    // comparing it is immune to filesystem timestamp granularity.
+    let chunks = || {
+        let mut found: Vec<(String, u64)> = fs::read_dir(&dir)
+            .expect("chunk cache")
+            .map(|entry| {
+                let entry = entry.expect("cache entry");
+                let ino = entry.metadata().expect("chunk metadata").ino();
+                (entry.file_name().to_string_lossy().into_owned(), ino)
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    let before = chunks();
+    assert_eq!(before.len(), 2, "expected two chunks: {before:?}");
+
+    s.ok(&["seek", "1"]);
+    s.ok(&["export", "-o", "two.mp4", "--parallel", "2"]);
+    assert_eq!(chunks(), before, "a seek rebuilt the chunks");
+}
+
+#[test]
+fn a_chunked_hevc_export_is_tagged_hvc1() {
+    // Chunks are Matroska, so their `-tag:v hvc1` cannot survive the stream
+    // copy; the final mux has to set it or Apple players reject the file.
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["delete", "--at", "5", "--ripple"]);
+    s.ok(&["add", "red.mp4", "--at", "4", "--in", "0", "--out", "2"]);
+    s.ok(&["split", "--at", "3"]);
+    let out = s.ok(&[
+        "export",
+        "-o",
+        "hevc.mp4",
+        "--preset",
+        "max",
+        "--encoder-preset",
+        "ultrafast",
+        "--parallel",
+        "2",
+    ]);
+    assert!(out.contains("2-way"), "scheduler was not used: {out}");
+    assert_eq!(s.video_tag("hevc.mp4"), "hvc1");
 }
 
 #[test]

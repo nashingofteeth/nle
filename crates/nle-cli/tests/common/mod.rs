@@ -151,6 +151,35 @@ impl Sandbox {
         self.file(name)
     }
 
+    /// Count the actual decoded video frames in an exported file.
+    pub fn frame_count(&self, file: &str) -> i64 {
+        let out = Command::new("ffprobe")
+            .current_dir(self.path())
+            .args([
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "csv=p=0",
+                file,
+            ])
+            .output()
+            .expect("spawn ffprobe");
+        assert!(
+            out.status.success(),
+            "ffprobe frame count {file}:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("ffprobe frame count")
+    }
+
     // ---------------------------------------------------------------- pixels
 
     /// The first pixel of the frame at `t` seconds, as `ffmpeg` decodes it.
@@ -315,6 +344,21 @@ impl Sandbox {
                 ],
             )
             .is_empty()
+    }
+
+    /// The first video stream's container tag — `avc1`, `hvc1`, `hev1`.
+    pub fn video_tag(&self, file: &str) -> String {
+        self.probe(
+            file,
+            &[
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_tag_string",
+                "-of",
+                "csv=p=0",
+            ],
+        )
     }
 
     // ------------------------------------------------------------------ views

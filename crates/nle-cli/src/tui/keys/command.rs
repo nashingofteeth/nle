@@ -223,37 +223,78 @@ pub(crate) fn seek_command(
     ))
 }
 
-/// `:export -o FILE [--encoder cpu|vaapi|qsv] [--crf N] [--preset P]
-/// [--bitrate B]` — render in a worker; the monitor keeps playing and the
-/// notice lands when ffmpeg finishes.
+/// `:export -o FILE [--preset preview|balanced|max] [--encoder …]
+/// [--encoder-preset P] [--crf N] [--bitrate B]` — render in a worker; the
+/// monitor keeps playing and the notice lands when ffmpeg finishes.
 pub(crate) fn export_command(app: &mut App, f: &mut action::Flags) -> Option<String> {
-    const USAGE: &str =
-        "usage: :export -o FILE [--encoder cpu|vaapi|qsv] [--crf N] [--preset P] [--bitrate B]";
+    use crate::cmd::export::{ExportOptions, QualityPreset};
+
+    const USAGE: &str = "usage: :export -o FILE [--preset preview|balanced|max] \
+        [--encoder cpu|vaapi|qsv|x265|svtav1] [--encoder-preset P] [--crf N] [--bitrate B] \
+        [--parallel N]";
     let output = match f.take("out").or_else(|| f.positional()) {
         Some(o) => PathBuf::from(o),
         None => return Some(USAGE.to_string()),
     };
-    let encoder = match f.take("encoder").as_deref() {
-        None | Some("cpu") => crate::Encoder::Cpu,
-        Some("vaapi") => crate::Encoder::Vaapi,
-        Some("qsv") => crate::Encoder::Qsv,
-        Some(other) => return Some(format!("--encoder expects cpu|vaapi|qsv, got {other:?}")),
+    let preset = match f.take("preset").as_deref() {
+        None | Some("balanced") => QualityPreset::Balanced,
+        Some("preview") => QualityPreset::Preview,
+        Some("max") => QualityPreset::Max,
+        Some(other) => {
+            return Some(format!(
+                "--preset expects preview|balanced|max, got {other:?}"
+            ));
+        }
     };
-    let crf = f.take("crf").and_then(|s| s.parse().ok()).unwrap_or(18);
-    let preset = f.take("preset").unwrap_or_else(|| "fast".to_string());
-    let bitrate = f.take("bitrate").unwrap_or_else(|| "8M".to_string());
+    let encoder = match f.take("encoder").as_deref() {
+        None => None,
+        Some("cpu") => Some(crate::Encoder::Cpu),
+        Some("vaapi") => Some(crate::Encoder::Vaapi),
+        Some("qsv") => Some(crate::Encoder::Qsv),
+        Some("x265") => Some(crate::Encoder::X265),
+        Some("svtav1") | Some("svt-av1") => Some(crate::Encoder::SvtAv1),
+        Some(other) => {
+            return Some(format!(
+                "--encoder expects cpu|vaapi|qsv|x265|svtav1, got {other:?}"
+            ));
+        }
+    };
+    let crf = match f.take("crf") {
+        Some(v) => match v.parse() {
+            Ok(crf) if crf <= 51 => Some(crf),
+            _ => return Some("--crf expects a number 0-51".to_string()),
+        },
+        None => None,
+    };
+    let encoder_preset = f.take("encoder-preset");
+    let bitrate = f.take("bitrate");
+    let parallel = match f.take("parallel") {
+        Some(v) => match v.parse() {
+            Ok(n) => Some(n),
+            Err(_) => return Some("--parallel expects a number".to_string()),
+        },
+        None => None,
+    };
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
+    let options = ExportOptions {
+        preset,
+        encoder,
+        crf,
+        encoder_preset,
+        bitrate,
+        parallel,
+        use_cache: true,
+    };
     let notice = format!("exporting to {}…", output.display());
     let Some(job) = start_job(app, "export", false) else {
         return Some("a job is already running — wait for it".to_string());
     };
     let project_path = app.path.clone();
     std::thread::spawn(move || {
-        let result =
-            crate::cmd::export::run_export(&project_path, &output, encoder, crf, &preset, &bitrate)
-                .map_err(|e| e.to_string());
+        let result = crate::cmd::export::run_export(&project_path, &output, &options, true)
+            .map_err(|e| e.to_string());
         let _ = job.send(result);
     });
     Some(notice)
@@ -544,12 +585,18 @@ pub(crate) fn cache_command(app: &App, f: &mut action::Flags) -> Option<String> 
     if let Err(e) = f.finish(USAGE) {
         return Some(e.to_string());
     }
-    match crate::proxy::prune(
-        &app.path,
-        Duration::from_secs(days.saturating_mul(86_400)),
-        dry_run,
-    ) {
-        Ok(report) => Some(report.summary(dry_run)),
-        Err(e) => Some(format!("prune failed: {e}")),
-    }
+    let age = Duration::from_secs(days.saturating_mul(86_400));
+    let proxy = match crate::proxy::prune(&app.path, age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
+    let export = match crate::cmd::schedule::prune_export(&app.path, age, dry_run) {
+        Ok(report) => report,
+        Err(e) => return Some(format!("prune failed: {e}")),
+    };
+    Some(format!(
+        "{}; export: {}",
+        proxy.summary_named(dry_run, "proxy render"),
+        export.summary_named(dry_run, "export chunk")
+    ))
 }

@@ -25,6 +25,46 @@ pub enum ProbeError {
     Parse(#[from] serde_json::Error),
 }
 
+/// Count the actual video frames in `path`, without decoding unless the
+/// container has no `nb_frames` metadata. `None` means ffprobe could not answer;
+/// callers can fall back to the plan's frame count.
+pub fn frame_count(path: &Path) -> Option<i64> {
+    if !path.is_file() {
+        return None;
+    }
+    let probe_int = |args: &[&str]| {
+        let out = Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0"])
+            .args(args)
+            .arg("--")
+            .arg(path)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse::<i64>().ok())
+            .filter(|n| *n >= 0)
+    };
+    probe_int(&[
+        "-show_entries",
+        "stream=nb_frames",
+        "-of",
+        "default=nw=1:nk=1",
+    ])
+    .or_else(|| {
+        probe_int(&[
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=nw=1:nk=1",
+        ])
+    })
+}
+
 /// Run ffprobe on `path` and return the parsed report.
 pub fn probe(path: &Path) -> Result<RawProbe, ProbeError> {
     if !path.is_file() {

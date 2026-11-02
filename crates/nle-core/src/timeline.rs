@@ -85,6 +85,28 @@ impl Effect {
         }
     }
 
+    /// Every numeric parameter is finite. Non-finite values cannot be
+    /// represented in the project JSON (serde writes them as `null`), so
+    /// refuse them at the model boundary.
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Effect::Crop {
+                left,
+                right,
+                top,
+                bottom,
+            } => [left, right, top, bottom].iter().all(|v| v.is_finite()),
+            Effect::Scale { w, h } => w.is_finite() && h.is_finite(),
+            Effect::Offset { x, y } => x.is_finite() && y.is_finite(),
+            Effect::Eq {
+                brightness,
+                contrast,
+                saturation,
+            } => brightness.is_finite() && contrast.is_finite() && saturation.is_finite(),
+            Effect::Lut { .. } => true,
+        }
+    }
+
     /// The parameters as one line — the panel's detail column.
     pub fn details(&self) -> String {
         match self {
@@ -620,6 +642,63 @@ impl Timeline {
         }
     }
 
+    /// Slice the whole timeline to `[start, end)`. Clips are trimmed at the
+    /// source level (speed included); gaps are shortened; a transition must
+    /// be wholly inside the range. Every track is padded to the range length
+    /// so an export of the slice has exactly `end - start` seconds.
+    pub fn slice_range(&self, start: Seconds, end: Seconds) -> Result<Timeline, TimelineError> {
+        if end <= start {
+            return Err(TimelineError::Corrupt("empty slice range".into()));
+        }
+        let length = end - start;
+        let mut tracks = Vec::with_capacity(self.tracks.len());
+        for track in &self.tracks {
+            let mut segments = Vec::new();
+            let mut acc = Seconds::from_integer(0);
+            for seg in &track.segments {
+                let seg_end = acc + seg.duration();
+                let take_start = if start > acc { start } else { acc };
+                let take_end = if end < seg_end { end } else { seg_end };
+                if take_start < take_end {
+                    match seg {
+                        Segment::Gap(_g) => segments.push(Segment::Gap(Gap {
+                            duration: take_end - take_start,
+                        })),
+                        Segment::Clip(c) => {
+                            let mut c = c.clone();
+                            c.asset_in += (take_start - acc) * c.speed;
+                            c.asset_out -= (seg_end - take_end) * c.speed;
+                            if c.asset_out > c.asset_in {
+                                segments.push(Segment::Clip(c));
+                            }
+                        }
+                        Segment::Transition(tr) => {
+                            if take_start != acc || take_end != seg_end {
+                                return Err(TimelineError::Corrupt(
+                                    "slice cuts through a transition".into(),
+                                ));
+                            }
+                            segments.push(Segment::Transition(tr.clone()));
+                        }
+                    }
+                }
+                acc = seg_end;
+            }
+            let used: Seconds = segments.iter().map(Segment::duration).sum();
+            if used < length {
+                segments.push(Segment::Gap(Gap {
+                    duration: length - used,
+                }));
+            }
+            tracks.push(Track {
+                kind: track.kind,
+                muted: track.muted,
+                segments,
+            });
+        }
+        Ok(Timeline { tracks })
+    }
+
     /// Track at `ti` (by position — the stacking order).
     pub fn track(&self, ti: usize) -> Option<&Track> {
         self.tracks.get(ti)
@@ -697,6 +776,9 @@ impl Timeline {
                         if c.speed <= Seconds::from_integer(0) {
                             return Err(bad("clip has a non-positive speed"));
                         }
+                        if c.effects.iter().any(|e| !e.is_finite()) {
+                            return Err(bad("effect has a non-finite parameter"));
+                        }
                     }
                     Segment::Gap(g) => {
                         if g.duration <= Seconds::from_integer(0) {
@@ -715,11 +797,20 @@ impl Timeline {
                         }
                         for side in [&t.a, &t.b] {
                             if let TransitionSource::Clip {
-                                src_in, src_out, ..
+                                src_in,
+                                src_out,
+                                effects,
+                                ..
                             } = side
-                                && src_out <= src_in
                             {
-                                return Err(bad("transition side has a non-positive source span"));
+                                if src_out <= src_in {
+                                    return Err(bad(
+                                        "transition side has a non-positive source span",
+                                    ));
+                                }
+                                if effects.iter().any(|e| !e.is_finite()) {
+                                    return Err(bad("effect has a non-finite parameter"));
+                                }
                             }
                         }
                     }
@@ -774,6 +865,41 @@ mod tests {
         Segment::Gap(Gap {
             duration: Seconds::from_integer(dur),
         })
+    }
+
+    #[test]
+    fn non_finite_effect_parameters_are_rejected() {
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        c.effects.push(Effect::Crop {
+            left: 10.0,
+            right: f64::NAN,
+            top: 0.0,
+            bottom: 0.0,
+        });
+        t.tracks[0].segments.push(Segment::Clip(c));
+        assert!(matches!(t.validate(), Err(TimelineError::Corrupt(_))));
+    }
+
+    #[test]
+    fn slicing_close_large_denominators_stays_valid() {
+        let mut t = Timeline::new();
+        let mut c = match clip(1, 2) {
+            Segment::Clip(c) => c,
+            _ => unreachable!(),
+        };
+        c.asset_in = Seconds::new(299, 15);
+        c.asset_out = Seconds::from_integer(20);
+        c.speed = Seconds::new(1, 1_000_000);
+        t.tracks[0].segments.push(Segment::Clip(c));
+        let sliced = t
+            .slice_range(Seconds::new(57_273, 1000), Seconds::new(59_202, 1000))
+            .unwrap();
+        assert_eq!(sliced.end(), Seconds::new(1_929, 1000));
+        sliced.validate().unwrap();
     }
 
     #[test]

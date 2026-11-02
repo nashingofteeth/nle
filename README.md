@@ -156,7 +156,8 @@ The `:` line is the CLI grammar, flag for flag:
 :track add video|audio        :track mute [N] / :track rm N
 :media ls|rm                  :cache prune [--days N] [--dry-run]
 :import / :add                :show / :seek T
-:export -o FILE               :detect FILE
+:export -o FILE [--preset T]  :detect FILE
+#        [--parallel N] (chunked export; opt-in)
 :edl-import / :otio-import    :help / :q
 ```
 
@@ -278,9 +279,24 @@ nile detect-edits edit.mov [--list]
 nile detect-edits edit.mov --append --track 2
 # One clip per detected shot; black spans become gaps. Tune with
 # --threshold/--min-shot/--black-min/--no-gaps/--video-only/--fps/--force.
-nile export -o final.mp4
-nile export -o fast.mp4 --encoder vaapi   # or qsv
-# VAAPI picks the first /dev/dri/renderD*; override with NLE_VAAPI_DEVICE.
+nile export -o final.mp4                   # balanced: x264 fast CRF 22
+nile export -o fast.mp4 --preset preview   # VAAPI 6M; CPU fallback if unavailable
+nile export -o master.mp4 --preset max     # x265 medium CRF 20
+# Preview uses the first /dev/dri/renderD*; override with NLE_VAAPI_DEVICE.
+# Explicit overrides: --encoder cpu|vaapi|qsv|x265|svt-av1, --crf N,
+# --encoder-preset P, --bitrate B.
+
+nile export -o final.mp4 --parallel 2      # chunked export, opt-in
+# Chunks split at cut points and transition midpoints, render independently,
+# stream-copy the video and encode the audio once at the final mux. Cached in
+# .nile/<stem>/cache/export; a repeat export reuses completed chunks. It falls
+# back to one encoder unless segment durations and source cuts are on the frame
+# grid. If a hardware chunk fails, the whole run retries on the CPU rather than
+# mixing encoder heads in one stream-copied file. Auto mode stays single-worker:
+# local tests showed no gain.
+
+nile bench [--runs N] [--preset preview|balanced|max] [--parallel N]
+# Renders to a temp file and reports wall time and effective fps.
 ```
 
 ### One-shot tools and logging
@@ -310,6 +326,7 @@ video/
         ├── clipboard.json
         └── cache/
             ├── proxy/
+            ├── export/
             └── black/
 ```
 
@@ -317,7 +334,8 @@ Multiple projects in one directory get separate `.nile/<stem>/` folders.
 Legacy adjacent `*.history.json` / `*.clipboard.json` files are copied into
 the state directory on first load; old `nle.json` projects still open with
 `--project nle.json`. The old global `~/.cache/nile` is no longer used, and
-`nile cache prune` only touches the current project’s cache.
+`nile cache prune` only touches the current project’s cache — proxy renders
+and completed export chunks.
 
 The TUI watches the project, history, and register; a shell edit or seek is
 adopted within a tick and is never overwritten unseen. Reloads wait while a

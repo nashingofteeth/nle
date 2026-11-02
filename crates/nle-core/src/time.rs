@@ -219,12 +219,12 @@ pub fn frames_to_seconds(frames: i64, fps: Seconds) -> Seconds {
 
 /// `a + b`, or `None` on overflow.
 pub(crate) fn checked_add(a: &Seconds, b: &Seconds) -> Option<Seconds> {
-    ratio_op(a, b, i64::checked_add)
+    ratio_op(a, b, i128::checked_add)
 }
 
 /// `a - b`, or `None` on overflow.
 pub(crate) fn checked_sub(a: &Seconds, b: &Seconds) -> Option<Seconds> {
-    ratio_op(a, b, i64::checked_sub)
+    ratio_op(a, b, i128::checked_sub)
 }
 
 /// `a / b`, or `None` on overflow (or a zero divisor).
@@ -232,19 +232,46 @@ pub(crate) fn checked_div(a: &Seconds, b: &Seconds) -> Option<Seconds> {
     if *b.numer() == 0 {
         return None;
     }
-    Some(Seconds::new(
-        a.numer().checked_mul(*b.denom())?,
-        a.denom().checked_mul(*b.numer())?,
-    ))
+    let n = (*a.numer() as i128).checked_mul(*b.denom() as i128)?;
+    let d = (*a.denom() as i128).checked_mul(*b.numer() as i128)?;
+    checked_ratio(n, d)
 }
 
-fn ratio_op(a: &Seconds, b: &Seconds, op: fn(i64, i64) -> Option<i64>) -> Option<Seconds> {
-    let n = op(
-        a.numer().checked_mul(*b.denom())?,
-        b.numer().checked_mul(*a.denom())?,
-    )?;
-    let d = a.denom().checked_mul(*b.denom())?;
-    Some(Seconds::new(n, d))
+fn ratio_op(a: &Seconds, b: &Seconds, op: fn(i128, i128) -> Option<i128>) -> Option<Seconds> {
+    let an = (*a.numer() as i128).checked_mul(*b.denom() as i128)?;
+    let bn = (*b.numer() as i128).checked_mul(*a.denom() as i128)?;
+    let n = op(an, bn)?;
+    let d = (*a.denom() as i128).checked_mul(*b.denom() as i128)?;
+    checked_ratio(n, d)
+}
+
+/// Reduce a rational computed in `i128` and fit it back into an `i64`
+/// numerator/denominator. The intermediate products can exceed `i64` even
+/// when the reduced result is tiny (two close times with large denominators),
+/// which used to make `validate` reject a perfectly ordinary sliced clip.
+fn checked_ratio(mut n: i128, mut d: i128) -> Option<Seconds> {
+    if d == 0 {
+        return None;
+    }
+    if d < 0 {
+        n = n.checked_neg()?;
+        d = d.checked_neg()?;
+    }
+    let g = gcd(n.unsigned_abs(), d.unsigned_abs());
+    if g > 1 {
+        n /= g as i128;
+        d /= g as i128;
+    }
+    Some(Seconds::new(i64::try_from(n).ok()?, i64::try_from(d).ok()?))
+}
+
+fn gcd(mut a: u128, mut b: u128) -> u128 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
 }
 
 /// Serde glue: Seconds ↔ "numerator/denominator" strings ("25/2").
@@ -314,6 +341,22 @@ mod tests {
         assert_eq!(format_seconds(&Seconds::new(25, 2)), "12.5");
         assert_eq!(format_seconds(&Seconds::from_integer(62)), "62");
         assert_eq!(format_seconds(&Seconds::new(1001, 30000)), "0.033367");
+    }
+
+    #[test]
+    fn checked_sub_reduces_large_intermediate_products() {
+        // Two close source times can have different large denominators. The
+        // cross-products exceed i64 even though their difference is tiny.
+        let a = Seconds::new(19_933_371_602, 1_000_000_000);
+        let b = Seconds::new(19_933_369_673, 1_000_000_000);
+        assert_eq!(
+            checked_sub(&a, &b),
+            Some(Seconds::new(1_929, 1_000_000_000))
+        );
+        assert_eq!(
+            checked_add(&b, &Seconds::new(1_929, 1_000_000_000)),
+            Some(a)
+        );
     }
 
     #[test]

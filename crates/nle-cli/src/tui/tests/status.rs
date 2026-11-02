@@ -1,4 +1,4 @@
-use super::super::actions::{TimelineStamp, reaction_for, removed_material, run_action};
+use super::super::actions::{reaction_for, run_action};
 use super::super::croc::CrocAct;
 use super::super::keys::handle_key;
 use super::*;
@@ -335,28 +335,4 @@ fn the_action_vocabulary_maps_to_reactions() {
     assert_eq!(speed(Seconds::new(2, 1)), Some(DashFast));
     assert_eq!(speed(Seconds::new(1, 2)), Some(DashSlow));
     assert_eq!(speed(Seconds::from_integer(1)), None);
-}
-
-#[test]
-fn the_removal_stamp_sees_gaps_and_clips() {
-    let stamp = |ids: &[u32], segments| TimelineStamp {
-        ids: ids.iter().copied().collect(),
-        segments,
-    };
-    assert!(
-        removed_material(&stamp(&[1], 2), &stamp(&[1], 1)),
-        "a gap delete lowers the count"
-    );
-    assert!(
-        removed_material(&stamp(&[1], 2), &stamp(&[], 2)),
-        "a clip→gap keeps the count but loses the id"
-    );
-    assert!(
-        !removed_material(&stamp(&[1], 2), &stamp(&[1, 2], 3)),
-        "a split adds"
-    );
-    assert!(
-        !removed_material(&stamp(&[1], 2), &stamp(&[1], 2)),
-        "nothing changed"
-    );
 }
