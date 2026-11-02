@@ -404,7 +404,14 @@ fn snap(fps: Option<&Seconds>, t: Seconds) -> Seconds {
 fn chunk_hash(project: &Project, spec: &ExportSpec, chunk: &Chunk) -> u64 {
     let mut h = DefaultHasher::new();
     EXPORT_CACHE_VERSION.hash(&mut h);
-    serde_json::to_vec(project).unwrap_or_default().hash(&mut h);
+    // The playhead is session state — the TUI rewrites it on every seek and
+    // no render reads it — so exclude it or every chunk is invalidated by a
+    // move of the cursor.
+    let mut snapshot = project.clone();
+    snapshot.playhead = Seconds::from_integer(0);
+    serde_json::to_vec(&snapshot)
+        .unwrap_or_default()
+        .hash(&mut h);
     // Project JSON has paths, not source content. Include size/mtime so a
     // replaced source invalidates its chunks too.
     for asset in &project.media {
@@ -662,6 +669,24 @@ mod tests {
             chunk_hash(&p, &balanced, &two)
         );
         assert_ne!(chunk_hash(&p, &balanced, &one), chunk_hash(&p, &max, &one));
+    }
+
+    #[test]
+    fn moving_the_playhead_does_not_invalidate_chunks() {
+        let p = project();
+        let spec = ExportOptions::default().spec(Path::new("/tmp/out.mp4"));
+        let one = Chunk {
+            a: Seconds::from_integer(0),
+            b: Seconds::from_integer(2),
+            pre: Seconds::from_integer(0),
+            post: Seconds::from_integer(2),
+        };
+        // The TUI persists the playhead on every seek; no render reads it, so
+        // it must not be part of the cache key.
+        let mut moved = p.clone();
+        moved.set_playhead(1.5);
+        assert_ne!(moved.playhead, p.playhead);
+        assert_eq!(chunk_hash(&p, &spec, &one), chunk_hash(&moved, &spec, &one));
     }
 
     #[test]

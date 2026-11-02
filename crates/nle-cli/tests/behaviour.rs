@@ -710,6 +710,43 @@ fn parallel_export_splits_at_a_transition_midpoint() {
 }
 
 #[test]
+fn a_playhead_move_keeps_the_parallel_chunks_cached() {
+    use std::os::unix::fs::MetadataExt;
+
+    // The TUI persists the playhead on every seek; it is session state, not
+    // render state, so it must not invalidate the chunk cache.
+    let s = Sandbox::new();
+    s.base();
+    s.ok(&["delete", "--at", "5", "--ripple"]);
+    s.ok(&["add", "red.mp4", "--at", "4", "--in", "0", "--out", "2"]);
+    s.ok(&["split", "--at", "3"]);
+    s.ok(&["transition", "--at", "3", "--frames", "15"]);
+    s.ok(&["export", "-o", "one.mp4", "--parallel", "2"]);
+
+    let dir = s.cache_dir().join("export");
+    // The inode changes when a chunk is re-rendered (temp file + rename), so
+    // comparing it is immune to filesystem timestamp granularity.
+    let chunks = || {
+        let mut found: Vec<(String, u64)> = fs::read_dir(&dir)
+            .expect("chunk cache")
+            .map(|entry| {
+                let entry = entry.expect("cache entry");
+                let ino = entry.metadata().expect("chunk metadata").ino();
+                (entry.file_name().to_string_lossy().into_owned(), ino)
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    let before = chunks();
+    assert_eq!(before.len(), 2, "expected two chunks: {before:?}");
+
+    s.ok(&["seek", "1"]);
+    s.ok(&["export", "-o", "two.mp4", "--parallel", "2"]);
+    assert_eq!(chunks(), before, "a seek rebuilt the chunks");
+}
+
+#[test]
 fn a_fade_at_a_clip_gap_seam_exports_through_black() {
     let s = Sandbox::new();
     s.base();
